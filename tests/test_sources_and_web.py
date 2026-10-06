@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 
 import pytest
@@ -66,6 +67,14 @@ def test_root_management(corpus_copy, make_cfg, tmp_path):
     assert "No results" in DocTools(cfg).search("ventouses", mode="keyword")
     stats = run_index(cfg, progress=quiet)
     assert stats.removed > 0 and names(cfg) == set()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="drive letters are Windows-only")
+def test_drive_relative_paths_mean_drive_root():
+    assert sources.clean_path("Z:") == "Z:\\"
+    assert sources.clean_path("Z:Projets") == "Z:\\Projets"
+    assert sources.clean_path(' "Z:\\Projets\\" ') == "Z:\\Projets"
+    assert sources.clean_path("\\\\srv\\share\\Docs") == "\\\\srv\\share\\Docs"
 
 
 @pytest.fixture

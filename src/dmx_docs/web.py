@@ -196,7 +196,7 @@ def create_app(cfg: Config, allowed_hosts: set[str] | None = None) -> FastAPI:
         if not path:
             return {"path": None, "parent": None,
                     "dirs": [{"name": d, "path": d, "excluded": False} for d in _drives()]}
-        path = os.path.normpath(path)
+        path = sources.clean_path(path)  # 'Z:' must list Z:\, not the drive's current folder
         try:
             with os.scandir(path) as it:
                 names = sorted((e.name, e.path) for e in it if e.is_dir() and not e.name.startswith((".", "$")))

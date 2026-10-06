@@ -49,18 +49,21 @@ def _changed(con) -> None:
     store.set_meta(con, "sources_changed_at", time.time())
 
 
-def _clean(path: str) -> str:
+def clean_path(path: str) -> str:
     path = path.strip().strip('"').strip()
     if not path:
         raise ValueError("Empty path")
     path = os.path.normpath(path)
-    if os.path.splitdrive(path)[1] in ("", "."):  # 'Z:' means the root of the drive
-        path = os.path.splitdrive(path)[0] + os.sep
+    drive, rest = os.path.splitdrive(path)
+    if drive and not rest.startswith(os.sep):
+        # 'Z:' and 'Z:Projets' are relative to the drive's current folder on Windows;
+        # they always mean the drive root here.
+        path = os.path.normpath(drive + os.sep + ("" if rest == "." else rest))
     return path
 
 
 def add_root(con, path: str) -> str:
-    path = _clean(path)
+    path = clean_path(path)
     if not os.path.isdir(path):
         raise ValueError(f"Folder not found or not reachable: {path}")
     key = store.path_key(path)
@@ -88,7 +91,7 @@ def remove_root(con, path: str) -> None:
 
 
 def set_excluded(con, path: str, excluded: bool) -> None:
-    path = _clean(path)
+    path = clean_path(path)
     key = store.path_key(path)
     if excluded:
         roots = [r["path_key"] for r in con.execute("SELECT path_key FROM roots")]
