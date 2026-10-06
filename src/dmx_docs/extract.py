@@ -58,6 +58,8 @@ def extract_file(path: str, options: dict | None = None) -> Extracted:
     options = options or {}
     ext = os.path.splitext(path)[1].lower()
     try:
+        if os.path.getsize(path) == 0:  # e.g. 0-byte placeholders created from folder templates
+            return Extracted(status="empty")
         if ext == ".pdf":
             return extract_pdf(path, options.get("max_pdf_pages", 3000))
         if ext == ".docx":

@@ -35,7 +35,7 @@ class Config:
     embedding_model: str = "intfloat/multilingual-e5-large"
     query_prefix: str = "query: "
     passage_prefix: str = "passage: "
-    embed_batch_size: int = 16
+    embed_batch_size: int = 1
     embed_threads: int | None = None
 
     max_read_chars: int = 40000

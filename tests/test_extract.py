@@ -70,6 +70,13 @@ def test_doc_conversion_with_word(corpus, tmp_path):
     assert "AMX-220" in "\n".join(t for _, t in r.pages)
 
 
+@pytest.mark.parametrize("name", ["placeholder.docx", "placeholder.pdf", "placeholder.doc"])
+def test_zero_byte_file_is_empty_not_error(tmp_path, name):
+    f = tmp_path / name
+    f.write_bytes(b"")
+    assert extract_file(str(f)).status == "empty"
+
+
 def test_doc_without_converter(corpus, tmp_path):
     f = tmp_path / "x.doc"
     f.write_bytes(b"whatever")

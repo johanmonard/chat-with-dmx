@@ -58,7 +58,8 @@ model = 'intfloat/multilingual-e5-large'
 # passage_prefix = ''
 query_prefix = 'query: '
 passage_prefix = 'passage: '
-batch_size = 16
+# Texts per model call. 1 is fastest on laptop CPUs (measured 3x faster than 16 on an i7-1265U).
+batch_size = 1
 # CPU threads used by the model (default: all cores).
 # threads = 8
 

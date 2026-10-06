@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import time
 import unicodedata
@@ -49,6 +50,8 @@ class Embedder:
             self._model = HashEmbedder(int(model.split(":", 1)[1] or 256))
             self._fast = False
         else:
+            # Windows without Developer Mode has no symlinks; the HF cache copies files instead.
+            os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
             from fastembed import TextEmbedding
 
             cfg.models_dir.mkdir(parents=True, exist_ok=True)
