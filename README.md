@@ -1,0 +1,183 @@
+# chat-with-dmx
+
+Chat with the documentation stored on the file servers (PDF and Word files) using
+**Claude Desktop** (or Claude Code) and your normal Claude subscription.
+
+```
+ File servers (Z:\, Y:\ ...)                         Claude Desktop
+        │                                                  │  asks questions, calls tools
+        ▼                                                  ▼
+ dmx-docs index ──► SQLite index ◄──── dmx-docs serve (MCP server, runs on your PC)
+ (text, pages,      (keyword index      tools: search · find_files · list_folder
+  file metadata)     + embeddings)             read_document · find_in_document · index_status
+ dmx-docs embed ──►  (by-meaning search)
+```
+
+* **Indexing** runs on your PC: it reads every PDF/Word file under the root folders,
+  extracts the text page by page and stores it in a local SQLite database with a
+  keyword index (accent-insensitive). `embed` adds a multilingual embedding per text
+  chunk so that search also works *by meaning* (French, English, German, Spanish...).
+* **Chatting** happens in Claude Desktop. Claude doesn't see the whole document base at once.
+  It researches the question with the tools: it searches, opens the relevant documents,
+  reads the pages around the matches, explores neighbouring folders, and answers
+  with the file path and page of each source.
+* Everything except the conversation with Claude stays on your PC. The extracts Claude
+  reads are sent to Claude as part of the chat.
+
+> **Privacy:** on a Pro/Max plan, check *Claude → Settings → Privacy* and turn off the
+> option that allows your chats to be used to improve Claude. Chats are then kept
+> 30 days and not used for training.
+
+## 1. Install (once)
+
+1. Install **Python 3.12** from <https://www.python.org/downloads/windows/>. In the
+   installer, tick **"Add python.exe to PATH"**.
+2. Get this repository, e.g. into `C:\dmx\chat-with-dmx` (git clone or *Code → Download ZIP*).
+3. Open **PowerShell** in that folder and run:
+
+   ```powershell
+   py -3.12 -m venv .venv
+   .venv\Scripts\pip install -e .
+   ```
+
+4. Optional, for old `.doc` files (Word 97-2003): they are converted automatically with
+   **LibreOffice** if it is installed (<https://www.libreoffice.org>), otherwise with
+   **Microsoft Word** if it is installed. Without either, `.doc` files are just skipped.
+
+## 2. Configure
+
+```powershell
+copy config.example.toml config.toml
+notepad config.toml
+```
+
+Set at least:
+
+* `roots`: the folders to index, e.g. `['Z:\', 'Y:\Documentation']`. Start with **one
+  representative folder** for the pilot, check the answers, then add the rest.
+* `data_dir`: where the index is stored, on a **local disk** (SSD if possible), e.g.
+  `'C:\dmx-docs-data'`. Plan for roughly 1–2× the amount of extracted text, plus about
+  4 KB per chunk for embeddings.
+
+## 3. Build the index
+
+```powershell
+.venv\Scripts\dmx-docs index
+```
+
+* The first run reads every file, which can take hours for a large share. It prints progress
+  every 15 s. You can **stop it at any time (Ctrl+C) and run it again**: it continues where
+  it stopped.
+* Later runs only process new or modified files and remove deleted ones, so they are quick.
+* Files that could not be read (corrupt, password-protected, scanned PDFs without text)
+  are counted in the summary. Details are in `data_dir\logs`. `--retry-errors` tries them again.
+
+Then compute the embeddings for by-meaning search:
+
+```powershell
+.venv\Scripts\dmx-docs embed
+```
+
+* The first time, it downloads the multilingual model `intfloat/multilingual-e5-large`
+  (~2.2 GB) into `data_dir\models`.
+* This is the slowest step on a PC without a graphics card. Run a short test first to see
+  the speed on your machine: `dmx-docs embed --max-minutes 10` prints the rate and the
+  estimated remaining time. Then let it run overnight. It is also resumable.
+* **Keyword search works without embeddings**, so you can start chatting as soon as `index`
+  is done. Search gets better as embeddings are added.
+
+Check from the command line:
+
+```powershell
+.venv\Scripts\dmx-docs status
+.venv\Scripts\dmx-docs search "préhenseur ventouses cadence"
+.venv\Scripts\dmx-docs read "Z:\Projets\P1234\Spec.pdf" --start-page 3
+```
+
+## 4. Connect Claude Desktop
+
+1. Install **Claude Desktop** (<https://claude.ai/download>) and sign in with your account.
+2. Open *Settings → Developer → Edit Config*. This opens `claude_desktop_config.json`.
+   Add the server, adapting the two paths:
+
+   ```json
+   {
+     "mcpServers": {
+       "dmx-docs": {
+         "command": "C:\\dmx\\chat-with-dmx\\.venv\\Scripts\\dmx-docs.exe",
+         "args": ["--config", "C:\\dmx\\chat-with-dmx\\config.toml", "serve"]
+       }
+     }
+   }
+   ```
+
+   (In JSON, every backslash is written twice.)
+3. Quit Claude Desktop completely (also from the system tray) and start it again. The
+   *dmx-docs* tools appear under the tools (🔨/⚙) icon of the chat box.
+4. Ask a question, for example:
+   *"Quel préhenseur a été utilisé sur la cellule du projet P1234 et pourquoi a-t-il été changé ?"*
+   Claude asks permission the first time it uses each tool. You can allow them permanently.
+
+**Claude Code** (alternative): from the repository folder, run
+
+```powershell
+claude mcp add dmx-docs -- C:\dmx\chat-with-dmx\.venv\Scripts\dmx-docs.exe --config C:\dmx\chat-with-dmx\config.toml serve
+```
+
+### Tips for good answers
+
+* Ask precise questions and mention project numbers, clients or machine types when you
+  know them.
+* Ask Claude to *"read the documents"* or *"check in the full document"* if an answer
+  seems based on excerpts only.
+* Sources are cited as `path (p. N)`. For Word files, page numbers are approximate.
+* Prepare 20–30 real questions with known answers and use them to judge the quality
+  whenever something changes (more folders, another embedding model...).
+
+## 5. Keep the index up to date
+
+`scripts\update_index.bat` runs `index` and then `embed` (5 h at most). Schedule it every night
+with the **Windows Task Scheduler** (*Create Basic Task → Daily → Start a program →*
+`C:\dmx\chat-with-dmx\scripts\update_index.bat`).
+
+> Mapped drives (`Z:\`) exist only in your logged-on session. If the task must run while you
+> are logged off, use UNC paths (`\\server\share\...`) in `roots`.
+
+## Reference
+
+| Command | What it does |
+|---|---|
+| `dmx-docs index [--retry-errors]` | Crawl roots, extract text, update the keyword index |
+| `dmx-docs embed [--max-minutes N] [--reset]` | Add embeddings to new chunks (`--reset` after changing model) |
+| `dmx-docs status` | Counts per status/type, embedding coverage |
+| `dmx-docs search "..." [--mode keyword\|semantic\|hybrid] [--folder ...]` | Test a search |
+| `dmx-docs read PATH [--start-page N]` | Show a document as Claude sees it |
+| `dmx-docs serve` | MCP server (started by Claude Desktop, not by hand) |
+
+All commands take `--config path\to\config.toml` (default: `config.toml` in the current
+folder, or the `DMX_DOCS_CONFIG` environment variable).
+
+**How it works**
+
+* Extraction: PyMuPDF (PDF, page by page), python-docx (paragraphs, headings, tables;
+  pages follow Word's last saved page breaks when available), `.doc` converted to `.docx`.
+  Extraction runs in several processes. A file that crashes a worker is retried alone and
+  marked as an error.
+* Chunks: ~1,200–2,000 characters, never spanning two pages, so every hit has a page number.
+* Keyword search: SQLite FTS5 with BM25 ranking, case- and accent-insensitive. Codes like
+  `MN-114` are matched as phrases.
+* Semantic search: `multilingual-e5-large` via fastembed (ONNX, CPU). Vectors are kept in RAM
+  for fast search, about 0.1 s per million chunks.
+* Hybrid: both result lists are fused with Reciprocal Rank Fusion, with at most 3 excerpts
+  per document.
+* The tools are read-only and refuse paths outside the configured roots.
+
+**Development**
+
+```bash
+pip install -e ".[test]"
+pytest
+```
+
+Note: PyMuPDF is AGPL-licensed, which is fine for internal use. Review the license
+before distributing this software outside the company.

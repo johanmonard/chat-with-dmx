@@ -1,0 +1,66 @@
+# dmx-docs configuration
+# Copy this file to config.toml and adapt it.
+#
+# Windows paths: use single quotes (literal strings) so backslashes are kept
+# as-is, e.g. 'Z:\Projets'. Forward slashes ('Z:/Projets') work too.
+
+[index]
+# Root folders to crawl (recursively). Mapped drives or UNC paths.
+roots = [
+    'Z:\',
+    # 'Y:\Documentation',
+    # '\\server2\share\Projets',
+]
+
+# Where the index (SQLite database, embedding models, logs) is stored.
+# Use a local disk (SSD), not a network share. Relative paths are relative
+# to this config file.
+data_dir = 'C:\dmx-docs-data'
+
+# File types to index. '.doc' (Word 97-2003) needs LibreOffice or Microsoft
+# Word installed for conversion; remove it from the list to skip those files.
+extensions = ['.pdf', '.docx', '.doc']
+
+# Glob patterns to skip. A pattern without '/' is matched against the file
+# or folder name; a pattern with '/' is matched against the full path
+# (written with forward slashes). Matching is case-insensitive.
+exclude = [
+    '~$*',                      # Office temporary/lock files
+    '.*',                       # hidden files and folders
+    '$RECYCLE.BIN',
+    'System Volume Information',
+    # '*/Archives/*',
+]
+
+# Files bigger than this are skipped.
+max_file_mb = 300
+# Only the first N pages of very large PDFs are indexed.
+max_pdf_pages = 3000
+# Parallel extraction processes (default: number of CPU cores - 1, max 8).
+# workers = 6
+
+# How to convert old .doc files: 'auto' (LibreOffice, then Word), 'libreoffice',
+# 'word', or 'none'.
+doc_converter = 'auto'
+# libreoffice_path = 'C:\Program Files\LibreOffice\program\soffice.exe'
+
+[embeddings]
+# Semantic ("by meaning") search. Keyword search works without it, so you can
+# index first and run `dmx-docs embed` later (e.g. overnight).
+enabled = true
+# Multilingual model (French, English, German, Spanish, ...). Downloaded once
+# (~2.2 GB) into data_dir/models on first use.
+model = 'intfloat/multilingual-e5-large'
+# Faster but less accurate alternative (128-token limit per chunk):
+# model = 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
+# query_prefix = ''
+# passage_prefix = ''
+query_prefix = 'query: '
+passage_prefix = 'passage: '
+batch_size = 16
+# CPU threads used by the model (default: all cores).
+# threads = 8
+
+[server]
+# Maximum characters returned by one read_document call.
+max_read_chars = 40000
