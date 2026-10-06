@@ -14,6 +14,8 @@ dependencies = [
     "mcp>=1.2",
     "numpy>=1.26",
     "fastembed>=0.4",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
     "pywin32>=306; sys_platform == 'win32'",
 ]
 
@@ -25,6 +27,9 @@ dmx-docs = "dmx_docs.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+dmx_docs = ["web/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

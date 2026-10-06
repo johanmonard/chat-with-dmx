@@ -17,8 +17,12 @@ def _default_workers() -> int:
 
 @dataclass
 class Config:
+    # Root folders and excluded folders are managed on the configuration page
+    # (stored in the index database, see sources.py); `roots` in config.toml
+    # only seeds them on first use.
     roots: list[str]
     data_dir: Path
+    excluded_dirs: list[str] = field(default_factory=list)
     extensions: list[str] = field(default_factory=lambda: [".pdf", ".docx", ".doc"])
     exclude: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDES))
     max_file_mb: float = 300
@@ -35,11 +39,36 @@ class Config:
     embed_threads: int | None = None
 
     max_read_chars: int = 40000
+    config_path: Path | None = None
 
     def __post_init__(self) -> None:
         self.extensions = [e.lower() if e.startswith(".") else "." + e.lower() for e in self.extensions]
+        self.set_sources(self.roots, self.excluded_dirs, self.exclude)
+
+    def set_sources(self, roots: list[str], excluded_dirs: list[str], patterns: list[str]) -> None:
+        from .store import path_key
+
+        self.roots = list(roots)
+        self.excluded_dirs = list(excluded_dirs)
+        self.exclude = list(patterns)
+        self.root_keys = [path_key(r) for r in self.roots]
+        self.excluded_keys = {path_key(d) for d in self.excluded_dirs}
         self._name_patterns = [p.lower() for p in self.exclude if "/" not in p]
         self._path_patterns = [p.lower() for p in self.exclude if "/" in p]
+
+    def is_excluded_dir(self, key: str) -> bool:
+        """True if the folder (path_key) or one of its parents is excluded."""
+        if not self.excluded_keys:
+            return False
+        from .store import is_under
+
+        return any(is_under(key, ex) for ex in self.excluded_keys)
+
+    def allows(self, key: str) -> bool:
+        """True if a path (path_key) is inside a root and not in an excluded folder."""
+        from .store import is_under
+
+        return any(is_under(key, rk) for rk in self.root_keys) and not self.is_excluded_dir(key)
 
     @property
     def db_path(self) -> Path:
@@ -80,13 +109,11 @@ def load_config(path: str | os.PathLike) -> Config:
     srv = raw.get("server", {})
 
     roots = idx.get("roots") or []
-    if not roots:
-        raise ValueError(f"{path}: [index] roots is empty")
     data_dir = Path(idx.get("data_dir", "data"))
     if not data_dir.is_absolute():
         data_dir = (path.parent / data_dir).resolve()
 
-    kwargs: dict = {"roots": [str(r) for r in roots], "data_dir": data_dir}
+    kwargs: dict = {"roots": [str(r) for r in roots], "data_dir": data_dir, "config_path": path.resolve()}
     for key in ("extensions", "exclude", "max_file_mb", "max_pdf_pages", "workers",
                 "doc_converter", "libreoffice_path"):
         if key in idx:

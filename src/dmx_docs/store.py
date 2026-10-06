@@ -50,6 +50,19 @@ CREATE TABLE IF NOT EXISTS vectors (
     vec       BLOB NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS roots (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    path      TEXT NOT NULL,
+    path_key  TEXT NOT NULL UNIQUE,
+    added_at  REAL
+);
+CREATE TABLE IF NOT EXISTS excluded_dirs (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    path      TEXT NOT NULL,
+    path_key  TEXT NOT NULL UNIQUE,
+    added_at  REAL
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key    TEXT PRIMARY KEY,
     value  TEXT

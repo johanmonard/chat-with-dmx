@@ -77,7 +77,8 @@ def passage_text(name: str, title: str | None, text: str) -> str:
     return f"{header}\n{text}"[:EMBED_TEXT_CHARS]
 
 
-def run_embed(cfg: Config, max_minutes: float | None = None, reset: bool = False, progress=print) -> int:
+def run_embed(cfg: Config, max_minutes: float | None = None, reset: bool = False, progress=print,
+              should_stop=None) -> int:
     if not cfg.embeddings_enabled:
         progress("Embeddings are disabled in the configuration ([embeddings] enabled = false).")
         return 0
@@ -115,6 +116,9 @@ def run_embed(cfg: Config, max_minutes: float | None = None, reset: bool = False
     while True:
         if deadline and time.monotonic() > deadline:
             progress("Time budget reached, stopping (run again to continue).")
+            break
+        if should_stop is not None and should_stop():
+            progress("Stopped (run again to continue).")
             break
         rows = con.execute(
             """SELECT c.id, c.text, d.name, d.title FROM chunks c JOIN docs d ON d.id = c.doc_id

@@ -33,8 +33,11 @@ def test_docx_headings_and_tables(corpus):
     assert "Amortisseur | AMX-220" in text
 
 
-def test_scan_and_corrupt(corpus):
+def test_scan_and_corrupt(corpus, tmp_path):
     assert extract_file(str(corpus / "Scans" / "scan.pdf")).status == "no_text"
+    from conftest import make_pdf
+    make_pdf(str(tmp_path / "short.pdf"), ["Remplacer les ventouses toutes les 500 h."])
+    assert extract_file(str(tmp_path / "short.pdf")).status == "ok"  # short, but real text
     r = extract_file(str(corpus / "Broken" / "corrupt.pdf"))
     assert r.status == "error" and r.error
 
@@ -61,7 +64,7 @@ def test_paginate_uses_page_break_markers():
 
 def test_example_config_parses():
     cfg = load_config(Path(__file__).parent.parent / "config.example.toml")
-    assert cfg.roots == ["Z:\\"]
+    assert cfg.roots == []
     assert cfg.extensions == [".pdf", ".docx", ".doc"]
     assert cfg.is_excluded("~$doc.docx", "Z:/~$doc.docx")
     assert not cfg.is_excluded("Rapport.docx", "Z:/Rapport.docx")

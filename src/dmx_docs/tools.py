@@ -9,7 +9,7 @@ import os
 import re
 from datetime import datetime
 
-from . import store
+from . import sources, store
 from .config import Config
 from .extract import extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
@@ -39,16 +39,19 @@ class DocTools:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.searcher = Searcher(cfg)
-        self.root_keys = [store.path_key(r) for r in cfg.roots]
 
     def _con(self):
-        return store.connect(self.cfg.db_path, create=False)
+        con = store.connect(self.cfg.db_path, create=False)
+        # Root/excluded folders may have changed on the configuration page.
+        sources.refresh(self.cfg, con)
+        return con
 
     def _resolve(self, path: str) -> tuple[str, str]:
         path = path.strip().strip('"')
         key = store.path_key(path)
-        if not any(store.is_under(key, rk) for rk in self.root_keys):
-            raise ValueError(f"'{path}' is outside the indexed root folders: {', '.join(self.cfg.roots)}")
+        if not self.cfg.allows(key):
+            raise ValueError(f"'{path}' is outside the indexed folders (roots: {', '.join(self.cfg.roots)}; "
+                             "some subfolders may be excluded)")
         return path, key
 
     # ------------------------------------------------------------ search
@@ -56,13 +59,14 @@ class DocTools:
                modified_after: str | None = None, limit: int = 10, mode: str = "hybrid") -> str:
         if mode not in ("hybrid", "keyword", "semantic"):
             raise ValueError("mode must be 'hybrid', 'keyword' or 'semantic'")
-        if folder:
-            folder, _ = self._resolve(folder)
         limit = max(1, min(int(limit), 30))
         con = self._con()
         try:
+            if folder:
+                folder, _ = self._resolve(folder)
             hits = self.searcher.search(con, query, limit=limit, folder=folder, file_type=file_type,
-                                        modified_after=modified_after, mode=mode)
+                                        modified_after=modified_after, mode=mode,
+                                        allowed=self.cfg.allows)
         finally:
             con.close()
         notes = []
@@ -90,18 +94,18 @@ class DocTools:
             return "Please give at least one word of the file or folder name."
         fts = " AND ".join(t + "*" if not t.endswith("*") else t for t in fts.split(" AND "))
         clauses, params = [], []
-        if folder:
-            _, key = self._resolve(folder)
-            prefix = key.rstrip(os.sep) + os.sep
-            clauses.append("substr(d.path_key, 1, ?) = ?")
-            params += [len(prefix), prefix]
-        where = " AND ".join(["docs_fts MATCH ?"] + clauses)
         con = self._con()
         try:
-            rows = con.execute(
-                f"""SELECT d.path, d.ext, d.size, d.mtime, d.n_pages, d.status FROM docs_fts f
+            if folder:
+                _, key = self._resolve(folder)
+                prefix = key.rstrip(os.sep) + os.sep
+                clauses.append("substr(d.path_key, 1, ?) = ?")
+                params += [len(prefix), prefix]
+            where = " AND ".join(["docs_fts MATCH ?"] + clauses)
+            rows = [r for r in con.execute(
+                f"""SELECT d.path, d.path_key, d.ext, d.size, d.mtime, d.n_pages, d.status FROM docs_fts f
                     JOIN docs d ON d.id = f.rowid WHERE {where} ORDER BY f.rank LIMIT ?""",
-                [fts] + params + [limit]).fetchall()
+                [fts] + params + [limit * 3]) if self.cfg.allows(r["path_key"])][:limit]
         finally:
             con.close()
         if not rows:
@@ -119,13 +123,17 @@ class DocTools:
         con = self._con()
         try:
             if not path:
+                if not self.cfg.roots:
+                    return "No root folder is configured yet."
                 lines = ["Indexed root folders:"]
-                for root, rk in zip(self.cfg.roots, self.root_keys):
+                for root, rk in zip(self.cfg.roots, self.cfg.root_keys):
                     prefix = rk.rstrip(os.sep) + os.sep
                     n = con.execute("SELECT count(*) FROM docs WHERE substr(path_key, 1, ?) = ?",
                                     (len(prefix), prefix)).fetchone()[0]
                     state = "reachable" if os.path.isdir(root) else "NOT reachable"
                     lines.append(f"- {root} ({n} indexed documents, {state})")
+                if self.cfg.excluded_dirs:
+                    lines.append("Excluded folders: " + ", ".join(self.cfg.excluded_dirs))
                 return "\n".join(lines)
             path, key = self._resolve(path)
             indexed = {r["path_key"]: r for r in con.execute(
@@ -150,7 +158,8 @@ class DocTools:
                 continue
             try:
                 if e.is_dir():
-                    folders.append(f"[folder] {e.name}")
+                    if not self.cfg.is_excluded_dir(store.path_key(e.path)):
+                        folders.append(f"[folder] {e.name}")
                     continue
                 st = e.stat()
             except OSError:
@@ -275,6 +284,7 @@ class DocTools:
                  f"Chunks: {chunks[0]}, with embeddings: {chunks[1] or 0}"
                  + (f" (model {model})" if model else ""),
                  f"Last full index run finished: {_date(float(last)) if last else 'never'}",
-                 "Roots: " + ", ".join(self.cfg.roots),
+                 "Roots: " + (", ".join(self.cfg.roots) or "none"),
+                 "Excluded folders: " + (", ".join(self.cfg.excluded_dirs) or "none"),
                  f"Indexed file types: {', '.join(self.cfg.extensions)} (other types, e.g. Excel, are not searchable yet)"]
         return "\n".join(lines)

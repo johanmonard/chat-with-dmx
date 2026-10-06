@@ -256,7 +256,7 @@ class Searcher:
 
     def search(self, con, query: str, limit: int = 10, folder: str | None = None,
                file_type: str | None = None, modified_after: str | None = None,
-               mode: str = "hybrid") -> list[Hit]:
+               mode: str = "hybrid", allowed=None) -> list[Hit]:
         clauses, params = self._filters(folder, file_type, modified_after)
         filtered = bool(clauses)
         ranked: dict[str, list[int]] = {}
@@ -281,11 +281,14 @@ class Searcher:
             batch = order[start:start + 500]
             where = " AND ".join([f"c.id IN ({','.join('?' * len(batch))})"] + clauses)
             rows = {r["id"]: r for r in con.execute(
-                f"""SELECT c.id, c.doc_id, c.page_no, c.text, d.path, d.ext, d.mtime, d.n_pages
+                f"""SELECT c.id, c.doc_id, c.page_no, c.text, d.path, d.path_key, d.ext, d.mtime, d.n_pages
                     FROM chunks c JOIN docs d ON d.id = c.doc_id WHERE {where}""", batch + params)}
             for cid in batch:
                 r = rows.get(cid)
                 if r is None or per_doc.get(r["doc_id"], 0) >= MAX_PER_DOC:
+                    continue
+                # Excluded or removed folders are hidden even before the next scan purges them.
+                if allowed is not None and not allowed(r["path_key"]):
                     continue
                 per_doc[r["doc_id"]] = per_doc.get(r["doc_id"], 0) + 1
                 hits.append(Hit(cid, r["doc_id"], r["path"], r["ext"], r["mtime"], r["page_no"],

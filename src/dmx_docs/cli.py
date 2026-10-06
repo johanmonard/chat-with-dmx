@@ -1,4 +1,4 @@
-"""Command line: dmx-docs index | embed | status | search | read | serve."""
+"""Command line: dmx-docs web | index | embed | status | search | read | serve."""
 
 from __future__ import annotations
 
@@ -33,6 +33,12 @@ def main(argv: list[str] | None = None) -> None:
                         help="path to config.toml (default: ./config.toml or $DMX_DOCS_CONFIG)")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    p = sub.add_parser("web", help="open the configuration page (folders, scans, status)")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--host", default="127.0.0.1",
+                   help="network interface (default: this computer only)")
+    p.add_argument("--no-browser", action="store_true", help="don't open the browser")
+
     p = sub.add_parser("index", help="crawl the root folders and update the index")
     p.add_argument("--retry-errors", action="store_true", help="re-process files that failed before")
 
@@ -61,6 +67,13 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(f"config file not found: {config_path.resolve()} "
                      "(copy config.example.toml to config.toml and edit it)")
     cfg = load_config(config_path)
+    from .sources import refresh
+    refresh(cfg)  # root/excluded folders are managed on the configuration page
+
+    if args.command == "web":
+        from .web import run_web
+        run_web(cfg, host=args.host, port=args.port, open_browser=not args.no_browser)
+        return
 
     if args.command == "serve":
         from .server import serve

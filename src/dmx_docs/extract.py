@@ -28,8 +28,9 @@ except Exception:
 
 # Approximate size of a Word "page" when the file has no page-break markers.
 DOCX_PAGE_CHARS = 3000
-# Below this many characters, a PDF is considered to have no text layer (scan).
-MIN_PDF_CHARS = 100
+# Below this many characters per page on average, a PDF is considered to have
+# no text layer (a scan). Scans usually have none at all, or a stray header.
+MIN_PDF_CHARS_PER_PAGE = 15
 
 
 @dataclass
@@ -83,7 +84,7 @@ def extract_pdf(path: str, max_pages: int = 3000) -> Extracted:
                 pages.append((i + 1, text))
     if n_pages == 0:
         return Extracted(status="empty", n_pages=0, title=title)
-    if sum(len(t) for _, t in pages) < MIN_PDF_CHARS:
+    if sum(len(t) for _, t in pages) < MIN_PDF_CHARS_PER_PAGE * min(n_pages, max_pages):
         return Extracted(status="no_text", pages=pages, n_pages=n_pages, title=title,
                          error="no text layer (probably a scan, would need OCR)")
     return Extracted(status="ok", pages=pages, n_pages=n_pages, title=title)

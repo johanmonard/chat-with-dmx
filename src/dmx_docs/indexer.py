@@ -8,21 +8,30 @@ interrupted run simply continues where it stopped the next time.
 from __future__ import annotations
 
 import logging
+import multiprocessing
 import os
 import time
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 
-from . import store
+from . import sources, store
 from .chunking import make_chunks
 from .config import Config
 from .extract import Extracted, extract_file
 
 log = logging.getLogger("dmx_docs.indexer")
 
+# "spawn" everywhere (the Windows default): forking from the web app's
+# background thread can deadlock on Linux.
+_MP = multiprocessing.get_context("spawn")
+
 COMMIT_EVERY = 200
 PROGRESS_EVERY_S = 15
+
+
+class Cancelled(Exception):
+    """Raised when a scan is stopped from the configuration page."""
 
 
 @dataclass
@@ -33,6 +42,7 @@ class Stats:
     new: int = 0
     updated: int = 0
     deleted: int = 0
+    removed: int = 0
     by_status: dict = field(default_factory=dict)
     scan_errors: int = 0
 
@@ -40,6 +50,7 @@ class Stats:
         st = ", ".join(f"{k}={v}" for k, v in sorted(self.by_status.items()))
         return (f"files seen={self.seen} unchanged={self.unchanged} processed={self.processed} "
                 f"(new={self.new} updated={self.updated}) deleted={self.deleted} "
+                f"removed_by_config={self.removed} "
                 f"scan_errors={self.scan_errors} [{st}]")
 
 
@@ -61,7 +72,8 @@ def scan(cfg: Config, root: str, stats: Stats):
                 if cfg.is_excluded(entry.name, entry.path):
                     continue
                 if entry.is_dir(follow_symlinks=False):
-                    stack.append(entry.path)
+                    if store.path_key(entry.path) not in cfg.excluded_keys:
+                        stack.append(entry.path)
                 elif entry.is_file(follow_symlinks=False):
                     if os.path.splitext(entry.name)[1].lower() in exts:
                         st = entry.stat(follow_symlinks=False)
@@ -114,8 +126,9 @@ class _Writer:
         self.tick()
 
 
-def run_index(cfg: Config, retry_errors: bool = False, progress=print) -> Stats:
+def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_stop=None) -> Stats:
     con = store.connect(cfg.db_path)
+    sources.refresh(cfg, con)
     con.isolation_level = None  # explicit transactions
     run_id = int(store.get_meta(con, "last_run", "0")) + 1
     store.set_meta(con, "last_run", run_id)
@@ -140,6 +153,10 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print) -> Stats:
                      f"({rate:.1f}/s), {stats.unchanged} unchanged, in progress: {len(pending)}")
             last_progress = now
 
+    def check_stop() -> None:
+        if should_stop is not None and should_stop():
+            raise Cancelled()
+
     def collect(done) -> None:
         for fut in done:
             path, size, mtime, existed = pending.pop(fut)
@@ -152,7 +169,9 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print) -> Stats:
                 result = Extracted(status="error", error=f"{type(e).__name__}: {e}"[:500])
             writer.save(path, size, mtime, result, existed)
 
-    executor = ProcessPoolExecutor(max_workers=workers)
+    if not cfg.roots:
+        progress("No root folder configured: add one on the configuration page.")
+    executor = ProcessPoolExecutor(max_workers=workers, mp_context=_MP)
     try:
         for root in cfg.roots:
             if not os.path.isdir(root):
@@ -160,6 +179,7 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print) -> Stats:
                 continue
             progress(f"Scanning {root} ...")
             for path, size, mtime in scan(cfg, root, stats):
+                check_stop()
                 stats.seen += 1
                 row = con.execute("SELECT id, size, mtime, status FROM docs WHERE path_key=?",
                                   (store.path_key(path),)).fetchone()
@@ -176,7 +196,7 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print) -> Stats:
                 try:
                     fut = executor.submit(extract_file, path, options)
                 except BrokenProcessPool:
-                    executor = ProcessPoolExecutor(max_workers=workers)
+                    executor = ProcessPoolExecutor(max_workers=workers, mp_context=_MP)
                     fut = executor.submit(extract_file, path, options)
                 pending[fut] = (path, size, mtime, bool(row))
                 if len(pending) >= workers * 4:
@@ -185,13 +205,14 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print) -> Stats:
                     if crashed and getattr(executor, "_broken", False):
                         collect(list(pending))  # the remaining futures fail the same way
                         executor.shutdown(wait=False, cancel_futures=True)
-                        executor = ProcessPoolExecutor(max_workers=workers)
+                        executor = ProcessPoolExecutor(max_workers=workers, mp_context=_MP)
                 report()
         while pending:
-            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            check_stop()
+            done, _ = wait(pending, return_when=FIRST_COMPLETED, timeout=1)
             collect(done)
             report()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, Cancelled):
         # Keep what was extracted so far; the next run resumes from there.
         progress("Interrupted - saving progress ...")
         executor.shutdown(wait=False, cancel_futures=True)
@@ -205,12 +226,19 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print) -> Stats:
     # A worker crashed (e.g. a malformed file crashing the PDF library): retry
     # those files one at a time so only the culprit is marked as an error.
     for path, size, mtime, existed in crashed:
-        with ProcessPoolExecutor(max_workers=1) as solo:
+        with ProcessPoolExecutor(max_workers=1, mp_context=_MP) as solo:
             try:
                 result = solo.submit(extract_file, path, options).result()
             except Exception as e:
                 result = Extracted(status="error", error=f"extraction crashed: {type(e).__name__}")
         writer.save(path, size, mtime, result, existed)
+
+    # Remove documents of root folders that were removed or of excluded folders.
+    for r in con.execute("SELECT id, path_key FROM docs").fetchall():
+        if not cfg.allows(r["path_key"]):
+            writer.vectors_removed |= store.delete_doc(con, r["id"])
+            stats.removed += 1
+            writer.tick()
 
     # Remove documents that disappeared, only under roots that were reachable.
     for root in cfg.roots:

@@ -5,11 +5,11 @@
 # as-is, e.g. 'Z:\Projets'. Forward slashes ('Z:/Projets') work too.
 
 [index]
-# Root folders to crawl (recursively). Mapped drives or UNC paths.
+# Root folders and excluded subfolders are managed on the configuration page
+# (`dmx-docs web`). Folders listed here are only imported the very first time;
+# after that, the page is the place to change them.
 roots = [
-    'Z:\',
-    # 'Y:\Documentation',
-    # '\\server2\share\Projets',
+    # 'Z:\Projets',
 ]
 
 # Where the index (SQLite database, embedding models, logs) is stored.
@@ -21,7 +21,8 @@ data_dir = 'C:\dmx-docs-data'
 # Word installed for conversion; remove it from the list to skip those files.
 extensions = ['.pdf', '.docx', '.doc']
 
-# Glob patterns to skip. A pattern without '/' is matched against the file
+# Initial exclusion patterns (editable later on the configuration page).
+# A pattern without '/' is matched against the file
 # or folder name; a pattern with '/' is matched against the full path
 # (written with forward slashes). Matching is case-insensitive.
 exclude = [

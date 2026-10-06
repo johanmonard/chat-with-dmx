@@ -4,6 +4,8 @@ Chat with the documentation stored on the file servers (PDF and Word files) usin
 **Claude Desktop** (or Claude Code) and your normal Claude subscription.
 
 ```
+ Configuration page (browser) ── folders to index, excluded subfolders, scans, status
+        │
  File servers (Z:\, Y:\ ...)                         Claude Desktop
         │                                                  │  asks questions, calls tools
         ▼                                                  ▼
@@ -51,15 +53,34 @@ copy config.example.toml config.toml
 notepad config.toml
 ```
 
-Set at least:
+In `config.toml`, set `data_dir`: where the index is stored, on a **local disk** (SSD if
+possible), e.g. `'C:\dmx-docs-data'`. Plan for roughly 1–2× the amount of extracted text,
+plus about 4 KB per chunk for embeddings. Everything else can stay as it is.
 
-* `roots`: the folders to index, e.g. `['Z:\', 'Y:\Documentation']`. Start with **one
-  representative folder** for the pilot, check the answers, then add the rest.
-* `data_dir`: where the index is stored, on a **local disk** (SSD if possible), e.g.
-  `'C:\dmx-docs-data'`. Plan for roughly 1–2× the amount of extracted text, plus about
-  4 KB per chunk for embeddings.
+## 3. Choose folders and scan: the configuration page
 
-## 3. Build the index
+Double-click `scripts\start_config_page.bat` (or run `.venv\Scripts\dmx-docs web`). The page
+opens in your browser at <http://127.0.0.1:8765> and is only reachable from this computer.
+
+* **Add a root folder**: type its path (`Z:\Projets`, `\\server\share\Docs`) or use *Browse…*.
+  Start with **one representative folder** for the pilot, check the answers, then add the rest.
+* **Exclude subfolders**: expand the root folder and **untick** the subfolders you don't want,
+  at any depth. Root folder with A, B, C inside, B unticked → only A and C are indexed.
+  Unticked folders are hidden from Claude immediately, and their already-indexed content
+  is removed at the next scan.
+* **Scan for changes**: indexes new, modified and deleted files, then computes embeddings
+  (search by meaning). Live progress is shown. *Stop* keeps what is done, and the next scan
+  continues from there.
+* **Files that could not be read** lists corrupt and password-protected files, scans
+  without text, and skipped files, each with the reason.
+* **Exclusion patterns** apply everywhere, by name (e.g. `~$*`, `Archives`) or by path
+  (e.g. `*/old/*`).
+* **Connect Claude Desktop** shows the exact configuration to paste (see step 4).
+
+The page and the command line share the same settings. Changes apply to Claude
+without restarting anything.
+
+### Same thing from the command line
 
 ```powershell
 .venv\Scripts\dmx-docs index
@@ -98,7 +119,8 @@ Check from the command line:
 
 1. Install **Claude Desktop** (<https://claude.ai/download>) and sign in with your account.
 2. Open *Settings → Developer → Edit Config*. This opens `claude_desktop_config.json`.
-   Add the server, adapting the two paths:
+   Paste the block shown in the **Connect Claude Desktop** section of the configuration page,
+   which already has the right paths. It looks like this:
 
    ```json
    {
@@ -147,6 +169,7 @@ with the **Windows Task Scheduler** (*Create Basic Task → Daily → Start a pr
 
 | Command | What it does |
 |---|---|
+| `dmx-docs web [--port 8765]` | Configuration page: folders, exclusions, scans, status |
 | `dmx-docs index [--retry-errors]` | Crawl roots, extract text, update the keyword index |
 | `dmx-docs embed [--max-minutes N] [--reset]` | Add embeddings to new chunks (`--reset` after changing model) |
 | `dmx-docs status` | Counts per status/type, embedding coverage |

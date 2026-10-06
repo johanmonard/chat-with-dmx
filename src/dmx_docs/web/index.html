@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dmx-docs configuration</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d2330; --muted: #667085; --line: #e3e6eb;
+    --accent: #2f6fde; --accent-text: #ffffff; --ok: #1a7f4b; --warn: #b26b00; --bad: #c0362c;
+    --chip: #eef1f5; --code: #f1f3f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --card: #1c2028; --text: #e6e8ec; --muted: #9aa3b2; --line: #2c323d;
+      --accent: #5b8ff0; --accent-text: #0d1117; --ok: #4cc38a; --warn: #e3a33b; --bad: #f0786d;
+      --chip: #262c36; --code: #232832;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  header { padding: 20px 24px 8px; max-width: 1040px; margin: 0 auto; }
+  header h1 { margin: 0; font-size: 22px; }
+  header p { margin: 4px 0 0; color: var(--muted); }
+  main { max-width: 1040px; margin: 0 auto; padding: 8px 24px 48px; display: grid; gap: 16px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; }
+  h2 { margin: 0 0 12px; font-size: 17px; }
+  .muted { color: var(--muted); }
+  .small { font-size: 13px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input[type=text] { flex: 1; min-width: 240px; padding: 8px 10px; border: 1px solid var(--line);
+                     border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+  textarea { width: 100%; min-height: 110px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
+             background: var(--bg); color: var(--text); font: 13px/1.5 Consolas, monospace; }
+  button { padding: 7px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--chip);
+           color: var(--text); font: inherit; cursor: pointer; }
+  button:hover { filter: brightness(0.97); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .5; cursor: default; }
+  .banner { padding: 10px 14px; border-radius: 8px; background: color-mix(in srgb, var(--warn) 14%, transparent);
+            border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); }
+  .error { color: var(--bad); }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--chip); }
+  .badge.ok { color: var(--ok); } .badge.bad { color: var(--bad); } .badge.warn { color: var(--warn); }
+  .root { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; }
+  .root-head { display: flex; gap: 10px; align-items: center; padding: 10px 12px; flex-wrap: wrap; }
+  .root-head .path { font-weight: 600; word-break: break-all; }
+  .tree { padding: 4px 12px 12px 12px; border-top: 1px solid var(--line); }
+  .node { margin-left: 18px; }
+  .node-line { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+  .twisty { width: 18px; text-align: center; cursor: pointer; color: var(--muted); user-select: none; }
+  .node-line.excluded .name { text-decoration: line-through; color: var(--muted); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .stat { background: var(--chip); border-radius: 8px; padding: 10px 12px; }
+  .stat b { display: block; font-size: 20px; }
+  pre.log { background: var(--code); border-radius: 8px; padding: 10px; max-height: 280px; overflow: auto;
+            font: 12px/1.45 Consolas, monospace; white-space: pre-wrap; margin: 10px 0 0; }
+  pre.snippet { background: var(--code); border-radius: 8px; padding: 10px; overflow: auto; font: 12px/1.45 Consolas, monospace; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td, th { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td.path { word-break: break-all; }
+  .picker { margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: none; }
+  .picker ul { list-style: none; margin: 6px 0 0; padding: 0; max-height: 260px; overflow: auto; }
+  .picker li { padding: 4px 6px; border-radius: 4px; cursor: pointer; }
+  .picker li:hover { background: var(--chip); }
+  .tabs button.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  label.check { display: inline-flex; gap: 6px; align-items: center; }
+  @media (max-width: 600px) { header, main { padding-left: 16px; padding-right: 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>dmx-docs</h1>
+  <p>Choose the folders to index, scan them, and connect Claude Desktop.</p>
+</header>
+<main>
+  <div id="rescan-banner" class="banner" hidden>
+    Folder settings changed since the last scan. Excluded or removed folders are already hidden from Claude;
+    <b>run a scan</b> to index new folders and clean up the index.
+  </div>
+
+  <section>
+    <h2>Folders to index</h2>
+    <div id="roots"></div>
+    <div class="row" style="margin-top:12px">
+      <input type="text" id="new-root" placeholder="Folder to add, e.g. Z:\Projets or \\server\share\Docs">
+      <button id="browse-btn">Browse…</button>
+      <button class="primary" id="add-root-btn">Add folder</button>
+    </div>
+    <div class="picker" id="picker">
+      <div class="row">
+        <button id="picker-up">↑ Up</button>
+        <span id="picker-path" class="muted small"></span>
+        <span style="flex:1"></span>
+        <button class="primary" id="picker-select">Select this folder</button>
+        <button id="picker-close">Close</button>
+      </div>
+      <ul id="picker-list"></ul>
+    </div>
+    <p class="muted small">Expand a folder and untick the subfolders you don't want indexed. Everything inside an unticked folder is skipped.</p>
+    <div id="roots-error" class="error small"></div>
+  </section>
+
+  <section>
+    <h2>Scan</h2>
+    <div class="row">
+      <button class="primary" id="scan-btn">Scan for changes</button>
+      <button id="stop-btn" disabled>Stop</button>
+      <label class="check"><input type="checkbox" id="opt-embed" checked> Also compute embeddings (search by meaning)</label>
+      <label class="check"><input type="checkbox" id="opt-retry"> Retry files that failed</label>
+    </div>
+    <p class="muted small" id="job-status">Only new, modified and deleted files are processed. You can stop a scan at any time; the next one continues from there.</p>
+    <pre class="log" id="job-log" hidden></pre>
+  </section>
+
+  <section>
+    <h2>Index</h2>
+    <div class="stats" id="stats"></div>
+  </section>
+
+  <section>
+    <h2>Files that could not be read</h2>
+    <div class="row tabs" id="problem-tabs">
+      <button data-status="" class="active">All</button>
+      <button data-status="error">Errors</button>
+      <button data-status="no_text">Scans without text</button>
+      <button data-status="skipped">Skipped</button>
+    </div>
+    <div id="problems" style="margin-top:10px"></div>
+  </section>
+
+  <section>
+    <h2>Exclusion patterns</h2>
+    <p class="muted small">One per line. Without "/" a pattern matches a file or folder name anywhere (e.g. <code>~$*</code>, <code>Archives</code>);
+      with "/" it matches the full path (e.g. <code>*/old/*</code>). Case-insensitive.</p>
+    <textarea id="patterns"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button id="save-patterns">Save patterns</button>
+      <span class="muted small" id="patterns-msg"></span>
+    </div>
+    <p class="muted small" id="settings-info"></p>
+  </section>
+
+  <section>
+    <h2>Connect Claude Desktop</h2>
+    <ol class="small">
+      <li>In Claude Desktop: <b>Settings → Developer → Edit Config</b>.</li>
+      <li>Paste this into <code>claude_desktop_config.json</code> (merge with an existing <code>mcpServers</code> block if there is one), save.</li>
+      <li>Quit Claude Desktop completely (also from the system tray) and start it again.</li>
+    </ol>
+    <pre class="snippet" id="snippet"></pre>
+    <button id="copy-snippet">Copy</button>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let state = null;
+let problemStatus = "";
+
+async function api(method, url, body) {
+  const res = await fetch(url, {
+    method, headers: { "Content-Type": "application/json", "X-Dmx": "1" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || res.statusText);
+  return data;
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function fmtDate(ts) { return ts ? new Date(ts * 1000).toLocaleString() : "never"; }
+
+// ------------------------------------------------------------- roots + tree
+const expanded = new Set();
+
+function renderRoots() {
+  const box = $("roots");
+  if (!state.roots.length) {
+    box.innerHTML = '<p class="muted">No folder yet. Add a root folder below.</p>';
+    return;
+  }
+  box.innerHTML = "";
+  for (const r of state.roots) {
+    const div = document.createElement("div");
+    div.className = "root";
+    const excl = r.excluded.length ? ` · ${r.excluded.length} excluded subfolder${r.excluded.length > 1 ? "s" : ""}` : "";
+    div.innerHTML = `
+      <div class="root-head">
+        <span class="twisty">${expanded.has(r.path) ? "▾" : "▸"}</span>
+        <span class="path">${esc(r.path)}</span>
+        <span class="badge ${r.reachable ? "ok" : "bad"}">${r.reachable ? "reachable" : "not reachable"}</span>
+        <span class="muted small">${r.documents} documents indexed${excl}</span>
+        <span style="flex:1"></span>
+        <button class="danger small">Remove</button>
+      </div>
+      <div class="tree" ${expanded.has(r.path) ? "" : "hidden"}></div>`;
+    const tree = div.querySelector(".tree");
+    const toggle = () => {
+      if (expanded.has(r.path)) { expanded.delete(r.path); tree.hidden = true; }
+      else { expanded.add(r.path); tree.hidden = false; loadChildren(r.path, tree); }
+      div.querySelector(".twisty").textContent = expanded.has(r.path) ? "▾" : "▸";
+    };
+    div.querySelector(".twisty").onclick = toggle;
+    div.querySelector(".path").onclick = toggle;
+    div.querySelector("button.danger").onclick = async () => {
+      if (!confirm(`Remove ${r.path} from the index?\n\nIts ${r.documents} documents are hidden from Claude now and deleted from the index at the next scan.`)) return;
+      await api("POST", "/api/roots/remove", { path: r.path });
+      refresh();
+    };
+    if (expanded.has(r.path)) loadChildren(r.path, tree);
+    box.appendChild(div);
+  }
+}
+
+async function loadChildren(path, container) {
+  container.innerHTML = '<div class="muted small node">Loading…</div>';
+  let data;
+  try { data = await api("GET", "/api/browse?path=" + encodeURIComponent(path)); }
+  catch (e) { container.innerHTML = `<div class="error small node">${esc(e.message)}</div>`; return; }
+  container.innerHTML = data.dirs.length ? "" : '<div class="muted small node">No subfolders</div>';
+  for (const d of data.dirs) {
+    const node = document.createElement("div");
+    node.className = "node";
+    const off = d.excluded || d.pattern_excluded;
+    node.innerHTML = `
+      <div class="node-line ${off ? "excluded" : ""}">
+        <span class="twisty">${off ? "" : "▸"}</span>
+        <input type="checkbox" ${off ? "" : "checked"} ${d.pattern_excluded ? "disabled" : ""}>
+        <span class="name">${esc(d.name)}</span>
+        ${d.pattern_excluded ? '<span class="muted small">(excluded by a pattern)</span>' : ""}
+      </div>
+      <div class="children" hidden></div>`;
+    const children = node.querySelector(".children");
+    const tw = node.querySelector(".twisty");
+    if (!off) tw.onclick = () => {
+      children.hidden = !children.hidden;
+      tw.textContent = children.hidden ? "▸" : "▾";
+      if (!children.hidden) loadChildren(d.path, children);
+    };
+    node.querySelector("input").onchange = async (ev) => {
+      const excluded = !ev.target.checked;
+      try {
+        await api("POST", "/api/exclude", { path: d.path, excluded });
+      } catch (e) { $("roots-error").textContent = e.message; ev.target.checked = !excluded; return; }
+      const line = node.querySelector(".node-line");
+      line.classList.toggle("excluded", excluded);
+      if (excluded) { children.hidden = true; children.innerHTML = ""; tw.textContent = ""; tw.onclick = null; }
+      else { tw.textContent = "▸"; tw.onclick = () => { children.hidden = !children.hidden; tw.textContent = children.hidden ? "▸" : "▾"; if (!children.hidden) loadChildren(d.path, children); }; }
+      refresh(false);
+    };
+    container.appendChild(node);
+  }
+}
+
+$("add-root-btn").onclick = async () => {
+  $("roots-error").textContent = "";
+  const path = $("new-root").value.trim();
+  if (!path) return;
+  try {
+    const r = await api("POST", "/api/roots", { path });
+    $("new-root").value = "";
+    $("picker").style.display = "none";
+    expanded.add(r.path);
+    refresh();
+  } catch (e) { $("roots-error").textContent = e.message; }
+};
+$("new-root").addEventListener("keydown", (e) => { if (e.key === "Enter") $("add-root-btn").click(); });
+
+// ------------------------------------------------------------ folder picker
+let pickerPath = null, pickerParent = null;
+async function openPicker(path) {
+  $("picker").style.display = "block";
+  try {
+    const data = await api("GET", "/api/browse" + (path ? "?path=" + encodeURIComponent(path) : ""));
+    pickerPath = data.path; pickerParent = data.parent;
+    $("picker-path").textContent = data.path || "Drives";
+    $("picker-up").disabled = !data.path;
+    $("picker-select").disabled = !data.path;
+    const ul = $("picker-list");
+    ul.innerHTML = data.dirs.length ? "" : '<li class="muted">No subfolders</li>';
+    for (const d of data.dirs) {
+      const li = document.createElement("li");
+      li.textContent = "📁 " + d.name;
+      li.onclick = () => openPicker(d.path);
+      ul.appendChild(li);
+    }
+  } catch (e) { $("roots-error").textContent = e.message; }
+}
+$("browse-btn").onclick = () => openPicker($("new-root").value.trim() || null);
+$("picker-up").onclick = () => openPicker(pickerParent);
+$("picker-close").onclick = () => { $("picker").style.display = "none"; };
+$("picker-select").onclick = () => { $("new-root").value = pickerPath; $("picker").style.display = "none"; };
+
+// -------------------------------------------------------------------- scan
+$("scan-btn").onclick = async () => {
+  try {
+    await api("POST", "/api/scan", { embed: $("opt-embed").checked, retry_errors: $("opt-retry").checked });
+    refresh(false);
+  } catch (e) { alert(e.message); }
+};
+$("stop-btn").onclick = () => api("POST", "/api/scan/stop").then(() => refresh(false));
+
+function renderJob() {
+  const job = state.job;
+  const running = job && job.state === "running";
+  $("scan-btn").disabled = running;
+  $("stop-btn").disabled = !running || job.stop_requested;
+  if (!job) return;
+  const labels = { running: "Scan running…", done: "Last scan finished", stopped: "Last scan stopped", failed: "Last scan failed" };
+  $("job-status").textContent = `${labels[job.state]} · started ${fmtDate(job.started)}` +
+    (job.finished ? ` · ended ${fmtDate(job.finished)}` : "");
+  const log = $("job-log");
+  const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
+  log.hidden = false;
+  log.textContent = job.lines.join("\n");
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+// ------------------------------------------------------------------- stats
+function renderStats() {
+  const s = state.stats, b = s.by_status;
+  const pct = s.chunks ? Math.round(100 * s.embedded / s.chunks) : 0;
+  const items = [
+    ["Documents readable", b.ok || 0],
+    ["Not readable", (b.error || 0) + (b.no_text || 0) + (b.skipped || 0)],
+    ["Text chunks", s.chunks],
+    ["Embeddings", state.embeddings_enabled ? `${pct}%` : "disabled"],
+    ["Last scan", s.last_scan ? new Date(s.last_scan * 1000).toLocaleDateString() : "never"],
+  ];
+  $("stats").innerHTML = items.map(([k, v]) => `<div class="stat"><span class="muted small">${k}</span><b>${esc(v)}</b></div>`).join("");
+}
+
+// ---------------------------------------------------------------- problems
+async function loadProblems() {
+  const data = await api("GET", "/api/problems?status=" + problemStatus);
+  const labels = { error: "error", no_text: "no text (scan)", skipped: "skipped" };
+  $("problems").innerHTML = data.total === 0 ? '<p class="muted small">None.</p>' :
+    `<p class="muted small">${data.total} files${data.total > data.items.length ? ` (first ${data.items.length} shown)` : ""}</p>
+     <table><tr><th>File</th><th>Status</th><th>Reason</th></tr>` +
+    data.items.map((r) => `<tr><td class="path">${esc(r.path)}</td><td><span class="badge ${r.status === "error" ? "bad" : "warn"}">${labels[r.status]}</span></td><td class="muted">${esc(r.error)}</td></tr>`).join("") +
+    "</table>";
+}
+document.querySelectorAll("#problem-tabs button").forEach((btn) => btn.onclick = () => {
+  document.querySelectorAll("#problem-tabs button").forEach((b) => b.classList.remove("active"));
+  btn.classList.add("active");
+  problemStatus = btn.dataset.status;
+  loadProblems();
+});
+
+// ---------------------------------------------------------------- settings
+$("save-patterns").onclick = async () => {
+  const patterns = $("patterns").value.split("\n");
+  const r = await api("POST", "/api/patterns", { patterns });
+  $("patterns").value = r.patterns.join("\n");
+  $("patterns-msg").textContent = "Saved.";
+  setTimeout(() => $("patterns-msg").textContent = "", 2000);
+  refresh(false);
+};
+$("copy-snippet").onclick = () => {
+  navigator.clipboard.writeText(state.claude_desktop).then(() => {
+    $("copy-snippet").textContent = "Copied"; setTimeout(() => $("copy-snippet").textContent = "Copy", 1500);
+  });
+};
+
+// ------------------------------------------------------------------ refresh
+let lastJobState = null;
+async function refresh(full = true) {
+  state = await api("GET", "/api/state");
+  $("rescan-banner").hidden = !state.needs_rescan || (state.job && state.job.state === "running");
+  if (full) {
+    renderRoots();
+    if (document.activeElement !== $("patterns")) $("patterns").value = state.patterns.join("\n");
+    $("snippet").textContent = state.claude_desktop;
+    $("settings-info").textContent = `File types: ${state.extensions.join(", ")} · Index stored in ${state.data_dir}` +
+      (state.config_path ? ` · Other settings in ${state.config_path}` : "");
+  }
+  renderJob();
+  renderStats();
+  const js = state.job ? state.job.state : null;
+  if (full || (lastJobState === "running" && js !== "running")) { loadProblems(); if (!full) renderRoots(); }
+  lastJobState = js;
+}
+
+refresh();
+setInterval(() => refresh(false), 2000);
+</script>
+</body>
+</html>
