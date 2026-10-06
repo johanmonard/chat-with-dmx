@@ -140,7 +140,7 @@ def run_embed(cfg: Config, max_minutes: float | None = None, reset: bool = False
         con.execute("COMMIT")
         now = time.monotonic()
         if now - last_report > 15:
-            rate = done / (now - started)
+            rate = done / max(now - started, 1e-6)  # monotonic() ticks every ~16 ms on Windows
             remaining = (todo - done) / rate if rate else 0
             progress(f"  {done}/{todo} chunks ({rate:.1f}/s, ~{remaining / 3600:.1f} h remaining)")
             last_report = now

@@ -4,7 +4,7 @@ import pytest
 
 from dmx_docs.chunking import split_text
 from dmx_docs.config import load_config
-from dmx_docs.extract import extract_file, find_libreoffice, paginate_blocks
+from dmx_docs.extract import _word_available, extract_file, find_libreoffice, paginate_blocks
 
 
 def test_split_text_is_contiguous_and_bounded():
@@ -45,6 +45,27 @@ def test_scan_and_corrupt(corpus, tmp_path):
 @pytest.mark.skipif(find_libreoffice() is None, reason="LibreOffice not installed")
 def test_doc_conversion(corpus):
     r = extract_file(str(corpus / "Old" / "ancien_rapport.doc"), {"doc_converter": "libreoffice"})
+    assert r.status == "ok", r.error
+    assert "AMX-220" in "\n".join(t for _, t in r.pages)
+
+
+@pytest.mark.skipif(not _word_available(), reason="Microsoft Word + pywin32 not available")
+def test_doc_conversion_with_word(corpus, tmp_path):
+    import pythoncom
+    import win32com.client
+
+    doc_path = str(tmp_path / "ancien_rapport.doc")
+    pythoncom.CoInitialize()
+    word = win32com.client.DispatchEx("Word.Application")
+    try:
+        word.Visible = False
+        doc = word.Documents.Open(str(corpus / "Projets" / "P1234_Nestle" / "Rapport_MES.docx"), False, True)
+        doc.SaveAs2(doc_path, FileFormat=0)  # wdFormatDocument (Word 97-2003)
+        doc.Close(False)
+    finally:
+        word.Quit()
+        pythoncom.CoUninitialize()
+    r = extract_file(doc_path, {"doc_converter": "word"})
     assert r.status == "ok", r.error
     assert "AMX-220" in "\n".join(t for _, t in r.pages)
 

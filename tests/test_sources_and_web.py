@@ -1,3 +1,4 @@
+import os
 import time
 
 import pytest
@@ -113,7 +114,7 @@ def test_web_flow(client):
     assert st["stats"]["embedded"] == st["stats"]["chunks"] > 0
 
     probs = c.get("/api/problems").json()
-    assert {p["path"].rsplit("/", 1)[-1] for p in probs["items"]} == {"corrupt.pdf", "scan.pdf"}
+    assert {os.path.basename(p["path"]) for p in probs["items"]} == {"corrupt.pdf", "scan.pdf"}
     assert c.get("/api/problems", params={"status": "error"}).json()["total"] == 1
 
     pats = c.post("/api/patterns", json={"patterns": ["~$*", " ", "Broken"]}).json()["patterns"]
