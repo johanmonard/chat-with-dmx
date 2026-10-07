@@ -77,7 +77,8 @@ function Invoke-Native([string]$exe, [string[]]$arguments, [switch]$AllowFail) {
 }
 
 function Get-CodeStamp {
-    $files = @(Get-Item (Join-Path $App 'pyproject.toml')) + @(Get-ChildItem (Join-Path $App 'src') -Recurse -File)
+    # This script is part of the stamp: a change in how it installs triggers a reinstall.
+    $files = @(Get-Item (Join-Path $App 'pyproject.toml'), $PSCommandPath) + @(Get-ChildItem (Join-Path $App 'src') -Recurse -File)
     $latest = ($files | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum
     "$($latest.Ticks)|gpu=$(Test-Gpu)"
 }
@@ -101,7 +102,11 @@ function Install-Env {
         if ($ort) {
             Say "NVIDIA GPU found (driver supports CUDA $cuda): installing $ort ..."
             Invoke-Native $Uv @('pip', 'uninstall', '--python', $Py, 'onnxruntime', 'fastembed') -AllowFail
-            Invoke-Native $Uv @('pip', 'install', '--python', $Py, 'fastembed-gpu', $ort)
+            # The CPU and GPU packages share their folders (onnxruntime\, fastembed\): uninstalling
+            # the CPU ones deletes files of the GPU ones, so those are always reinstalled.
+            Invoke-Native $Uv @('pip', 'install', '--python', $Py, '--reinstall-package', 'onnxruntime-gpu',
+                                '--reinstall-package', 'fastembed-gpu', 'fastembed-gpu', $ort)
+            Invoke-Native $Py @('-c', "import fastembed, onnxruntime as o; p = o.get_available_providers(); print('GPU runtime check:', p); assert 'CUDAExecutionProvider' in p")
         } else {
             Say "NVIDIA GPU found but its driver is too old for CUDA 12 (nvidia-smi says CUDA $cuda): embeddings will use the CPU."
         }
