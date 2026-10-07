@@ -136,7 +136,7 @@ function Get-LockInfo { if (Test-Path $Lock) { (Get-Content $Lock -Raw).Trim() }
 
 function Enter-Lock([string]$what) {
     New-Item -ItemType Directory -Force $SharedData | Out-Null
-    $info = "$env:COMPUTERNAME|$env:USERNAME|$(Get-Date -Format 'yyyy-MM-dd HH:mm')|$what"
+    $info = "$env:COMPUTERNAME|$env:USERNAME|$(Get-Date -Format 'yyyy-MM-dd HH:mm')|$what|$PID"
     try {
         $fs = [IO.File]::Open($Lock, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
         $bytes = [Text.Encoding]::ASCII.GetBytes($info)
@@ -144,8 +144,14 @@ function Enter-Lock([string]$what) {
         return $false   # fresh lock: start from the master copy
     } catch [IO.IOException] {
         $held = Get-LockInfo
-        if ($held -and $held.Split('|')[0] -eq $env:COMPUTERNAME) {
+        $fields = if ($held) { $held.Split('|') } else { @() }
+        if ($fields.Count -ge 5 -and $fields[0] -eq $env:COMPUTERNAME -and
+            (Get-Process -Id ([int]$fields[4]) -ErrorAction SilentlyContinue | Where-Object ProcessName -match 'powershell')) {
+            throw "'$($fields[3])' is still running on this machine (started $($fields[2])). Wait for it to finish, or stop it first."
+        }
+        if ($held -and $fields[0] -eq $env:COMPUTERNAME) {
             Say "This machine already holds the lock ($held): continuing with its local copy, which has unsaved work."
+            [IO.File]::WriteAllText($Lock, $info)   # this process owns it now
             return $true
         }
         throw "The index is in use by another machine: $held`nWait for it to finish. If that machine crashed, run: dmx.ps1 unlock -Force"
@@ -190,19 +196,26 @@ con.close()
 }
 
 function Invoke-Locked([string]$what, [string[]]$dmxArgs) {
-    Assert-Env
-    Sync-Models
+    # Lock first: never reinstall packages under a run that is still going on this machine.
     $resumed = Enter-Lock $what
+    $working = $resumed   # true once the local copy holds this run's (or an unsaved run's) work
     $ok = $false
     try {
+        Assert-Env
+        Sync-Models
         if (-not $resumed -or -not (Test-Path $LocalDb)) { Copy-MasterToLocal }
+        $working = $true
         Say "Running: dmx-docs $($dmxArgs -join ' ')"
         Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $dmxArgs) -AllowFail
         Say "dmx-docs finished (exit code $LASTEXITCODE)."
         $ok = $true
     } finally {
         # Also runs after Ctrl+C: what was done so far is kept (the index is resumable).
-        if (Save-LocalToMaster) { Exit-Lock; Say 'Done. The index in the shared folder is up to date and unlocked.' }
+        if (-not $working) {
+            Exit-Lock; Say 'Nothing was changed; lock released.'   # failed before touching the index
+        } elseif ((Test-Path $Py) -and (Save-LocalToMaster)) {
+            Exit-Lock; Say 'Done. The index in the shared folder is up to date and unlocked.'
+        }
         if ($ok -and $what -eq 'embed') { Publish-Models }
     }
 }
