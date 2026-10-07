@@ -275,6 +275,7 @@ $("new-root").addEventListener("keydown", (e) => { if (e.key === "Enter") $("add
 let pickerPath = null, pickerParent = null;
 async function openPicker(path) {
   $("picker").style.display = "block";
+  $("picker-path").textContent = "Loading " + (path || "drives") + " …";  // network folders can be slow
   try {
     const data = await api("GET", "/api/browse" + (path ? "?path=" + encodeURIComponent(path) : ""));
     pickerPath = data.path; pickerParent = data.parent;

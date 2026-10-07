@@ -113,7 +113,10 @@ class ScanBody(BaseModel):
 
 def _drives() -> list[str]:
     if sys.platform == "win32":
-        return [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
+        # Probing each letter with os.path.exists blocks ~20 s on a disconnected mapped drive.
+        import ctypes
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+        return [f"{d}:\\" for i, d in enumerate(string.ascii_uppercase) if mask >> i & 1]
     return ["/", str(Path.home())]
 
 
