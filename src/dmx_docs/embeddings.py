@@ -65,6 +65,7 @@ class Embedder:
         self.cfg = cfg
         self.device = "cpu"
         self.batch_size = cfg.embed_batch_size
+        self.fallback_reason: str | None = None
         model = cfg.embedding_model
         if model.startswith("hash:"):
             self._model = HashEmbedder(int(model.split(":", 1)[1] or 256))
@@ -75,12 +76,28 @@ class Embedder:
             from fastembed import TextEmbedding
 
             cfg.models_dir.mkdir(parents=True, exist_ok=True)
+            self._model = None
             if _cuda_available(cfg.embed_device):
-                self.device = "cuda"
-                self.batch_size = cfg.embed_gpu_batch_size
-                self._model = TextEmbedding(model_name=model, cache_dir=str(cfg.models_dir),
-                                            providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
-            else:
+                try:
+                    gpu_model = TextEmbedding(model_name=model, cache_dir=str(cfg.models_dir),
+                                              providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+                    # onnxruntime may silently fall back to the CPU (missing CUDA DLLs, old driver).
+                    session = getattr(getattr(gpu_model, "model", None), "model", None)
+                    providers = session.get_providers() if session is not None else ["CUDAExecutionProvider"]
+                    if "CUDAExecutionProvider" not in providers:
+                        raise RuntimeError(f"onnxruntime fell back to {providers}")
+                    # Out-of-memory may only show at the first run: try one full batch of max length.
+                    list(gpu_model.embed(["passage: " + "mot " * 600] * cfg.embed_gpu_batch_size,
+                                         batch_size=cfg.embed_gpu_batch_size))
+                    self._model = gpu_model
+                    self.device = "cuda"
+                    self.batch_size = cfg.embed_gpu_batch_size
+                except Exception as e:  # noqa: BLE001 - e.g. a 2 GB vGPU slice cannot hold a 2.2 GB model
+                    if cfg.embed_device == "cuda":
+                        raise
+                    self.fallback_reason = f"GPU not usable ({type(e).__name__}: {str(e)[:200]})"
+                    log.warning("%s, using the CPU", self.fallback_reason)
+            if self._model is None:
                 self._model = TextEmbedding(model_name=model, cache_dir=str(cfg.models_dir),
                                             threads=cfg.embed_threads, providers=["CPUExecutionProvider"])
             self._fast = True
@@ -134,6 +151,8 @@ def run_embed(cfg: Config, max_minutes: float | None = None, reset: bool = False
     progress(f"Loading embedding model {cfg.embedding_model} (first time: download) ...")
     embedder = Embedder(cfg)
     store.set_meta(con, "embedding_model", cfg.embedding_model)
+    if embedder.fallback_reason:
+        progress(f"{embedder.fallback_reason}: using the CPU instead.")
     progress(f"{todo} chunks to embed on {embedder.device.upper()} (batch size {embedder.batch_size}).")
 
     deadline = time.monotonic() + max_minutes * 60 if max_minutes else None
