@@ -42,9 +42,29 @@ class HashEmbedder:
         return out / np.maximum(norms, 1e-9)
 
 
+def _cuda_available(device: str) -> bool:
+    """True if embeddings should run on an NVIDIA GPU (needs onnxruntime-gpu, see scripts/dmx.ps1)."""
+    if device == "cpu":
+        return False
+    import onnxruntime as ort
+
+    if "CUDAExecutionProvider" not in ort.get_available_providers():
+        if device == "cuda":
+            raise SystemExit("device = 'cuda' but onnxruntime-gpu with CUDA is not installed")
+        return False
+    if hasattr(ort, "preload_dlls"):  # CUDA/cuDNN DLLs from the nvidia-* pip packages
+        try:
+            ort.preload_dlls()
+        except Exception as e:  # noqa: BLE001
+            log.warning("onnxruntime.preload_dlls failed: %s", e)
+    return True
+
+
 class Embedder:
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        self.device = "cpu"
+        self.batch_size = cfg.embed_batch_size
         model = cfg.embedding_model
         if model.startswith("hash:"):
             self._model = HashEmbedder(int(model.split(":", 1)[1] or 256))
@@ -55,14 +75,20 @@ class Embedder:
             from fastembed import TextEmbedding
 
             cfg.models_dir.mkdir(parents=True, exist_ok=True)
-            self._model = TextEmbedding(model_name=model, cache_dir=str(cfg.models_dir),
-                                        threads=cfg.embed_threads)
+            if _cuda_available(cfg.embed_device):
+                self.device = "cuda"
+                self.batch_size = cfg.embed_gpu_batch_size
+                self._model = TextEmbedding(model_name=model, cache_dir=str(cfg.models_dir),
+                                            providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+            else:
+                self._model = TextEmbedding(model_name=model, cache_dir=str(cfg.models_dir),
+                                            threads=cfg.embed_threads, providers=["CPUExecutionProvider"])
             self._fast = True
 
     def _embed(self, texts: list[str]) -> np.ndarray:
         if not self._fast:
             return self._model.embed(texts)
-        vecs = np.asarray(list(self._model.embed(texts, batch_size=self.cfg.embed_batch_size)),
+        vecs = np.asarray(list(self._model.embed(texts, batch_size=self.batch_size)),
                           dtype=np.float32)
         norms = np.linalg.norm(vecs, axis=1, keepdims=True)
         return vecs / np.maximum(norms, 1e-9)
@@ -108,7 +134,7 @@ def run_embed(cfg: Config, max_minutes: float | None = None, reset: bool = False
     progress(f"Loading embedding model {cfg.embedding_model} (first time: download) ...")
     embedder = Embedder(cfg)
     store.set_meta(con, "embedding_model", cfg.embedding_model)
-    progress(f"{todo} chunks to embed.")
+    progress(f"{todo} chunks to embed on {embedder.device.upper()} (batch size {embedder.batch_size}).")
 
     deadline = time.monotonic() + max_minutes * 60 if max_minutes else None
     started = time.monotonic()

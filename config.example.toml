@@ -62,6 +62,11 @@ passage_prefix = 'passage: '
 batch_size = 1
 # CPU threads used by the model (default: all cores).
 # threads = 8
+# 'auto' uses an NVIDIA GPU when onnxruntime-gpu is installed (scripts\dmx.ps1 setup
+# does it on GPU machines), otherwise the CPU. Force with 'cpu' or 'cuda'.
+device = 'auto'
+# Texts per model call on the GPU.
+gpu_batch_size = 64
 
 [server]
 # Maximum characters returned by one read_document call.

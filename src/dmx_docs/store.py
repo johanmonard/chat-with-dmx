@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import uuid
 from pathlib import Path
 
 SCHEMA = """
@@ -105,7 +106,9 @@ def set_meta(con: sqlite3.Connection, key: str, value) -> None:
 
 
 def bump_vector_version(con: sqlite3.Connection) -> None:
-    set_meta(con, "vec_version", int(get_meta(con, "vec_version", "0")) + 1)
+    # A random token, not a counter: index copies moved between machines must never
+    # match a stale vector cache that happens to have the same counter value.
+    set_meta(con, "vec_version", uuid.uuid4().hex)
 
 
 def delete_doc_content(con: sqlite3.Connection, doc_id: int) -> bool:

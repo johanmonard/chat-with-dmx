@@ -165,6 +165,37 @@ with the **Windows Task Scheduler** (*Create Basic Task → Daily → Start a pr
 > Mapped drives (`Z:\`) exist only in your logged-on session. If the task must run while you
 > are logged off, use UNC paths (`\\server\share\...`) in `roots`.
 
+## 6. Several machines sharing one folder (e.g. `U:\DMX-RAG`)
+
+To index or embed from whichever machine is available (a GPU VM for embeddings, another one
+overnight...), keep everything in a shared folder and use the launchers in it.
+The index itself never runs on the share (SQLite is not safe there): each run takes a lock,
+copies the index to `C:\dmx-rag` on the machine, works on it and copies it back.
+Only one machine can work on the index at a time.
+
+```
+U:\DMX-RAG\
+  1 - Setup this machine.cmd           builds C:\dmx-rag\venv (GPU runtime on NVIDIA machines)
+  2 - Configuration page.cmd           folders, exclusions, scans (stop with Ctrl+C)
+  3 - Index new and changed files.cmd
+  4 - Compute embeddings.cmd           from a cmd prompt you can add e.g. --max-minutes 300
+  5 - Update Claude Desktop copy.cmd   local copy for Claude Desktop + the configuration to paste
+  Unlock after a crash.cmd
+  config.toml      settings for all machines (data_dir = 'C:\dmx-rag\data')
+  app\             this repository (git pull here to update; machines reinstall automatically)
+  data\            index.sqlite3, index.prev.sqlite3 (previous version), LOCK
+  models\          embedding model, copied to each machine once
+  tools\uv.exe     installs Python and the packages without admin rights
+  logs\            one log per run
+```
+
+* The launchers are in `scripts\launchers` and the logic in `scripts\dmx.ps1`.
+* Use UNC paths for root folders (`\\server\share\...`): drive letters can differ between machines.
+* Indexing `.doc` files needs Word or LibreOffice on the machine that indexes.
+* If a machine crashes during a run, run the same command again on that machine: it continues
+  from its local copy. From another machine, *Unlock after a crash* releases the lock (the
+  unsaved work of the crashed run is then lost).
+
 ## Reference
 
 | Command | What it does |

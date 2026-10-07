@@ -36,7 +36,9 @@ class Config:
     query_prefix: str = "query: "
     passage_prefix: str = "passage: "
     embed_batch_size: int = 1
+    embed_gpu_batch_size: int = 64
     embed_threads: int | None = None
+    embed_device: str = "auto"  # 'auto' (GPU if available), 'cpu' or 'cuda'
 
     max_read_chars: int = 40000
     config_path: Path | None = None
@@ -124,7 +126,9 @@ def load_config(path: str | os.PathLike) -> Config:
         "query_prefix": "query_prefix",
         "passage_prefix": "passage_prefix",
         "batch_size": "embed_batch_size",
+        "gpu_batch_size": "embed_gpu_batch_size",
         "threads": "embed_threads",
+        "device": "embed_device",
     }
     for key, attr in mapping.items():
         if key in emb:
