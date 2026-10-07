@@ -12,7 +12,8 @@ DEFAULT_EXCLUDES = ["~$*", ".*", "$RECYCLE.BIN", "System Volume Information"]
 
 
 def _default_workers() -> int:
-    return max(1, min(8, (os.cpu_count() or 2) - 1))
+    # Extraction is mostly CPU work (sorted PDF text); one core is left for the main process.
+    return max(1, min(16, (os.cpu_count() or 2) - 1))
 
 
 @dataclass

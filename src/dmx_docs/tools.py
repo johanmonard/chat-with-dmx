@@ -188,7 +188,7 @@ class DocTools:
             fresh = False
             if doc is not None:
                 try:
-                    st = os.stat(path)
+                    st = os.stat(store.fs_path(path))
                     fresh = st.st_size == doc["size"] and abs(st.st_mtime - (doc["mtime"] or 0)) < 0.01
                 except OSError:
                     fresh = True  # file not reachable: serve the indexed copy
@@ -201,14 +201,14 @@ class DocTools:
                     return pages, doc["n_pages"] or 0, info
         finally:
             con.close()
-        if not os.path.isfile(path):
+        if not os.path.isfile(store.fs_path(path)):
             raise FileNotFoundError(f"File not found: {path}")
         ext = os.path.splitext(path)[1].lower()
         result = extract_file(path, self.cfg.extract_options())
         if result.status == "error" or result.status == "skipped":
             raise ValueError(f"Cannot read {path}: {result.error}")
         info = {"source": "live extraction (file new or changed since indexing)", "ext": ext,
-                "mtime": os.stat(path).st_mtime, "status": result.status}
+                "mtime": os.stat(store.fs_path(path)).st_mtime, "status": result.status}
         return dict(result.pages), result.n_pages, info
 
     def read_document(self, path: str, start_page: int = 1, end_page: int | None = None) -> str:

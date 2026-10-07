@@ -71,6 +71,17 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 
+def fs_path(path: str) -> str:
+    """Path to hand to the OS. Windows refuses paths over 260 characters unless they
+    use the extended-length prefix (\\\\?\\ or \\\\?\\UNC\\), which needs an absolute path."""
+    if os.name != "nt" or len(path) < 240 or path.startswith("\\\\?\\"):
+        return path
+    path = os.path.abspath(path)
+    if path.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + path[2:]
+    return "\\\\?\\" + path
+
+
 def path_key(path: str) -> str:
     """Canonical form of a path used for lookups (case-insensitive on Windows)."""
     return os.path.normcase(os.path.normpath(os.path.abspath(path)))

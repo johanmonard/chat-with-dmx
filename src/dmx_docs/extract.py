@@ -14,6 +14,8 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 
+from .store import fs_path
+
 try:
     import pymupdf
 except ImportError:  # older PyMuPDF releases
@@ -42,14 +44,23 @@ class Extracted:
     error: str | None = None
 
 
+# Bump when extraction output changes: documents indexed by an older version are
+# extracted again by the next index run (see indexer.run_index).
+# 2: blank runs collapsed (sorted PDF text was padded with spaces, up to 150k per page).
+EXTRACT_VERSION = 2
+
+_BLANKS = re.compile(r"[ \t\u00a0]+")
+_BLANK_AROUND_NL = re.compile(r" ?\n ?")
 _MULTI_BLANK = re.compile(r"\n{3,}")
-_TRAILING_WS = re.compile(r"[ \t\u00a0]+\n")
 
 
 def clean_text(text: str) -> str:
+    # Linear-time steps only: a pattern like "[ ]+\n" is quadratic on long runs of
+    # spaces without a newline, and took minutes on some PDF pages.
     text = text.replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
     text = text.replace("\u00ad", "")  # soft hyphens
-    text = _TRAILING_WS.sub("\n", text)
+    text = _BLANKS.sub(" ", text)
+    text = _BLANK_AROUND_NL.sub("\n", text)
     text = _MULTI_BLANK.sub("\n\n", text)
     return text.strip()
 
@@ -57,13 +68,14 @@ def clean_text(text: str) -> str:
 def extract_file(path: str, options: dict | None = None) -> Extracted:
     options = options or {}
     ext = os.path.splitext(path)[1].lower()
+    fs = fs_path(path)
     try:
-        if os.path.getsize(path) == 0:  # e.g. 0-byte placeholders created from folder templates
+        if os.path.getsize(fs) == 0:  # e.g. 0-byte placeholders created from folder templates
             return Extracted(status="empty")
         if ext == ".pdf":
-            return extract_pdf(path, options.get("max_pdf_pages", 3000))
+            return extract_pdf(fs, options.get("max_pdf_pages", 3000))
         if ext == ".docx":
-            return extract_docx(path)
+            return extract_docx(fs)
         if ext == ".doc":
             return extract_doc(path, options.get("doc_converter", "auto"), options.get("libreoffice_path"))
         return Extracted(status="skipped", error=f"unsupported extension {ext}")
@@ -250,27 +262,57 @@ def _convert_with_libreoffice(soffice: str, path: str, out_dir: str) -> str:
     return out
 
 
-def _convert_with_word(path: str, out_dir: str) -> str:
-    import pythoncom
-    import win32com.client
+_word = None  # one Word instance per worker process, reused (starting Word takes seconds)
 
-    out = os.path.join(out_dir, "converted.docx")
-    pythoncom.CoInitialize()
-    word = None
-    try:
+
+def _quit_word() -> None:
+    global _word
+    if _word is not None:
+        try:
+            _word.Quit(False)
+        except Exception:
+            pass
+        _word = None
+
+
+def _get_word():
+    global _word
+    if _word is None:
+        import atexit
+
+        import pythoncom
+        import win32com.client
+
+        pythoncom.CoInitialize()
         word = win32com.client.DispatchEx("Word.Application")
         word.Visible = False
-        word.DisplayAlerts = 0
-        # A dummy password makes protected files fail instead of prompting.
-        doc = word.Documents.Open(os.path.abspath(path), False, True, False, "dmx-no-password")
+        word.DisplayAlerts = 0              # wdAlertsNone
+        word.AutomationSecurity = 3         # msoAutomationSecurityForceDisable: no macros
         try:
-            doc.SaveAs2(out, FileFormat=16)  # wdFormatDocumentDefault (.docx)
-        finally:
-            doc.Close(False)
+            word.Options.ConfirmConversions = False
+            word.Options.UpdateLinksAtOpen = False
+        except Exception:
+            pass
+        _word = word
+        atexit.register(_quit_word)
+    return _word
+
+
+def _convert_with_word(path: str, out_dir: str) -> str:
+    out = os.path.join(out_dir, "converted.docx")
+    word = _get_word()
+    try:
+        # A dummy password makes protected files fail instead of prompting.
+        doc = word.Documents.Open(os.path.abspath(path), ConfirmConversions=False, ReadOnly=True,
+                                  AddToRecentFiles=False, PasswordDocument="dmx-no-password",
+                                  Visible=False, NoEncodingDialog=True)
+    except Exception:
+        _quit_word()  # Word may be in a bad state: start a fresh one for the next file
+        raise
+    try:
+        doc.SaveAs2(out, FileFormat=16)  # wdFormatDocumentDefault (.docx)
     finally:
-        if word is not None:
-            word.Quit()
-        pythoncom.CoUninitialize()
+        doc.Close(False)
     return out
 
 

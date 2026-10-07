@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from . import sources, store
 from .chunking import make_chunks
 from .config import Config
-from .extract import Extracted, extract_file
+from .extract import EXTRACT_VERSION, Extracted, extract_file
 
 log = logging.getLogger("dmx_docs.indexer")
 
@@ -61,26 +61,27 @@ def scan(cfg: Config, root: str, stats: Stats):
     while stack:
         folder = stack.pop()
         try:
-            with os.scandir(folder) as it:
+            with os.scandir(store.fs_path(folder)) as it:
                 entries = list(it)
         except OSError as e:
             stats.scan_errors += 1
             log.warning("cannot list %s: %s", folder, e)
             continue
         for entry in entries:
+            path = os.path.join(folder, entry.name)  # without the long-path prefix
             try:
-                if cfg.is_excluded(entry.name, entry.path):
+                if cfg.is_excluded(entry.name, path):
                     continue
                 if entry.is_dir(follow_symlinks=False):
-                    if store.path_key(entry.path) not in cfg.excluded_keys:
-                        stack.append(entry.path)
+                    if store.path_key(path) not in cfg.excluded_keys:
+                        stack.append(path)
                 elif entry.is_file(follow_symlinks=False):
                     if os.path.splitext(entry.name)[1].lower() in exts:
                         st = entry.stat(follow_symlinks=False)
-                        yield entry.path, st.st_size, st.st_mtime
+                        yield path, st.st_size, st.st_mtime
             except OSError as e:
                 stats.scan_errors += 1
-                log.warning("cannot stat %s: %s", entry.path, e)
+                log.warning("cannot stat %s: %s", path, e)
 
 
 class _Writer:
@@ -132,6 +133,12 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_st
     con.isolation_level = None  # explicit transactions
     run_id = int(store.get_meta(con, "last_run", "0")) + 1
     store.set_meta(con, "last_run", run_id)
+    # A new extractor version re-extracts every document indexed before it was
+    # installed. Kept as a timestamp, so an interrupted re-extraction resumes.
+    if store.get_meta(con, "extract_version") != str(EXTRACT_VERSION):
+        store.set_meta(con, "extract_version", EXTRACT_VERSION)
+        store.set_meta(con, "reextract_before", time.time())
+    reextract_before = float(store.get_meta(con, "reextract_before", "0"))
     stats = Stats()
     writer = _Writer(con, run_id, stats)
     max_bytes = cfg.max_file_mb * 1024 * 1024
@@ -181,10 +188,11 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_st
             for path, size, mtime in scan(cfg, root, stats):
                 check_stop()
                 stats.seen += 1
-                row = con.execute("SELECT id, size, mtime, status FROM docs WHERE path_key=?",
+                row = con.execute("SELECT id, size, mtime, status, indexed_at FROM docs WHERE path_key=?",
                                   (store.path_key(path),)).fetchone()
                 if (row and row["size"] == size and abs((row["mtime"] or 0) - mtime) < 0.01
-                        and row["status"] not in retry_statuses):
+                        and row["status"] not in retry_statuses
+                        and (row["indexed_at"] or 0) >= reextract_before):
                     stats.unchanged += 1
                     writer.mark_seen(row["id"])
                     report()
