@@ -16,6 +16,16 @@ from .search import Searcher, build_fts_query, fold, make_snippet
 
 TYPE_LABEL = {".pdf": "PDF", ".docx": "Word", ".doc": "Word 97-2003"}
 
+# Query/passage cosine similarity with multilingual-e5-large, calibrated on the indexed
+# documents: on-topic questions score 0.85-0.89 at best, off-topic ones 0.80-0.83.
+CALIBRATED_MODEL = "intfloat/multilingual-e5-large"
+SIM_STRONG = 0.86
+SIM_MEDIUM = 0.84
+
+
+def _strength(sim: float) -> str:
+    return "strong" if sim >= SIM_STRONG else "medium" if sim >= SIM_MEDIUM else "weak"
+
 
 def _date(ts: float | None) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else "?"
@@ -77,11 +87,20 @@ class DocTools:
         if not hits:
             return "\n".join(notes + [f"No results for: {query}. Try other words, synonyms or "
                                       "another language (documents are mostly French)."])
+        calibrated = self.cfg.embedding_model == CALIBRATED_MODEL
+        sims = [h.similarity for h in hits if h.similarity is not None]
+        if calibrated and sims and max(sims) < SIM_MEDIUM:
+            notes.append(f"(all matches are weak - best meaning similarity {max(sims):.2f}: the documents "
+                         "probably do not cover this as phrased; try other terms or another angle)")
         lines = notes + [f"{len(hits)} results for: {query}\n"]
         for i, h in enumerate(hits, 1):
+            match = "+".join(h.sources)
+            if h.similarity is not None:
+                match += f", similarity {h.similarity:.2f}"
+                if calibrated:
+                    match += " " + _strength(h.similarity)
             lines.append(f"[{i}] {h.path} — {_page_label(h.ext)} {h.page_no}/{h.n_pages} "
-                         f"({TYPE_LABEL.get(h.ext, h.ext)}, modified {_date(h.mtime)}) "
-                         f"[{'+'.join(h.sources)}]")
+                         f"({TYPE_LABEL.get(h.ext, h.ext)}, modified {_date(h.mtime)}) [{match}]")
             lines.append("    " + make_snippet(h.text, query))
             lines.append("")
         return "\n".join(lines).rstrip()

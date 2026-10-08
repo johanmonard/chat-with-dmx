@@ -20,25 +20,37 @@ from .config import Config
 from .tools import DocTools
 
 INSTRUCTIONS = """\
-These tools give read-only access to the company's documentation on its file servers
-(PDF and Word files, mostly in French, sometimes English, German or Spanish).
+Read-only access to the company's project documentation (Demaurex: robotic packaging lines;
+PDF and Word files, mostly French, also English, German, Spanish). One folder per project
+(code names like THOR, YAKUMA, ANGE) with the same subfolders: 0_Vente (offers,
+specifications), 1_Finances, 2_Electrique (schematics), 3_Mecanique, 4_Soft,
+5_Gestion (follow-up, FAT/SAT acceptance), 6_Rapports_Tests, 7_Photos_Videos,
+8_Documentation (manuals), 9_SAV.
 
-How to research a question:
-1. Start with `search`. Run several searches with different wordings: French terms first,
-   then synonyms, English (or German/Spanish) equivalents, product names, part numbers or
-   project codes. Put exact codes or phrases in "double quotes".
-2. Use `find_files` when the user mentions a project, client, machine or document name:
-   file and folder names often carry this information.
-3. Search results are short excerpts. Before answering, open the most relevant documents
-   with `read_document` (around the pages that matched) to read the full context, follow
-   references to other documents, and check tables.
-4. Use `list_folder` to explore the folder around a relevant document (related specs,
-   reports, later versions) and `find_in_document` to locate a term inside a long file.
-5. Prefer the most recent document when versions disagree, and say so.
+Never answer from the first search alone. Follow this loop for every question:
 
-Always cite your sources as full file path + page, e.g. Z:\\Projets\\P123\\Spec.pdf (p. 12).
-If the documents do not contain the answer, say so instead of guessing.
-Answer in the language of the user's question.
+1. REFORMULATE. Rewrite the question into 2-4 search queries: precise French technical terms
+   and synonyms (préhenseur/ventouse/pince, cadence/débit/produits par minute, FAT/réception
+   usine, SAT/mise en service), English/German equivalents, exact codes in "double quotes".
+   If the question has several parts or spans several projects, make one query per part.
+   If it names a project, client or machine, also run `find_files` and use `folder=` to
+   restrict searches to that project.
+2. RETRIEVE with `search` (hybrid by default; mode="keyword" for codes and names).
+3. EVALUATE each hit before using it: does the excerpt actually address the question (not
+   just share words)? Each hit shows how it matched and a meaning similarity: "strong"
+   (>= 0.86) is usually on topic, "medium" must be checked by reading, "weak" (< 0.84) is
+   probably off topic. Are all parts of the question covered? Do sources contradict each other
+   (versions, dates)? Open the best documents with `read_document` around the matching pages
+   (excerpts are short, tables and context matter) and use `find_in_document` in long files.
+4. RETRY if coverage is insufficient, results are weak or off topic, or a part is missing:
+   change the angle (synonyms, other language, broader or narrower terms, the document type
+   that would hold the answer: offer, specification, FAT report, manual, schematic), search
+   the missing sub-question, or browse the project with `list_folder`. At most 3 rounds of
+   searching, then answer with the best available evidence.
+5. SYNTHESIZE: answer in the user's language, only from what you read. Cite every fact as
+   full path + page, e.g. \\\\server\\share\\THOR\\5_Gestion\\FAT.pdf (p. 7). Prefer the most recent
+   document when versions disagree and say so. State clearly what was not found or is
+   uncertain; never fill gaps with general knowledge presented as coming from the documents.
 """
 
 
@@ -50,7 +62,9 @@ def build_server(cfg: Config) -> MCPServer:
     @mcp.tool(**kw)
     def search(query: str, folder: str | None = None, file_type: str | None = None,
                modified_after: str | None = None, limit: int = 10, mode: str = "hybrid") -> str:
-        """Search the documentation by meaning and keywords. Returns excerpts with file path and page.
+        """Search the documentation by meaning and keywords. Returns excerpts with file path and page,
+        how each one matched (keyword, semantic or both) and its meaning similarity to the query
+        (strong >= 0.86, medium 0.84-0.86, weak < 0.84 = probably off topic).
 
         Args:
             query: What to look for (any language; documents are mostly French).

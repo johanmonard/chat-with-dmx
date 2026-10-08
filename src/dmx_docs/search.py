@@ -181,6 +181,18 @@ class VectorIndex:
         top = top[np.argsort(-scores[top])]
         return [(int(self.ids[i]), float(scores[i])) for i in top]
 
+    def similarity(self, qvec: np.ndarray, chunk_ids: list[int]) -> dict[int, float]:
+        """Cosine similarity between the query and the given chunks (vectors are normalized)."""
+        if self.ids is None or len(self.ids) == 0 or not chunk_ids:
+            return {}
+        wanted = np.asarray(chunk_ids, dtype=self.ids.dtype)
+        pos = np.searchsorted(self.ids, wanted)  # ids are sorted (loaded by chunk_id)
+        pos = np.clip(pos, 0, len(self.ids) - 1)
+        found = self.ids[pos] == wanted
+        q = qvec.astype(np.float32)
+        return {int(c): float(np.asarray(self.mat[p], dtype=np.float32) @ q)
+                for c, p, ok in zip(chunk_ids, pos, found) if ok}
+
 
 @dataclass
 class Hit:
@@ -194,6 +206,7 @@ class Hit:
     text: str
     sources: list[str]
     score: float
+    similarity: float | None = None  # cosine similarity query/chunk (None without embeddings)
 
 
 class Searcher:
@@ -246,13 +259,15 @@ class Searcher:
             log.warning("FTS query failed (%s): %s", fts, e)
             return []
 
-    def semantic(self, con, query: str, limit: int) -> list[int]:
+    def semantic(self, con, query: str, limit: int) -> tuple[list[int], np.ndarray | None]:
+        """Chunk ids closest in meaning, and the query vector (None if unavailable)."""
         if not self.cfg.embeddings_enabled or not self.vectors.ensure(con):
-            return []
+            return [], None
         emb = self.embedder()
         if emb is None:
-            return []
-        return [cid for cid, _ in self.vectors.query(emb.embed_query(query), limit)]
+            return [], None
+        qvec = emb.embed_query(query)
+        return [cid for cid, _ in self.vectors.query(qvec, limit)], qvec
 
     def search(self, con, query: str, limit: int = 10, folder: str | None = None,
                file_type: str | None = None, modified_after: str | None = None,
@@ -260,10 +275,11 @@ class Searcher:
         clauses, params = self._filters(folder, file_type, modified_after)
         filtered = bool(clauses)
         ranked: dict[str, list[int]] = {}
+        qvec = None
         if mode in ("hybrid", "keyword"):
             ranked["keyword"] = self.keyword(con, query, 100, clauses, params)
         if mode in ("hybrid", "semantic"):
-            ranked["semantic"] = self.semantic(con, query, 2000 if filtered else 100)
+            ranked["semantic"], qvec = self.semantic(con, query, 2000 if filtered else 100)
 
         fused: dict[int, float] = {}
         sources: dict[int, list[str]] = {}
@@ -294,5 +310,11 @@ class Searcher:
                 hits.append(Hit(cid, r["doc_id"], r["path"], r["ext"], r["mtime"], r["page_no"],
                                 r["n_pages"] or 0, r["text"], sources[cid], fused[cid]))
                 if len(hits) >= limit:
-                    return hits
+                    break
+            if len(hits) >= limit:
+                break
+        if qvec is not None:  # also for hits found by keyword only
+            sims = self.vectors.similarity(qvec, [h.chunk_id for h in hits])
+            for h in hits:
+                h.similarity = sims.get(h.chunk_id)
         return hits

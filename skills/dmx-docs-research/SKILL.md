@@ -1,0 +1,120 @@
+---
+name: dmx-docs-research
+description: Agentic research workflow for the Demaurex project documentation exposed by the dmx-docs MCP tools (search, find_files, list_folder, read_document, find_in_document). Use it for EVERY question answered from the company documents - projects (THOR, YAKUMA, ANGE...), machines (Paloma, Presto, Hector...), offers, specifications, FAT/SAT, manuals, schematics, SAV - and whenever the dmx-docs tools are available and the question could be answered from internal documents.
+---
+
+# Researching the Demaurex documentation (dmx-docs)
+
+Never answer from the raw top results of a single search. Run this loop:
+**reformulate → retrieve → evaluate → (retry, max 3 rounds) → synthesize with sources.**
+
+## 0. What is in the index
+
+- PDF and Word files of the project folders on `\\DMX-FS01.rotzingerag.local\Daten$\RMA_PROJETS`
+  (= drive N:), mostly French; also English, German, Spanish. Excel, images and CAD are not indexed.
+- One folder per project, code-named (THOR, YAKUMA, ANGE, BOULE, MANOLO, INIESTA...), always
+  with the same structure. Use it to target searches with `folder=`:
+
+| Folder | Holds | Typical subfolders |
+|---|---|---|
+| `0_Vente` | offers, customer specifications, orders | `00_Offres`, `02_Commandes`, `03_Cahier_des_charges`, `04_Formulaire_validation`, `06_Materiel_Tiers` |
+| `1_Finances` | invoices, payments | `11_Facturation` |
+| `2_Electrique` | electrical design, schematics (long, mostly labels) | `20_Conception`, `21_Modifications`, `23_Schemas` |
+| `3_Mecanique` | mechanical design, layouts, third-party equipment | `30_Conception`, `31_Modifications`, `33_Layouts`, `37_Materiel_Tiers` |
+| `4_Soft` | software | |
+| `5_Gestion` | project follow-up, meetings, planning, acceptance, transport | `51_Suivi`, `52_Planning`, `54_Transport`, `55_MES`, `56_Acceptation_machine` (FAT/SAT protocols) |
+| `6_Rapports_Tests` | internal tests, commissioning reports, open points | `60_Tests_Internes`, `61_MES`, `604_Open_points_lists` |
+| `8_Documentation` | machine manuals (FR/EN/DE), supplier docs | `80_USB stick Doc Project` (copy of the manual), `85_Received_DOC` |
+| `9_SAV` | after-sales service | |
+
+- Folders named `Anciennes versions` / `old` are not indexed: the index holds current versions.
+
+## 1. Reformulate
+
+Turn the question into **2-4 search queries** before the first search:
+
+- **Precise French technical terms first**, then synonyms and the English/German equivalent.
+  Vocabulary seen in the documents:
+  - gripping: préhenseur, ventouse(s), pince, doigts souples, préhension, tilt, vide/venturi — gripper, suction cup
+  - speed: cadence, débit, produits par minute (ppm), coups/min, rattrapage — throughput, rate
+  - acceptance: FAT (réception usine), SAT (réception site), MES / mise en service, protocole de réception, OPL / open points list, réserves
+  - machine parts: convoyeur (à bande, de boîtes), collateur, infeed, dépileur/denester, formeuse, fermeuse, encolleuse, flowpack/flow-pack, étui, carton, barquette, blister, francomat, XTS, vision/caméra
+  - robots/machines: Paloma (nR), Presto, Hector, Delfi, Astor, Nestor — the number before R is the number of robots
+  - documents: offre, cahier des charges (CDC), spécification, note de modification, rapport d'intervention, compte rendu, manuel, schéma électrique, nomenclature/BOM, pièces détachées
+- **Exact identifiers in "double quotes"**: order numbers (`"120006116"`), part numbers (`"R911347583"`), codes (`"MN-114"`). Use `mode="keyword"` for these.
+- **Decompose** multi-part or multi-project questions: one query per part ("cadence THOR" and "cadence YAKUMA", not "cadence THOR et YAKUMA").
+- **Name a project, client or machine?** First `find_files` with that name, then restrict searches with `folder="...\\RMA_PROJETS\\THOR"` (or a subfolder such as `5_Gestion`).
+- Recent information only? Use `modified_after="2025"`.
+
+## 2. Retrieve
+
+Run the queries with `search` (default `mode="hybrid"`, `limit` 10; up to 20 for broad questions).
+Each hit looks like:
+
+```
+[3] \\...\THOR\5_Gestion\56_Acceptation_machine\FAT DEMAUREX 221024.pdf — page 7/8 (PDF, modified 2024-10-28) [keyword+semantic, similarity 0.87 strong]
+    excerpt...
+```
+
+## 3. Evaluate (before using anything)
+
+For each promising hit, judge:
+
+| Signal | Meaning |
+|---|---|
+| `keyword+semantic` | found by both methods: most reliable |
+| similarity **strong** (≥ 0.86) | usually on topic |
+| similarity **medium** (0.84-0.86) | possibly relevant: read the passage to confirm |
+| similarity **weak** (< 0.84) | probably off topic, even if words match |
+| note "all matches are weak" | the documents probably do not cover the question as phrased |
+
+Then check, out loud for yourself:
+1. **Relevance**: does the excerpt answer the question, or only share words with it (e.g. "cadence" in a generic manual page vs. the project's measured rate)?
+2. **Coverage**: is every part of the question answered by at least one relevant source?
+3. **Right scope**: right project, right machine, right document type (a supplier manual does not tell what was agreed with the client; an offer does not tell what was measured at the FAT).
+4. **Consistency**: do sources disagree? Compare dates/versions: offer < specification < modification < FAT < SAT < SAV.
+5. **Depth**: excerpts are a few hundred characters. **Always open the 1-3 best documents with `read_document`** around the matching page (start_page = page - 1) before answering; use `find_in_document` to find all mentions of a term in a long file, and `list_folder` to see neighbouring documents (later versions, related reports).
+
+## 4. Retry (max 3 search rounds in total)
+
+If evaluation finds missing parts, weak or off-topic results, or contradictions to resolve, change the approach - do not repeat the same query:
+
+| Problem | Next attempt |
+|---|---|
+| no or weak results | synonyms, broader term, English/German wording, `mode="semantic"` with a full-sentence description |
+| too many generic hits (manuals, schematics) | narrow with `folder=` (project or subfolder), add the project/machine name, `file_type`, `modified_after` |
+| an exact code/name not found | `mode="keyword"`, partial code with `*`, `find_files` on the name |
+| one part of the question unanswered | a dedicated query for that sub-question only |
+| answer probably in a specific document type | target its folder (FAT → `5_Gestion\56_Acceptation_machine`, client requirement → `0_Vente\03_Cahier_des_charges`, open issues → `6_Rapports_Tests`, `5_Gestion\51_Suivi`) |
+| contradiction between sources | find the most recent version, look for modification notes or later reports |
+
+Stop when the evaluation is satisfied, or after the third round: then answer with the best evidence and say what is missing.
+
+## 5. Synthesize
+
+- Answer in the language of the question, starting with the direct answer.
+- Use **only** what you read in the documents. General engineering knowledge may be added only if clearly labeled as not coming from the documents.
+- **Cite every fact**: full path + page, e.g. `\\DMX-FS01.rotzingerag.local\Daten$\RMA_PROJETS\THOR\5_Gestion\56_Acceptation_machine\FAT DEMAUREX 221024 (OPL St Michel).pdf (p. 7)`. Word page numbers are approximate - say "p. ~3".
+- When versions disagree, give the most recent one and mention the older value with its source.
+- End with a short **Limites / Limitations** line when relevant: what was not found, what is uncertain (medium matches, single source, old document), and which document or person could confirm it.
+
+Answer skeleton:
+
+```
+<direct answer, 1-3 sentences>
+
+<details: facts with their source after each one>
+
+Sources : <list of the documents used, path + pages>
+Limites : <what is missing or uncertain - omit if nothing>
+```
+
+## Example
+
+Question: « Quels problèmes ont été relevés lors de la FAT de THOR, et sont-ils résolus ? »
+
+1. Reformulate: `find_files "THOR FAT"`; `search "problèmes relevés FAT réserves" folder=...\THOR`; `search "points ouverts OPL" folder=...\THOR`; `search "levée des réserves SAT mise en service" folder=...\THOR`.
+2. Retrieve → FAT protocol (5_Gestion\56_Acceptation_machine) strong; an open-points list in 6_Rapports_Tests medium.
+3. Evaluate → FAT problems covered; resolution status not covered yet. Read the FAT protocol pages around the hits.
+4. Retry (round 2) → `search "SAT réception site" folder=...\THOR`, `list_folder ...\THOR\6_Rapports_Tests` → later report found, read it.
+5. Synthesize → list of FAT issues with page citations, status of each from the later report, and what remains unconfirmed.

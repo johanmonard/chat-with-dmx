@@ -146,6 +146,27 @@ Check from the command line:
 claude mcp add dmx-docs -- C:\dmx\chat-with-dmx\.venv\Scripts\dmx-docs.exe --config C:\dmx\chat-with-dmx\config.toml serve
 ```
 
+### How Claude researches (agentic retrieval)
+
+Claude does not answer from the first search results. It follows a loop:
+**reformulate** the question into precise queries (French terms, synonyms, other languages,
+one query per sub-question, restricted to the project folder) → **search** → **evaluate**
+each excerpt (relevance, coverage, contradictions, then read the best documents in full) →
+**retry** with another angle if something is missing (3 rounds at most) → **answer** with a
+source (path + page) for every fact and the limits of what was found.
+
+* The short version is built into the MCP server (`INSTRUCTIONS` in `src/dmx_docs/server.py`),
+  so every client follows it without installing anything.
+* The detailed playbook is the skill `skills/dmx-docs-research/SKILL.md` (domain vocabulary,
+  project folder map, relevance rubric, retry strategies, answer template).
+  * Claude Desktop: *Settings → Capabilities → Skills → Upload skill*, choose
+    `U:\DMX-RAG\skills\dmx-docs-research.zip`.
+  * Claude Code: copy the folder to `%USERPROFILE%\.claude\skills\`.
+* Each search hit shows its **meaning similarity** to the query, calibrated for
+  multilingual-e5-large on these documents: *strong* ≥ 0.86 (on topic), *medium* 0.84–0.86
+  (check by reading), *weak* < 0.84 (probably off topic). When all hits are weak, the result
+  says so.
+
 ### Tips for good answers
 
 * Ask precise questions and mention project numbers, clients or machine types when you
