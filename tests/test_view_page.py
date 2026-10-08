@@ -61,6 +61,46 @@ def test_works_when_roots_come_from_the_database(tools, make_cfg):
     assert data[:4] == b"\x89PNG"
 
 
+@pytest.fixture
+def launched(monkeypatch):
+    from dmx_docs import tools as tools_mod
+    calls = []
+    monkeypatch.setattr(tools_mod, "_launch", lambda args=None, path=None, verb="open": calls.append((args, path, verb)))
+    return calls, tools_mod
+
+
+@pytest.mark.parametrize("viewer, expect", [
+    (r"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe", lambda a, p: a[1:3] == ["/A", "page=2"]),
+    (r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+     lambda a, p: a[1].startswith("file:") and a[1].endswith("Schema.pdf#page=2")),
+])
+def test_open_pdf_at_page(tools, launched, monkeypatch, viewer, expect):
+    t, root = tools
+    calls, mod = launched
+    monkeypatch.setattr(mod, "_default_app", lambda ext: viewer)
+    out = t.open_document(str(root / "THOR" / "Schema.pdf"), page=2)
+    assert "at page 2" in out and len(calls) == 1 and expect(calls[0][0], calls[0][1])
+
+
+def test_open_word_read_only_and_unknown_viewer(tools, launched, monkeypatch):
+    t, root = tools
+    calls, mod = launched
+    monkeypatch.setattr(mod, "_default_app", lambda ext: r"C:\Tools\SumatraPDF.exe")
+    assert "go to page 2" in t.open_document(str(root / "THOR" / "Schema.pdf"), page=2)
+    assert "read-only" in t.open_document(str(root / "THOR" / "Rapport FAT.docx"))
+    assert calls[-1][2] == "OpenAsReadOnly"
+
+
+def test_open_refuses_other_file_types(tools, launched, tmp_path):
+    t, root = tools
+    (root / "THOR" / "setup.exe").write_bytes(b"MZ")
+    with pytest.raises(ValueError, match="Only .pdf"):
+        t.open_document(str(root / "THOR" / "setup.exe"))
+    with pytest.raises(ValueError, match="outside the indexed folders"):
+        t.open_document(str(tmp_path / "elsewhere.pdf"))
+    assert launched[0] == []
+
+
 def test_refuses_doc_and_paths_outside_the_roots(tools, tmp_path):
     t, root = tools
     with pytest.raises(ValueError, match="cannot be shown"):

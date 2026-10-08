@@ -182,6 +182,19 @@ def build_server(cfg: Config) -> MCPServer:
         return [caption, Image(data=data, format=fmt)]
 
     @mcp.tool(**kw)
+    def open_document(path: str, page: int | None = None) -> str:
+        """Open a document on the user's PC in its usual application (Acrobat, Edge, Word...),
+        at the given page when the PDF viewer supports it; Word files open read-only.
+        Only when the USER asks to open or see the original file - never to read it yourself
+        (use read_document / view_page for that).
+
+        Args:
+            path: Full file path (as shown in search results).
+            page: Optional page to open the PDF at.
+        """
+        return tools.open_document(path, page=page)
+
+    @mcp.tool(**kw)
     def index_status() -> str:
         """Show what is indexed: number of documents per status and type, embeddings coverage,
         root folders and last indexing date."""

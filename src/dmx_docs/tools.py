@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import sys
+import urllib.request
 from datetime import datetime
 
 from . import facets, sources, store
@@ -76,6 +79,54 @@ def _render_pdf_page(fs: str, path: str, page: int, region: str | None) -> tuple
                "To read small details, call again with region='x0,y0,x1,y1' (fractions of the page, "
                "e.g. '0,0,0.5,0.5' = top-left quarter).")
     return caption, data, fmt
+
+
+def _default_app(ext: str) -> str | None:
+    """Executable registered for a file extension on Windows (None if unknown)."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    size = wintypes.DWORD(1024)
+    buf = ctypes.create_unicode_buffer(size.value)
+    ASSOCSTR_EXECUTABLE = 2
+    if ctypes.windll.shlwapi.AssocQueryStringW(0, ASSOCSTR_EXECUTABLE, ext, None, buf, ctypes.byref(size)) != 0:
+        return None
+    return buf.value or None
+
+
+def _launch(args=None, path: str | None = None, verb: str = "open") -> None:
+    """Start a program, or open a file with its associated application (replaced in tests)."""
+    if args:
+        subprocess.Popen(args, close_fds=True)
+    elif sys.platform == "win32":
+        os.startfile(path, verb)
+    else:  # pragma: no cover
+        subprocess.Popen(["xdg-open", path])
+
+
+def _open_file(path: str, ext: str, page: int | None) -> str:
+    if ext == ".pdf" and page and page > 1:
+        app = _default_app(".pdf") or ""
+        name = os.path.basename(app).lower()
+        if name in ("acrobat.exe", "acrord32.exe", "acrord64.exe"):
+            _launch([app, "/A", f"page={int(page)}", path])
+            return f"at page {page}"
+        if name in ("msedge.exe", "chrome.exe", "firefox.exe"):
+            url = "file:" + urllib.request.pathname2url(path) + f"#page={int(page)}"
+            _launch([app, url])
+            return f"at page {page}"
+        _launch(path=path)
+        return f"(the default PDF viewer cannot jump to a page: go to page {page})"
+    if ext in (".docx", ".doc"):
+        try:
+            _launch(path=path, verb="OpenAsReadOnly")  # verb registered by Microsoft Word
+            return "read-only" + (f" (Word cannot jump to a page: go to page ~{page})" if page else "")
+        except OSError:
+            pass
+    _launch(path=path)
+    return "" if not page or page == 1 else f"(go to page {page})"
 
 
 def _docx_picture(fs: str, path: str, image: int | None) -> tuple[str, bytes, str]:
@@ -227,6 +278,20 @@ class DocTools:
             return _docx_picture(fs, path, image)
         raise ValueError(f"Pictures of {TYPE_LABEL.get(ext, ext)} files cannot be shown "
                          "(only PDF pages and pictures embedded in .docx files).")
+
+    # ------------------------------------------------------- open_document
+    def open_document(self, path: str, page: int | None = None) -> str:
+        """Open a document on this PC in its usual application (for the user, not for Claude)."""
+        self._con().close()  # loads the root/excluded folders that _resolve checks against
+        path, _ = self._resolve(path)
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in TYPE_LABEL:  # never launch anything but an indexed document type
+            raise ValueError(f"Only {', '.join(TYPE_LABEL)} files can be opened")
+        fs = store.fs_path(path)
+        if not os.path.isfile(fs):
+            raise FileNotFoundError(f"File not reachable now: {path}")
+        how = _open_file(path, ext, page)
+        return f"Opened {path} {how}."
 
     # ------------------------------------------------------- list_projects
     def list_projects(self, name: str | None = None, collection: str | None = None, limit: int = 300) -> str:

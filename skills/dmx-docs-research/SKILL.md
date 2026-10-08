@@ -1,6 +1,6 @@
 ---
 name: dmx-docs-research
-description: Agentic research workflow for the Demaurex project documentation exposed by the dmx-docs MCP tools (search, list_projects, find_files, list_folder, read_document, find_in_document). Use it for EVERY question answered from the company documents - projects (THOR, YAKUMA, ANGE...), machines (Paloma, Presto, Hector...), offers, specifications, FAT/SAT, manuals, schematics, SAV - and whenever the dmx-docs tools are available and the question could be answered from internal documents.
+description: Agentic research workflow for the Demaurex project documentation exposed by the dmx-docs MCP tools (search, list_projects, find_files, list_folder, read_document, find_in_document, view_page, open_document). Use it for EVERY question answered from the company documents - projects (THOR, YAKUMA, ANGE...), machines (Paloma, Presto, Hector...), offers, specifications, FAT/SAT, manuals, schematics, SAV - and whenever the dmx-docs tools are available and the question could be answered from internal documents.
 ---
 
 # Researching the Demaurex documentation (dmx-docs)
@@ -143,6 +143,13 @@ Answer skeleton:
 Sources : <list of the documents used, path + pages>
 Limites : <what is missing or uncertain - omit if nothing>
 ```
+
+## Opening the original for the user
+
+If the user asks to open, show or see the original file ("ouvre-moi la FAT de THOR page 7"),
+call `open_document path page`: it opens the file on their PC in its usual application (PDF
+at the page when the viewer allows it, Word read-only). Never use it to read a document
+yourself, and do not open files the user did not ask for.
 
 ## Example
 
