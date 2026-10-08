@@ -28,6 +28,83 @@ def _strength(sim: float) -> str:
     return "strong" if sim >= SIM_STRONG else "medium" if sim >= SIM_MEDIUM else "weak"
 
 
+VIEW_MAX_PX = 1568          # long edge sent to Claude (larger images are downscaled anyway)
+VIEW_MAX_DPI = 300          # zoomed regions are rendered at up to this resolution
+VIEW_MAX_BYTES = 1_500_000  # above this, PNG is replaced by JPEG
+
+
+def _encode(pix) -> tuple[bytes, str]:
+    data = pix.tobytes("png")  # sharp for drawings, schematics and text
+    if len(data) > VIEW_MAX_BYTES:
+        data = pix.tobytes("jpeg", jpg_quality=80)  # photos
+        return data, "jpeg"
+    return data, "png"
+
+
+def _parse_region(region: str | None):
+    if not region:
+        return None
+    try:
+        x0, y0, x1, y1 = (float(v) for v in region.replace(";", ",").split(","))
+    except ValueError:
+        raise ValueError("region must be 'x0,y0,x1,y1' as fractions of the page, e.g. '0.5,0,1,0.5' "
+                         "for the top-right quarter") from None
+    x0, x1 = sorted((min(max(x0, 0.0), 1.0), min(max(x1, 0.0), 1.0)))
+    y0, y1 = sorted((min(max(y0, 0.0), 1.0), min(max(y1, 0.0), 1.0)))
+    if x1 - x0 < 0.02 or y1 - y0 < 0.02:
+        raise ValueError("region is too small")
+    return x0, y0, x1, y1
+
+
+def _render_pdf_page(fs: str, path: str, page: int, region: str | None) -> tuple[str, bytes, str]:
+    from .extract import pymupdf
+
+    frac = _parse_region(region)
+    with pymupdf.open(fs) as doc:
+        n = doc.page_count
+        if not 1 <= page <= n:
+            raise ValueError(f"page must be between 1 and {n}")
+        p = doc[page - 1]
+        r = p.rect
+        clip = r if frac is None else pymupdf.Rect(r.x0 + frac[0] * r.width, r.y0 + frac[1] * r.height,
+                                                   r.x0 + frac[2] * r.width, r.y0 + frac[3] * r.height)
+        zoom = min(VIEW_MAX_PX / max(clip.width, clip.height), VIEW_MAX_DPI / 72)
+        pix = p.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=clip, alpha=False)
+    data, fmt = _encode(pix)
+    where = "whole page" if frac is None else f"region {region}"
+    caption = (f"{path} — page {page}/{n}, {where}, {pix.width}x{pix.height} px ({round(zoom * 72)} dpi). "
+               "To read small details, call again with region='x0,y0,x1,y1' (fractions of the page, "
+               "e.g. '0,0,0.5,0.5' = top-left quarter).")
+    return caption, data, fmt
+
+
+def _docx_picture(fs: str, path: str, image: int | None) -> tuple[str, bytes, str]:
+    import zipfile
+
+    from .extract import pymupdf
+
+    with zipfile.ZipFile(fs) as z:
+        media = [n for n in z.namelist() if n.startswith("word/media/")]
+        media.sort(key=lambda n: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", n)])
+        shown = [n for n in media if os.path.splitext(n)[1].lower() in
+                 (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff")]
+        if not shown:
+            raise ValueError(f"No picture that can be shown in {path}"
+                             + (f" ({len(media)} vector drawings only)" if media else ""))
+        k = 1 if image is None else int(image)
+        if not 1 <= k <= len(shown):
+            raise ValueError(f"image must be between 1 and {len(shown)}")
+        raw = z.read(shown[k - 1])
+    with pymupdf.open(stream=raw, filetype=os.path.splitext(shown[k - 1])[1].lstrip(".")) as img:
+        p = img[0]
+        zoom = min(1.0, VIEW_MAX_PX / max(p.rect.width, p.rect.height))
+        pix = p.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+    data, fmt = _encode(pix)
+    caption = (f"{path} — picture {k} of {len(shown)} embedded in the Word file (document order; Word "
+               f"files have no fixed pages), {pix.width}x{pix.height} px. Use image=N for the others.")
+    return caption, data, fmt
+
+
 def _date(ts: float | None) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else "?"
 
@@ -132,6 +209,24 @@ class DocTools:
                      if r["doc_type"] else "type unknown"]
             out[r["doc_id"]] = " · ".join(p for p in parts if p)
         return out
+
+    # ----------------------------------------------------------- view_page
+    def view_page(self, path: str, page: int = 1, region: str | None = None,
+                  image: int | None = None) -> tuple[str, bytes, str]:
+        """Render a PDF page (or a region of it) or return a picture embedded in a .docx.
+        Returns (caption, image bytes, format). Reads the live file: needs the network share."""
+        self._con().close()  # loads the root/excluded folders that _resolve checks against
+        path, _ = self._resolve(path)
+        fs = store.fs_path(path)
+        if not os.path.isfile(fs):
+            raise FileNotFoundError(f"File not reachable now: {path} (viewing pages needs access to the file server)")
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".pdf":
+            return _render_pdf_page(fs, path, int(page), region)
+        if ext == ".docx":
+            return _docx_picture(fs, path, image)
+        raise ValueError(f"Pictures of {TYPE_LABEL.get(ext, ext)} files cannot be shown "
+                         "(only PDF pages and pictures embedded in .docx files).")
 
     # ------------------------------------------------------- list_projects
     def list_projects(self, name: str | None = None, collection: str | None = None, limit: int = 300) -> str:

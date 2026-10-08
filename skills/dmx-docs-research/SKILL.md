@@ -105,6 +105,7 @@ Then check, out loud for yourself:
 3. **Right scope**: right project, right machine, right document type (a supplier manual does not tell what was agreed with the client; an offer does not tell what was measured at the FAT).
 4. **Consistency**: do sources disagree? Compare dates/versions: offer < specification < modification < FAT < SAT < SAV.
 5. **Depth**: excerpts are a few hundred characters. **Always open the 1-3 best documents with `read_document`** around the matching page (start_page = page - 1) before answering; use `find_in_document` to find all mentions of a term in a long file, and `list_folder` to see neighbouring documents (later versions, related reports).
+6. **Look when it is visual**: `read_document` gives text only. For drawings, layouts, schematics, photos (grippers, products, FAT pictures), tables whose extracted text is garbled, or when the user wants to see something, use `view_page path page` (PDF) - then `region="x0,y0,x1,y1"` (fractions of the page) to zoom on small text such as schematic labels or title blocks. For `.docx`, `view_page path image=N` returns the embedded pictures in document order. It reads the live file (needs the file server); `.doc` files cannot be viewed. Describe what you see and cite the page.
 
 ## 4. Retry (max 3 search rounds in total)
 

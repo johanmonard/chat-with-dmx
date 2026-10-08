@@ -6,9 +6,10 @@ import logging
 import sys
 
 try:  # mcp >= 2
-    from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver import Image, MCPServer
 except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import FastMCP as MCPServer
+    from mcp.server.fastmcp import Image
 
 try:
     from mcp.types import ToolAnnotations
@@ -49,6 +50,9 @@ Never answer from the first search alone. Follow this loop for every question:
    the document's project, section and type. Are all parts of the question covered? Do sources contradict each other
    (versions, dates)? Open the best documents with `read_document` around the matching pages
    (excerpts are short, tables and context matter) and use `find_in_document` in long files.
+   When the answer is visual (drawing, layout, schematic, photo, gripper, table whose text is
+   garbled) or the user asks to see something, look at the page with `view_page` (zoom with
+   region=; for .docx, pictures with image=).
 4. RETRY if coverage is insufficient, results are weak or off topic, or a part is missing:
    change the angle (synonyms, other language, broader or narrower terms, the document type
    that would hold the answer: offer, specification, FAT report, manual, schematic), search
@@ -158,6 +162,24 @@ def build_server(cfg: Config) -> MCPServer:
             max_hits: Maximum occurrences to show (default 20).
         """
         return tools.find_in_document(path, text, max_hits=max_hits)
+
+    @mcp.tool(**kw)
+    def view_page(path: str, page: int = 1, region: str | None = None,
+                  image: int | None = None) -> list[str | Image]:
+        """Look at a document as an image: a PDF page as it is printed (drawings, schematics,
+        layouts, photos, tables), or a picture embedded in a Word .docx (photos of FAT reports...).
+        Use it when the extracted text is not enough: visual content, garbled tables, values in
+        drawings. Reads the live file, so it needs access to the file server.
+
+        Args:
+            path: Full file path (as shown in search results).
+            page: PDF page number (default 1).
+            region: Optional zoom on part of a PDF page, 'x0,y0,x1,y1' as fractions of the page
+                (0,0 = top-left), e.g. '0.5,0.5,1,1' = bottom-right quarter. Rendered sharper.
+            image: For .docx files: number of the embedded picture (1 = first, document order).
+        """
+        caption, data, fmt = tools.view_page(path, page=page, region=region, image=image)
+        return [caption, Image(data=data, format=fmt)]
 
     @mcp.tool(**kw)
     def index_status() -> str:
