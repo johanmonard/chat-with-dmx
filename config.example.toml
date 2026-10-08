@@ -71,3 +71,7 @@ gpu_batch_size = 64
 [server]
 # Maximum characters returned by one read_document call.
 max_read_chars = 40000
+# Folder where the export_image tool saves pictures (e.g. for presentations). Default:
+# 'exports' next to data_dir (C:\dmx-rag\exports). Add this folder to a Claude Desktop
+# workspace to build presentations with the pictures.
+# export_dir = 'C:\dmx-rag\exports'

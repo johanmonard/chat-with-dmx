@@ -1,6 +1,6 @@
 ---
 name: dmx-docs-research
-description: Agentic research workflow for the Demaurex project documentation exposed by the dmx-docs MCP tools (search, list_projects, find_files, list_folder, read_document, find_in_document, view_page, open_document). Use it for EVERY question answered from the company documents - projects (THOR, YAKUMA, ANGE...), machines (Paloma, Presto, Hector...), offers, specifications, FAT/SAT, manuals, schematics, SAV - and whenever the dmx-docs tools are available and the question could be answered from internal documents.
+description: Agentic research workflow for the Demaurex project documentation exposed by the dmx-docs MCP tools (search, list_projects, find_files, list_folder, read_document, find_in_document, view_page, export_image, open_document). Use it for EVERY question answered from the company documents - projects (THOR, YAKUMA, ANGE...), machines (Paloma, Presto, Hector...), offers, specifications, FAT/SAT, manuals, schematics, SAV - and whenever the dmx-docs tools are available and the question could be answered from internal documents.
 ---
 
 # Researching the Demaurex documentation (dmx-docs)
@@ -143,6 +143,17 @@ Answer skeleton:
 Sources : <list of the documents used, path + pages>
 Limites : <what is missing or uncertain - omit if nothing>
 ```
+
+## Pictures for presentations, reports, emails
+
+Images seen with `view_page` are not files and cannot be put on slides. To reuse a picture:
+1. find and check it with `view_page` (page, then `region=` to frame just the tool/drawing);
+2. save it with `export_image` (same path/page/region, or `image=N` for a .docx picture, and a
+   meaningful `name=` like "DUOMO_prehenseur_SS") - it writes a sharp PNG/JPG to the user's local
+   export folder (default `C:\dmx-rag\exports`) and returns the file path;
+3. build the deck/document from those files. The network share (N:) is never needed for this.
+If your workspace cannot see the export folder, ask the user to add `C:\dmx-rag\exports` to it.
+Cite the source document and page of each picture on the slide.
 
 ## Opening the original for the user
 

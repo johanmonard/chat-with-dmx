@@ -61,6 +61,22 @@ def test_works_when_roots_come_from_the_database(tools, make_cfg):
     assert data[:4] == b"\x89PNG"
 
 
+def test_export_image_files(tools, tmp_path):
+    t, root = tools
+    t.cfg.export_dir = str(tmp_path / "exports")
+    out = t.export_image(str(root / "THOR" / "Schema.pdf"), page=2, region="0,0,0.5,0.5")
+    target = tmp_path / "exports" / "Schema_p2_zoom.png"
+    assert str(target) in out and target.read_bytes()[:4] == b"\x89PNG"
+    assert max(pymupdf.Pixmap(str(target)).width, pymupdf.Pixmap(str(target)).height) > 1568  # slide quality
+    again = t.export_image(str(root / "THOR" / "Schema.pdf"), page=2, region="0,0,0.5,0.5")
+    assert "Schema_p2_zoom_2.png" in again  # never overwrites
+    out = t.export_image(str(root / "THOR" / "Rapport FAT.docx"), image=2, name="../../FAT photo bleue")
+    target = tmp_path / "exports" / "FAT_photo_bleue.png"  # name sanitized, stays in the folder
+    assert str(target) in out and tuple(pymupdf.Pixmap(str(target)).pixel(5, 5)) == (0, 0, 255)
+    with pytest.raises(ValueError, match="only be exported"):
+        t.export_image(str(root / "THOR" / "ancien.doc"))
+
+
 @pytest.fixture
 def launched(monkeypatch):
     from dmx_docs import tools as tools_mod

@@ -182,6 +182,24 @@ def build_server(cfg: Config) -> MCPServer:
         return [caption, Image(data=data, format=fmt)]
 
     @mcp.tool(**kw)
+    def export_image(path: str, page: int = 1, region: str | None = None, image: int | None = None,
+                     name: str | None = None) -> str:
+        """Save a picture from a document as an image FILE on the user's PC, to use it elsewhere
+        (presentation, report, email): a PDF page or a zoomed region of it (rendered sharply, up
+        to 2400 px), or a picture embedded in a .docx (original resolution). Returns the file path,
+        in the user's local export folder (default C:\\dmx-rag\\exports).
+        Check the page/region first with view_page.
+
+        Args:
+            path: Full file path (as shown in search results).
+            page: PDF page number (default 1).
+            region: Optional part of a PDF page, 'x0,y0,x1,y1' as fractions (0,0 = top-left).
+            image: For .docx files: number of the embedded picture (1 = first).
+            name: Optional file name (without extension), e.g. "DUOMO_preheneur_SS".
+        """
+        return tools.export_image(path, page=page, region=region, image=image, name=name)
+
+    @mcp.tool(**kw)
     def open_document(path: str, page: int | None = None) -> str:
         """Open a document on the user's PC in its usual application (Acrobat, Edge, Word...),
         at the given page when the PDF viewer supports it; Word files open read-only.

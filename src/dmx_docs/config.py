@@ -42,6 +42,7 @@ class Config:
     embed_device: str = "auto"  # 'auto' (GPU if available), 'cpu' or 'cuda'
 
     max_read_chars: int = 40000
+    export_dir: str | None = None  # where export_image saves files (default: ~\Claude\dmx-images)
     config_path: Path | None = None
 
     def __post_init__(self) -> None:
@@ -136,4 +137,6 @@ def load_config(path: str | os.PathLike) -> Config:
             kwargs[attr] = emb[key]
     if "max_read_chars" in srv:
         kwargs["max_read_chars"] = srv["max_read_chars"]
+    if srv.get("export_dir"):
+        kwargs["export_dir"] = os.path.expandvars(os.path.expanduser(str(srv["export_dir"])))
     return Config(**kwargs)

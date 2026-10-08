@@ -59,7 +59,8 @@ def _parse_region(region: str | None):
     return x0, y0, x1, y1
 
 
-def _render_pdf_page(fs: str, path: str, page: int, region: str | None) -> tuple[str, bytes, str]:
+def _render_pdf_page(fs: str, path: str, page: int, region: str | None,
+                     max_px: int = VIEW_MAX_PX) -> tuple[str, bytes, str]:
     from .extract import pymupdf
 
     frac = _parse_region(region)
@@ -71,7 +72,7 @@ def _render_pdf_page(fs: str, path: str, page: int, region: str | None) -> tuple
         r = p.rect
         clip = r if frac is None else pymupdf.Rect(r.x0 + frac[0] * r.width, r.y0 + frac[1] * r.height,
                                                    r.x0 + frac[2] * r.width, r.y0 + frac[3] * r.height)
-        zoom = min(VIEW_MAX_PX / max(clip.width, clip.height), VIEW_MAX_DPI / 72)
+        zoom = min(max_px / max(clip.width, clip.height), VIEW_MAX_DPI / 72)
         pix = p.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=clip, alpha=False)
     data, fmt = _encode(pix)
     where = "whole page" if frac is None else f"region {region}"
@@ -129,10 +130,23 @@ def _open_file(path: str, ext: str, page: int | None) -> str:
     return "" if not page or page == 1 else f"(go to page {page})"
 
 
-def _docx_picture(fs: str, path: str, image: int | None) -> tuple[str, bytes, str]:
-    import zipfile
+EXPORT_MAX_PX = 2400  # long edge of exported PDF renderings (sharp on a full-screen slide)
 
-    from .extract import pymupdf
+
+def default_export_dir(cfg: Config) -> str:
+    """Next to the local index (C:\\dmx-rag\\exports with the shared-folder setup): a local
+    folder the user can grant to a Claude Desktop workspace to build slides from."""
+    return os.path.join(os.path.dirname(str(cfg.data_dir).rstrip("\\/")), "exports")
+
+
+def _safe_name(s: str, limit: int = 60) -> str:
+    s = re.sub(r"[^\w\-]+", "_", s, flags=re.UNICODE).strip("_")
+    return s[:limit] or "image"
+
+
+def _docx_picture_raw(fs: str, image: int | None) -> tuple[bytes, str, int, int]:
+    """Original bytes of a picture embedded in a .docx: (data, extension, number, total)."""
+    import zipfile
 
     with zipfile.ZipFile(fs) as z:
         media = [n for n in z.namelist() if n.startswith("word/media/")]
@@ -140,18 +154,24 @@ def _docx_picture(fs: str, path: str, image: int | None) -> tuple[str, bytes, st
         shown = [n for n in media if os.path.splitext(n)[1].lower() in
                  (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff")]
         if not shown:
-            raise ValueError(f"No picture that can be shown in {path}"
+            raise ValueError("No picture that can be shown in this file"
                              + (f" ({len(media)} vector drawings only)" if media else ""))
         k = 1 if image is None else int(image)
         if not 1 <= k <= len(shown):
             raise ValueError(f"image must be between 1 and {len(shown)}")
-        raw = z.read(shown[k - 1])
-    with pymupdf.open(stream=raw, filetype=os.path.splitext(shown[k - 1])[1].lstrip(".")) as img:
+        return z.read(shown[k - 1]), os.path.splitext(shown[k - 1])[1].lower(), k, len(shown)
+
+
+def _docx_picture(fs: str, path: str, image: int | None) -> tuple[str, bytes, str]:
+    from .extract import pymupdf
+
+    raw, ext, k, total = _docx_picture_raw(fs, image)
+    with pymupdf.open(stream=raw, filetype=ext.lstrip(".")) as img:
         p = img[0]
         zoom = min(1.0, VIEW_MAX_PX / max(p.rect.width, p.rect.height))
         pix = p.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
     data, fmt = _encode(pix)
-    caption = (f"{path} — picture {k} of {len(shown)} embedded in the Word file (document order; Word "
+    caption = (f"{path} — picture {k} of {total} embedded in the Word file (document order; Word "
                f"files have no fixed pages), {pix.width}x{pix.height} px. Use image=N for the others.")
     return caption, data, fmt
 
@@ -278,6 +298,42 @@ class DocTools:
             return _docx_picture(fs, path, image)
         raise ValueError(f"Pictures of {TYPE_LABEL.get(ext, ext)} files cannot be shown "
                          "(only PDF pages and pictures embedded in .docx files).")
+
+    # -------------------------------------------------------- export_image
+    def export_image(self, path: str, page: int = 1, region: str | None = None,
+                     image: int | None = None, name: str | None = None) -> str:
+        """Save a PDF page/region rendering or a .docx picture as an image file in the export
+        folder (default C:\\dmx-rag\\exports), e.g. to put it on slides."""
+        self._con().close()  # loads the root/excluded folders that _resolve checks against
+        path, _ = self._resolve(path)
+        fs = store.fs_path(path)
+        if not os.path.isfile(fs):
+            raise FileNotFoundError(f"File not reachable now: {path} (needs access to the file server)")
+        ext = os.path.splitext(path)[1].lower()
+        stem = _safe_name(os.path.splitext(os.path.basename(path))[0], 50)
+        if ext == ".pdf":
+            _, data, fmt = _render_pdf_page(fs, path, int(page), region, max_px=EXPORT_MAX_PX)
+            default = f"{stem}_p{int(page)}" + ("_zoom" if region else "")
+            out_ext = "." + ("jpg" if fmt == "jpeg" else fmt)
+            what = f"page {page}" + (f", region {region}" if region else "")
+        elif ext == ".docx":
+            data, out_ext, k, total = _docx_picture_raw(fs, image)  # original resolution
+            default, what = f"{stem}_img{k}", f"picture {k} of {total}"
+        else:
+            raise ValueError(f"Images can only be exported from PDF pages and .docx files, not {ext}")
+        folder = self.cfg.export_dir or default_export_dir(self.cfg)
+        os.makedirs(folder, exist_ok=True)
+        base = _safe_name(name) if name else default
+        target = os.path.join(folder, base + out_ext)
+        n = 2
+        while os.path.exists(target):
+            target = os.path.join(folder, f"{base}_{n}{out_ext}")
+            n += 1
+        with open(target, "wb") as f:
+            f.write(data)
+        return (f"Saved {what} of {path} to {target} ({len(data) // 1024} KB), in the local "
+                f"export folder {folder} on the user's PC. If you work in a sandboxed workspace that "
+                "cannot see this folder, ask the user to add it to the workspace.")
 
     # ------------------------------------------------------- open_document
     def open_document(self, path: str, page: int | None = None) -> str:
