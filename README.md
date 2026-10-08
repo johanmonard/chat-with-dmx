@@ -163,9 +163,22 @@ source (path + page) for every fact and the limits of what was found.
     `U:\DMX-RAG\skills\dmx-docs-research.zip`.
   * Claude Code: copy the folder to `%USERPROFILE%\.claude\skills\`.
 * Each search hit shows its **meaning similarity** to the query, calibrated for
-  multilingual-e5-large on these documents: *strong* ≥ 0.86 (on topic), *medium* 0.84–0.86
-  (check by reading), *weak* < 0.84 (probably off topic). When all hits are weak, the result
+  multilingual-e5-large on these documents: *strong* ≥ 0.86 (on topic), *medium* 0.83–0.86
+  (check by reading), *weak* < 0.83 (often off topic; short queries score lower, so these are hints). When all hits are weak, the result
   says so.
+
+### Facets: project, collection, section, document type
+
+Each document gets facets derived from its path (no re-indexing needed; computed in a second):
+**project** (the folder above the project template, at any depth), **collection** (a numbered
+folder grouping projects, e.g. `2_Hors_Garantie`), **section** (Vente, Electrique, Gestion…,
+from the current `0_Vente…9_SAV` template or the older named one) and **document type** (offre,
+cahier_des_charges, fat, sat, mise_en_service, manuel, schema_electrique…, from the template
+folders, else from file-name keywords, else from the section). Search results show them;
+`search` accepts `project=`, `doc_type=`, `section=`, `collection=` filters; `list_projects`
+lists projects. Filters leave out documents whose facet is unknown, so Claude repeats a thin
+filtered search without them. Rules are in `src/dmx_docs/facets.py`; bump `FACETS_VERSION`
+after changing them and every document is reclassified.
 
 ### Tips for good answers
 

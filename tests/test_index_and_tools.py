@@ -160,7 +160,8 @@ def test_mcp_server_lists_tools(indexed):
             return names, res
 
     names, res = asyncio.run(run())
-    assert names == {"search", "find_files", "list_folder", "read_document", "find_in_document", "index_status"}
+    assert names == {"search", "find_files", "list_folder", "read_document", "find_in_document", "index_status",
+                     "list_projects"}
     assert "Spec_cellule.pdf" in res.content[0].text
 
 

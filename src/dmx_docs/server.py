@@ -22,10 +22,12 @@ from .tools import DocTools
 INSTRUCTIONS = """\
 Read-only access to the company's project documentation (Demaurex: robotic packaging lines;
 PDF and Word files, mostly French, also English, German, Spanish). One folder per project
-(code names like THOR, YAKUMA, ANGE) with the same subfolders: 0_Vente (offers,
+(code names like THOR, YAKUMA, ANGE); current projects use the subfolders 0_Vente (offers,
 specifications), 1_Finances, 2_Electrique (schematics), 3_Mecanique, 4_Soft,
 5_Gestion (follow-up, FAT/SAT acceptance), 6_Rapports_Tests, 7_Photos_Videos,
-8_Documentation (manuals), 9_SAV.
+8_Documentation (manuals), 9_SAV; older projects use named folders (Cahier des charges,
+Electrique, Gestion, Rapports, Documentation, SAV, Clôture). Each search hit shows its
+project, collection, section and document type when known.
 
 Never answer from the first search alone. Follow this loop for every question:
 
@@ -33,13 +35,17 @@ Never answer from the first search alone. Follow this loop for every question:
    and synonyms (préhenseur/ventouse/pince, cadence/débit/produits par minute, FAT/réception
    usine, SAT/mise en service), English/German equivalents, exact codes in "double quotes".
    If the question has several parts or spans several projects, make one query per part.
-   If it names a project, client or machine, also run `find_files` and use `folder=` to
-   restrict searches to that project.
+   If it names a project, check its exact name with `list_projects` and filter with
+   project= (project names are often ordinary words: ANGE, BOULE, LEON). Use doc_type= when
+   the answer lives in a known kind of document (fat, sat, offre, cahier_des_charges,
+   mise_en_service, manuel...). Old projects (collection 2_Hors_Garantie) are less well
+   classified: if a filtered search is thin, repeat it without doc_type/section.
 2. RETRIEVE with `search` (hybrid by default; mode="keyword" for codes and names).
 3. EVALUATE each hit before using it: does the excerpt actually address the question (not
    just share words)? Each hit shows how it matched and a meaning similarity: "strong"
-   (>= 0.86) is usually on topic, "medium" must be checked by reading, "weak" (< 0.84) is
-   probably off topic. Are all parts of the question covered? Do sources contradict each other
+   (>= 0.86) is usually on topic, "medium" must be checked by reading, "weak" (< 0.83) is
+   often off topic - hints only: short queries score lower, judge by reading. It also shows
+   the document's project, section and type. Are all parts of the question covered? Do sources contradict each other
    (versions, dates)? Open the best documents with `read_document` around the matching pages
    (excerpts are short, tables and context matter) and use `find_in_document` in long files.
 4. RETRY if coverage is insufficient, results are weak or off topic, or a part is missing:
@@ -61,10 +67,12 @@ def build_server(cfg: Config) -> MCPServer:
 
     @mcp.tool(**kw)
     def search(query: str, folder: str | None = None, file_type: str | None = None,
-               modified_after: str | None = None, limit: int = 10, mode: str = "hybrid") -> str:
+               modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
+               project: str | None = None, doc_type: str | None = None, section: str | None = None,
+               collection: str | None = None) -> str:
         """Search the documentation by meaning and keywords. Returns excerpts with file path and page,
         how each one matched (keyword, semantic or both) and its meaning similarity to the query
-        (strong >= 0.86, medium 0.84-0.86, weak < 0.84 = probably off topic).
+        (strong >= 0.86, medium 0.83-0.86, weak < 0.83 = often off topic). These are hints: judge by reading.
 
         Args:
             query: What to look for (any language; documents are mostly French).
@@ -74,9 +82,33 @@ def build_server(cfg: Config) -> MCPServer:
             modified_after: Optional date (YYYY, YYYY-MM or YYYY-MM-DD) - only files modified since then.
             limit: Number of results (1-30, default 10). At most 3 excerpts per document.
             mode: 'hybrid' (default), 'keyword' (exact words, codes, names) or 'semantic' (by meaning).
+            project: Optional project name(s), comma-separated, exactly as in `list_projects` (e.g. "THOR").
+            doc_type: Optional document type(s), comma-separated: offre, commande, cahier_des_charges,
+                facture, modification, schema_electrique, layout, plan, nomenclature, pieces_detachees,
+                manuel, doc_fournisseur, fat, sat, reception, mise_en_service, open_points, tests,
+                suivi, planning, transport, sav, doc_electrique, doc_mecanique, soft.
+            section: Optional project section(s): Vente, Finances, Electrique, Mecanique, Soft, Gestion,
+                Rapports_Tests, Photos_Videos, Documentation, SAV, Cloture.
+            collection: Optional collection (folder grouping projects), e.g. "2_Hors_Garantie".
+            Facet filters leave out documents whose facet is unknown (mostly old projects):
+            search again without them when results are thin.
         """
-        return tools.search(query, folder=folder, file_type=file_type,
-                            modified_after=modified_after, limit=limit, mode=mode)
+        return tools.search(query, folder=folder, file_type=file_type, modified_after=modified_after,
+                            limit=limit, mode=mode, project=project, doc_type=doc_type,
+                            section=section, collection=collection)
+
+    @mcp.tool(**kw)
+    def list_projects(name: str | None = None, collection: str | None = None, limit: int = 300) -> str:
+        """List the projects in the index with their collection (current projects, 2_Hors_Garantie...),
+        number of documents, last modification date and sections. Use it to find the exact project
+        name before filtering searches with project=, or to answer questions about projects.
+
+        Args:
+            name: Optional part of the project name.
+            collection: Optional part of the collection name.
+            limit: Maximum projects listed (default 300).
+        """
+        return tools.list_projects(name=name, collection=collection, limit=limit)
 
     @mcp.tool(**kw)
     def find_files(name: str, folder: str | None = None, limit: int = 30) -> str:

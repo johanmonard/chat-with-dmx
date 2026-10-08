@@ -9,7 +9,7 @@ import os
 import re
 from datetime import datetime
 
-from . import sources, store
+from . import facets, sources, store
 from .config import Config
 from .extract import extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
@@ -17,10 +17,11 @@ from .search import Searcher, build_fts_query, fold, make_snippet
 TYPE_LABEL = {".pdf": "PDF", ".docx": "Word", ".doc": "Word 97-2003"}
 
 # Query/passage cosine similarity with multilingual-e5-large, calibrated on the indexed
-# documents: on-topic questions score 0.85-0.89 at best, off-topic ones 0.80-0.83.
+# documents (short and long queries): the best hit of on-topic queries scores 0.84-0.89,
+# of off-topic ones 0.77-0.83; a relevant passage that is not the best hit can score 0.83.
 CALIBRATED_MODEL = "intfloat/multilingual-e5-large"
 SIM_STRONG = 0.86
-SIM_MEDIUM = 0.84
+SIM_MEDIUM = 0.83
 
 
 def _strength(sim: float) -> str:
@@ -54,10 +55,11 @@ class DocTools:
         con = store.connect(self.cfg.db_path, create=False)
         # Root/excluded folders may have changed on the configuration page.
         sources.refresh(self.cfg, con)
+        facets.refresh(con, self.cfg.roots)  # no-op when every document has its facets
         return con
 
     def _resolve(self, path: str) -> tuple[str, str]:
-        path = path.strip().strip('"')
+        path = sources.clean_path(path)  # also turns a mapped drive (N:\...) into the UNC path
         key = store.path_key(path)
         if not self.cfg.allows(key):
             raise ValueError(f"'{path}' is outside the indexed folders (roots: {', '.join(self.cfg.roots)}; "
@@ -66,20 +68,28 @@ class DocTools:
 
     # ------------------------------------------------------------ search
     def search(self, query: str, folder: str | None = None, file_type: str | None = None,
-               modified_after: str | None = None, limit: int = 10, mode: str = "hybrid") -> str:
+               modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
+               project: str | None = None, doc_type: str | None = None, section: str | None = None,
+               collection: str | None = None) -> str:
         if mode not in ("hybrid", "keyword", "semantic"):
             raise ValueError("mode must be 'hybrid', 'keyword' or 'semantic'")
         limit = max(1, min(int(limit), 30))
+        facet_filter = {"project": project, "doc_type": doc_type, "section": section, "collection": collection}
         con = self._con()
         try:
             if folder:
                 folder, _ = self._resolve(folder)
             hits = self.searcher.search(con, query, limit=limit, folder=folder, file_type=file_type,
                                         modified_after=modified_after, mode=mode,
-                                        allowed=self.cfg.allows)
+                                        allowed=self.cfg.allows, facets=facet_filter)
+            doc_facets = self._facets(con, {h.doc_id for h in hits})
         finally:
             con.close()
         notes = []
+        if any(facet_filter.values()):
+            notes.append("(filtered by " + ", ".join(f"{k}={v}" for k, v in facet_filter.items() if v)
+                         + ": documents whose facet is unknown are not included - search again without "
+                         "the filter if results are thin)")
         if mode != "keyword" and self.searcher.embedder_error:
             notes.append(f"(semantic search unavailable: {self.searcher.embedder_error}; keyword results only)")
         elif mode != "keyword" and self.searcher.vectors.ids is not None and len(self.searcher.vectors.ids) == 0:
@@ -101,9 +111,55 @@ class DocTools:
                     match += " " + _strength(h.similarity)
             lines.append(f"[{i}] {h.path} — {_page_label(h.ext)} {h.page_no}/{h.n_pages} "
                          f"({TYPE_LABEL.get(h.ext, h.ext)}, modified {_date(h.mtime)}) [{match}]")
+            if h.doc_id in doc_facets:
+                lines.append("    " + doc_facets[h.doc_id])
             lines.append("    " + make_snippet(h.text, query))
             lines.append("")
         return "\n".join(lines).rstrip()
+
+    @staticmethod
+    def _facets(con, doc_ids: set[int]) -> dict[int, str]:
+        """One line per document: project / collection / section / type (and how the type was found)."""
+        if not doc_ids:
+            return {}
+        ids = list(doc_ids)
+        out = {}
+        for r in con.execute(f"SELECT * FROM doc_facets WHERE doc_id IN ({','.join('?' * len(ids))})", ids):
+            parts = [f"project {r['project']}" if r["project"] else None,
+                     f"({r['collection']})" if r["collection"] else None,
+                     f"section {r['section']}" if r["section"] else None,
+                     f"type {r['doc_type']}" + ("" if r["facet_source"] == "folder" else f" (from {r['facet_source']})")
+                     if r["doc_type"] else "type unknown"]
+            out[r["doc_id"]] = " · ".join(p for p in parts if p)
+        return out
+
+    # ------------------------------------------------------- list_projects
+    def list_projects(self, name: str | None = None, collection: str | None = None, limit: int = 300) -> str:
+        limit = max(1, min(int(limit), 1000))
+        con = self._con()
+        try:
+            where, params = [], []
+            if name:
+                where.append("f.project LIKE ?")
+                params.append(f"%{name}%")
+            if collection:
+                where.append("coalesce(f.collection, '') LIKE ?")
+                params.append(f"%{collection}%")
+            sql = f"""SELECT f.project, f.collection, count(*) n, max(d.mtime) last,
+                             group_concat(DISTINCT f.section) sections
+                      FROM doc_facets f JOIN docs d ON d.id = f.doc_id
+                      WHERE f.project IS NOT NULL {''.join(' AND ' + w for w in where)}
+                      GROUP BY f.project, f.collection ORDER BY f.collection IS NOT NULL, f.project LIMIT ?"""
+            rows = con.execute(sql, params + [limit]).fetchall()
+        finally:
+            con.close()
+        if not rows:
+            return "No matching project in the index."
+        lines = [f"{len(rows)} projects (project | collection | indexed documents | last modified | sections):"]
+        for r in rows:
+            lines.append(f"- {r['project']} | {r['collection'] or 'current'} | {r['n']} docs | {_date(r['last'])} | "
+                         f"{r['sections'] or '-'}")
+        return "\n".join(lines)
 
     # --------------------------------------------------------- find_files
     def find_files(self, name: str, folder: str | None = None, limit: int = 30) -> str:

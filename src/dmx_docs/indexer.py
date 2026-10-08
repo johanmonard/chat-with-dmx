@@ -17,7 +17,7 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 
-from . import sources, store
+from . import facets, sources, store
 from .chunking import make_chunks
 from .config import Config
 from .extract import EXTRACT_VERSION, Extracted, extract_file
@@ -340,6 +340,7 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_st
     store.set_meta(con, "last_index_finished", time.time())
     writer.commit()
     con.execute("COMMIT")
+    facets.refresh(con, cfg.roots)
     report(force=True)
     con.close()
     return stats

@@ -1,6 +1,6 @@
 ---
 name: dmx-docs-research
-description: Agentic research workflow for the Demaurex project documentation exposed by the dmx-docs MCP tools (search, find_files, list_folder, read_document, find_in_document). Use it for EVERY question answered from the company documents - projects (THOR, YAKUMA, ANGE...), machines (Paloma, Presto, Hector...), offers, specifications, FAT/SAT, manuals, schematics, SAV - and whenever the dmx-docs tools are available and the question could be answered from internal documents.
+description: Agentic research workflow for the Demaurex project documentation exposed by the dmx-docs MCP tools (search, list_projects, find_files, list_folder, read_document, find_in_document). Use it for EVERY question answered from the company documents - projects (THOR, YAKUMA, ANGE...), machines (Paloma, Presto, Hector...), offers, specifications, FAT/SAT, manuals, schematics, SAV - and whenever the dmx-docs tools are available and the question could be answered from internal documents.
 ---
 
 # Researching the Demaurex documentation (dmx-docs)
@@ -12,8 +12,20 @@ Never answer from the raw top results of a single search. Run this loop:
 
 - PDF and Word files of the project folders on `\\DMX-FS01.rotzingerag.local\Daten$\RMA_PROJETS`
   (= drive N:), mostly French; also English, German, Spanish. Excel, images and CAD are not indexed.
-- One folder per project, code-named (THOR, YAKUMA, ANGE, BOULE, MANOLO, INIESTA...), always
-  with the same structure. Use it to target searches with `folder=`:
+- One folder per project, code-named (THOR, YAKUMA, ANGE, BOULE, MANOLO, INIESTA...). Current
+  projects sit directly under `RMA_PROJETS`; finished ones are grouped in **collections** such as
+  `2_Hors_Garantie` (out of warranty, ~500 projects). `list_projects` lists them all.
+- Every document carries **facets**, shown under each search hit and usable as filters:
+  `project`, `collection`, `section` (Vente, Finances, Electrique, Mecanique, Soft, Gestion,
+  Rapports_Tests, Photos_Videos, Documentation, SAV, Cloture) and `doc_type` (offre, commande,
+  cahier_des_charges, facture, modification, schema_electrique, layout, plan, nomenclature,
+  pieces_detachees, manuel, doc_fournisseur, fat, sat, reception, mise_en_service, open_points,
+  tests, suivi, planning, transport, sav, doc_electrique, doc_mecanique, soft).
+  "type X" = from the template folder (reliable); "type X (from name)" = guessed from the file
+  name; "(from section)" = only the section is known; "type unknown" = not classified.
+- Current projects use this template (older projects use named folders instead: `Cahier des
+  charges`, `Electrique`, `Mécanique`, `Gestion`, `Rapports`, `Documentation`, `SAV`, `Clôture`,
+  `Facturation`; their deeper folders are less regular, so their doc_type is often guessed or unknown):
 
 | Folder | Holds | Typical subfolders |
 |---|---|---|
@@ -43,8 +55,18 @@ Turn the question into **2-4 search queries** before the first search:
   - documents: offre, cahier des charges (CDC), spécification, note de modification, rapport d'intervention, compte rendu, manuel, schéma électrique, nomenclature/BOM, pièces détachées
 - **Exact identifiers in "double quotes"**: order numbers (`"120006116"`), part numbers (`"R911347583"`), codes (`"MN-114"`). Use `mode="keyword"` for these.
 - **Decompose** multi-part or multi-project questions: one query per part ("cadence THOR" and "cadence YAKUMA", not "cadence THOR et YAKUMA").
-- **Name a project, client or machine?** First `find_files` with that name, then restrict searches with `folder="...\\RMA_PROJETS\\THOR"` (or a subfolder such as `5_Gestion`).
-- Recent information only? Use `modified_after="2025"`.
+- **Name a project?** Check its exact name with `list_projects name="..."`, then filter with
+  `project="THOR"` (several: `project="THOR,YAKUMA"`). Many project names are ordinary words
+  (ANGE, BOULE, LEON, VENUS, SPACE): without the filter, a keyword search mixes the project with the word.
+  For a client or machine, use `find_files` (names often contain them) or a search without filter.
+- **Kind of document known?** Filter with `doc_type=` (FAT findings → `fat,reception`; client
+  requirement → `cahier_des_charges`; price/scope offered → `offre`; commissioning → `mise_en_service,sat`;
+  how the machine works → `manuel`). Or with `section=` for a whole area (e.g. `SAV`).
+- **Facet filters refine, they never replace the unfiltered search**: documents whose facet is
+  unknown (mostly old projects) are left out by a filter. If a filtered search is thin, run it
+  again without `doc_type`/`section` (keep `project`).
+- Recent information only? Use `modified_after="2025"`. Current vs. out-of-warranty projects:
+  `collection="2_Hors_Garantie"`.
 
 ## 2. Retrieve
 
@@ -53,6 +75,7 @@ Each hit looks like:
 
 ```
 [3] \\...\THOR\5_Gestion\56_Acceptation_machine\FAT DEMAUREX 221024.pdf — page 7/8 (PDF, modified 2024-10-28) [keyword+semantic, similarity 0.87 strong]
+    project THOR · section Gestion · type fat (from name)
     excerpt...
 ```
 
@@ -64,9 +87,14 @@ For each promising hit, judge:
 |---|---|
 | `keyword+semantic` | found by both methods: most reliable |
 | similarity **strong** (≥ 0.86) | usually on topic |
-| similarity **medium** (0.84-0.86) | possibly relevant: read the passage to confirm |
-| similarity **weak** (< 0.84) | probably off topic, even if words match |
+| similarity **medium** (0.83-0.86) | possibly relevant: read the passage to confirm |
+| similarity **weak** (< 0.83) | often off topic, even if words match |
 | note "all matches are weak" | the documents probably do not cover the question as phrased |
+| facet line (project, type) | is it the right project and the right kind of document? |
+
+The similarity labels are **hints, not verdicts**: short keyword queries score lower than full
+sentences (a relevant FAT page can show 0.83 for "problèmes cadence vision"). Always judge by
+reading the excerpt; to get more meaningful scores, phrase semantic queries as full sentences.
 
 Then check, out loud for yourself:
 1. **Relevance**: does the excerpt answer the question, or only share words with it (e.g. "cadence" in a generic manual page vs. the project's measured rate)?
@@ -82,10 +110,12 @@ If evaluation finds missing parts, weak or off-topic results, or contradictions 
 | Problem | Next attempt |
 |---|---|
 | no or weak results | synonyms, broader term, English/German wording, `mode="semantic"` with a full-sentence description |
-| too many generic hits (manuals, schematics) | narrow with `folder=` (project or subfolder), add the project/machine name, `file_type`, `modified_after` |
+| too many generic hits (manuals, schematics, other projects) | add `project=`, `doc_type=` or `section=`; `folder=` for a precise subfolder; `modified_after` |
+| filtered search thin | drop `doc_type`/`section` (keep `project`): old projects are often unclassified |
 | an exact code/name not found | `mode="keyword"`, partial code with `*`, `find_files` on the name |
 | one part of the question unanswered | a dedicated query for that sub-question only |
-| answer probably in a specific document type | target its folder (FAT → `5_Gestion\56_Acceptation_machine`, client requirement → `0_Vente\03_Cahier_des_charges`, open issues → `6_Rapports_Tests`, `5_Gestion\51_Suivi`) |
+| answer probably in a specific document type | `doc_type=` (FAT → `fat,reception`, client requirement → `cahier_des_charges`, open issues → `open_points,suivi`, commissioning → `mise_en_service,sat`) |
+| question about projects themselves (which, how many, when) | `list_projects` (by name or collection), then search per project |
 | contradiction between sources | find the most recent version, look for modification notes or later reports |
 
 Stop when the evaluation is satisfied, or after the third round: then answer with the best evidence and say what is missing.
@@ -113,8 +143,8 @@ Limites : <what is missing or uncertain - omit if nothing>
 
 Question: « Quels problèmes ont été relevés lors de la FAT de THOR, et sont-ils résolus ? »
 
-1. Reformulate: `find_files "THOR FAT"`; `search "problèmes relevés FAT réserves" folder=...\THOR`; `search "points ouverts OPL" folder=...\THOR`; `search "levée des réserves SAT mise en service" folder=...\THOR`.
-2. Retrieve → FAT protocol (5_Gestion\56_Acceptation_machine) strong; an open-points list in 6_Rapports_Tests medium.
+1. Reformulate: `list_projects name="THOR"` (exact name); `search "problèmes relevés lors de la FAT" project="THOR" doc_type="fat,reception"`; `search "points ouverts OPL réserves" project="THOR"`; `search "levée des réserves mise en service sur site" project="THOR" doc_type="sat,mise_en_service,suivi"`.
+2. Retrieve → FAT protocol (type fat) strong; an open-points list (type open_points) medium.
 3. Evaluate → FAT problems covered; resolution status not covered yet. Read the FAT protocol pages around the hits.
-4. Retry (round 2) → `search "SAT réception site" folder=...\THOR`, `list_folder ...\THOR\6_Rapports_Tests` → later report found, read it.
+4. Retry (round 2) → same query without `doc_type`, `list_folder` on the project's report folder → later report found, read it.
 5. Synthesize → list of FAT issues with page citations, status of each from the later report, and what remains unconfirmed.

@@ -229,8 +229,17 @@ class Searcher:
             return self._embedder
 
     @staticmethod
-    def _filters(folder: str | None, file_type: str | None, modified_after: str | None):
+    def _filters(folder: str | None, file_type: str | None, modified_after: str | None,
+                 facets: dict | None = None):
         clauses, params = [], []
+        # Facet filters (project, collection, section, doc_type): comma-separated values,
+        # case-insensitive. Documents without that facet are excluded by the filter.
+        for col, value in (facets or {}).items():
+            values = [v.strip() for v in str(value).split(",") if v.strip()] if value else []
+            if values:
+                marks = ",".join("?" * len(values))
+                clauses.append(f"d.id IN (SELECT doc_id FROM doc_facets WHERE {col} COLLATE NOCASE IN ({marks}))")
+                params += values
         if folder:
             key = store.path_key(folder)
             clauses.append("(d.path_key = ? OR substr(d.path_key, 1, ?) = ?)")
@@ -271,8 +280,8 @@ class Searcher:
 
     def search(self, con, query: str, limit: int = 10, folder: str | None = None,
                file_type: str | None = None, modified_after: str | None = None,
-               mode: str = "hybrid", allowed=None) -> list[Hit]:
-        clauses, params = self._filters(folder, file_type, modified_after)
+               mode: str = "hybrid", allowed=None, facets: dict | None = None) -> list[Hit]:
+        clauses, params = self._filters(folder, file_type, modified_after, facets)
         filtered = bool(clauses)
         ranked: dict[str, list[int]] = {}
         qvec = None
