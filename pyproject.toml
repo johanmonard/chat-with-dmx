@@ -13,7 +13,7 @@ dependencies = [
     "python-docx>=1.1",
     "mcp>=1.2",
     "numpy>=1.26",
-    "fastembed>=0.4",
+    "fastembed>=0.8,<0.9",  # same version everywhere: vectors must stay comparable
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "pywin32>=306; sys_platform == 'win32'",

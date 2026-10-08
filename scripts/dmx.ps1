@@ -105,7 +105,7 @@ function Install-Env {
             # The CPU and GPU packages share their folders (onnxruntime\, fastembed\): uninstalling
             # the CPU ones deletes files of the GPU ones, so those are always reinstalled.
             Invoke-Native $Uv @('pip', 'install', '--python', $Py, '--reinstall-package', 'onnxruntime-gpu',
-                                '--reinstall-package', 'fastembed-gpu', 'fastembed-gpu', $ort)
+                                '--reinstall-package', 'fastembed-gpu', 'fastembed-gpu>=0.8,<0.9', $ort)
             Invoke-Native $Py @('-c', "import fastembed, onnxruntime as o; p = o.get_available_providers(); print('GPU runtime check:', p); assert 'CUDAExecutionProvider' in p")
         } else {
             Say "NVIDIA GPU found but its driver is too old for CUDA 12 (nvidia-smi says CUDA $cuda): embeddings will use the CPU."
