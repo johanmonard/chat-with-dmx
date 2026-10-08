@@ -38,8 +38,9 @@ Never answer from the first search alone. Follow this loop for every question:
    If it names a project, check its exact name with `list_projects` and filter with
    project= (project names are often ordinary words: ANGE, BOULE, LEON). Use doc_type= when
    the answer lives in a known kind of document (fat, sat, offre, cahier_des_charges,
-   mise_en_service, manuel...). Old projects (collection 2_Hors_Garantie) are less well
-   classified: if a filtered search is thin, repeat it without doc_type/section.
+   mise_en_service, manuel...). Old projects (collections such as 2_Hors_Garantie) are less
+   well classified: if a filtered search is thin, repeat it without doc_type/section. What is
+   indexed changes: check with `list_projects` before concluding from an absence of results.
 2. RETRIEVE with `search` (hybrid by default; mode="keyword" for codes and names).
 3. EVALUATE each hit before using it: does the excerpt actually address the question (not
    just share words)? Each hit shows how it matched and a meaning similarity: "strong"

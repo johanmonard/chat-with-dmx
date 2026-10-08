@@ -13,8 +13,11 @@ Never answer from the raw top results of a single search. Run this loop:
 - PDF and Word files of the project folders on `\\DMX-FS01.rotzingerag.local\Daten$\RMA_PROJETS`
   (= drive N:), mostly French; also English, German, Spanish. Excel, images and CAD are not indexed.
 - One folder per project, code-named (THOR, YAKUMA, ANGE, BOULE, MANOLO, INIESTA...). Current
-  projects sit directly under `RMA_PROJETS`; finished ones are grouped in **collections** such as
-  `2_Hors_Garantie` (out of warranty, ~500 projects). `list_projects` lists them all.
+  projects sit directly under `RMA_PROJETS`; finished ones may be grouped in **collections** such
+  as `2_Hors_Garantie` (out of warranty). **What is indexed changes over time**: check with
+  `list_projects` (or `index_status`) which projects and collections are actually in the index
+  before concluding anything from an absence of results. If a project or collection is not
+  listed, say "not in the index" - never invent another reason.
 - Every document carries **facets**, shown under each search hit and usable as filters:
   `project`, `collection`, `section` (Vente, Finances, Electrique, Mecanique, Soft, Gestion,
   Rapports_Tests, Photos_Videos, Documentation, SAV, Cloture) and `doc_type` (offre, commande,
@@ -116,6 +119,7 @@ If evaluation finds missing parts, weak or off-topic results, or contradictions 
 | one part of the question unanswered | a dedicated query for that sub-question only |
 | answer probably in a specific document type | `doc_type=` (FAT → `fat,reception`, client requirement → `cahier_des_charges`, open issues → `open_points,suivi`, commissioning → `mise_en_service,sat`) |
 | question about projects themselves (which, how many, when) | `list_projects` (by name or collection), then search per project |
+| "which projects ..." (aggregation) | search results are never exhaustive: after the broad searches, list the candidate projects with `list_projects` and check the remaining likely ones one by one (`project=` filter); say how many projects were checked and that the list may be incomplete |
 | contradiction between sources | find the most recent version, look for modification notes or later reports |
 
 Stop when the evaluation is satisfied, or after the third round: then answer with the best evidence and say what is missing.
