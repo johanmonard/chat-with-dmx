@@ -69,6 +69,10 @@ def extract_file(path: str, options: dict | None = None) -> Extracted:
     options = options or {}
     ext = os.path.splitext(path)[1].lower()
     fs = fs_path(path)
+    hang = os.environ.get("DMX_DOCS_TEST_HANG_SUFFIX")  # tests: simulate a file that never finishes
+    if hang and path.endswith(hang):
+        import time
+        time.sleep(3600)
     try:
         if os.path.getsize(fs) == 0:  # e.g. 0-byte placeholders created from folder templates
             return Extracted(status="empty")
@@ -262,26 +266,41 @@ def _convert_with_libreoffice(soffice: str, path: str, out_dir: str) -> str:
     return out
 
 
-_word = None  # one Word instance per worker process, reused (starting Word takes seconds)
+WORD_TIMEOUT_S = 120   # a .doc conversion taking longer is stuck (usually an invisible dialog)
+WORD_PARALLEL = 4      # Word conversions at the same time, across all worker processes
+
+_word = None       # one Word instance per worker process, reused (starting Word takes seconds)
+_word_pid = None   # its process id, to kill it when it hangs
+_word_slots = None
 
 
 def _quit_word() -> None:
-    global _word
+    global _word, _word_pid
     if _word is not None:
         try:
             _word.Quit(False)
         except Exception:
             pass
-        _word = None
+    _word, _word_pid = None, None
+
+
+def _kill_word() -> None:
+    global _word, _word_pid
+    if _word_pid:
+        subprocess.run(["taskkill", "/F", "/PID", str(_word_pid)], capture_output=True)
+    _word, _word_pid = None, None
 
 
 def _get_word():
-    global _word
+    global _word, _word_pid
     if _word is None:
         import atexit
+        import uuid
 
         import pythoncom
         import win32com.client
+        import win32gui
+        import win32process
 
         pythoncom.CoInitialize()
         word = win32com.client.DispatchEx("Word.Application")
@@ -293,26 +312,64 @@ def _get_word():
             word.Options.UpdateLinksAtOpen = False
         except Exception:
             pass
+        # Find this instance's process through a unique window caption.
+        try:
+            word.Caption = caption = f"dmx-{uuid.uuid4().hex}"
+            hwnd = win32gui.FindWindow("OpusApp", caption)
+            _word_pid = win32process.GetWindowThreadProcessId(hwnd)[1] if hwnd else None
+        except Exception:
+            _word_pid = None
         _word = word
         atexit.register(_quit_word)
     return _word
 
 
+def _word_slot():
+    """Machine-wide semaphore: many Word instances working at once tend to hang."""
+    global _word_slots
+    if _word_slots is None:
+        import win32event
+
+        _word_slots = win32event.CreateSemaphore(None, WORD_PARALLEL, WORD_PARALLEL, "dmx_docs_word")
+    return _word_slots
+
+
 def _convert_with_word(path: str, out_dir: str) -> str:
+    import threading
+
+    import win32event
+
     out = os.path.join(out_dir, "converted.docx")
-    word = _get_word()
+    slot = _word_slot()
+    win32event.WaitForSingleObject(slot, win32event.INFINITE)
+    timed_out = threading.Event()
+    watchdog = None
     try:
-        # A dummy password makes protected files fail instead of prompting.
-        doc = word.Documents.Open(os.path.abspath(path), ConfirmConversions=False, ReadOnly=True,
-                                  AddToRecentFiles=False, PasswordDocument="dmx-no-password",
-                                  Visible=False, NoEncodingDialog=True)
-    except Exception:
-        _quit_word()  # Word may be in a bad state: start a fresh one for the next file
-        raise
-    try:
-        doc.SaveAs2(out, FileFormat=16)  # wdFormatDocumentDefault (.docx)
+        word = _get_word()
+        if _word_pid:
+            def kill():
+                timed_out.set()
+                _kill_word()
+            watchdog = threading.Timer(WORD_TIMEOUT_S, kill)
+            watchdog.start()
+        try:
+            # A dummy password makes protected files fail instead of prompting.
+            doc = word.Documents.Open(os.path.abspath(path), ConfirmConversions=False, ReadOnly=True,
+                                      AddToRecentFiles=False, PasswordDocument="dmx-no-password",
+                                      Visible=False, NoEncodingDialog=True)
+            try:
+                doc.SaveAs2(out, FileFormat=16)  # wdFormatDocumentDefault (.docx)
+            finally:
+                doc.Close(False)
+        except Exception:
+            if timed_out.is_set():
+                raise TimeoutError(f"Word did not convert the file within {WORD_TIMEOUT_S} s") from None
+            _quit_word()  # Word may be in a bad state: start a fresh one for the next file
+            raise
     finally:
-        doc.Close(False)
+        if watchdog is not None:
+            watchdog.cancel()
+        win32event.ReleaseSemaphore(slot, 1)
     return out
 
 

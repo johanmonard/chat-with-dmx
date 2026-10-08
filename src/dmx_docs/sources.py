@@ -35,6 +35,7 @@ def refresh(cfg: Config, con=None) -> Config:
         con = store.connect(cfg.db_path)
     try:
         _seed(con, cfg)
+        _migrate_drive_letters(con)
         roots = [r["path"] for r in con.execute("SELECT path FROM roots ORDER BY path")]
         excluded = [r["path"] for r in con.execute("SELECT path FROM excluded_dirs ORDER BY path")]
         patterns = json.loads(store.get_meta(con, "exclude_patterns", "[]"))
@@ -45,8 +46,46 @@ def refresh(cfg: Config, con=None) -> Config:
     return cfg
 
 
+def _migrate_drive_letters(con) -> None:
+    """Roots saved as 'N:\\...' become UNC paths (on a machine where that drive is mapped).
+    A root that lies inside another root becomes a ticked folder of that root."""
+    for r in con.execute("SELECT path, path_key FROM roots").fetchall():
+        unc = to_unc(r["path"])
+        if unc == r["path"]:
+            continue
+        excluded = [e["path"] for e in con.execute("SELECT path, path_key FROM excluded_dirs")
+                    if store.is_under(e["path_key"], r["path_key"])]
+        remove_root(con, r["path"])
+        try:
+            add_root(con, unc)
+        except ValueError:
+            continue  # already covered by another root
+        for ex in excluded:
+            try:
+                set_excluded(con, to_unc(ex), True)
+            except ValueError:
+                pass
+
+
 def _changed(con) -> None:
     store.set_meta(con, "sources_changed_at", time.time())
+
+
+def to_unc(path: str) -> str:
+    """'N:\\x' -> '\\\\server\\share\\x' when N: is a mapped network drive. Drive letters
+    differ between machines (and do not exist for scheduled tasks), UNC paths do not."""
+    if os.name != "nt":
+        return path
+    drive, rest = os.path.splitdrive(path)
+    if len(drive) != 2 or drive[1] != ":":
+        return path
+    import ctypes
+
+    buf = ctypes.create_unicode_buffer(1024)
+    size = ctypes.c_ulong(len(buf))
+    if ctypes.windll.mpr.WNetGetConnectionW(drive, buf, ctypes.byref(size)) != 0:
+        return path  # local drive, or not a network drive
+    return os.path.normpath(buf.value.rstrip("\\") + (rest or "\\"))
 
 
 def clean_path(path: str) -> str:
@@ -59,16 +98,27 @@ def clean_path(path: str) -> str:
         # 'Z:' and 'Z:Projets' are relative to the drive's current folder on Windows;
         # they always mean the drive root here.
         path = os.path.normpath(drive + os.sep + ("" if rest == "." else rest))
-    return path
+    return to_unc(path)
 
 
 def add_root(con, path: str) -> str:
     path = clean_path(path)
-    if not os.path.isdir(path):
+    if not os.path.isdir(store.fs_path(path)):
         raise ValueError(f"Folder not found or not reachable: {path}")
     key = store.path_key(path)
     for r in con.execute("SELECT path, path_key FROM roots"):
         if store.is_under(key, r["path_key"]):
+            # Inside an existing root: adding it means "index it again" if it was unticked.
+            cur = con.execute("DELETE FROM excluded_dirs WHERE path_key = ?", (key,))
+            parent_excluded = [e["path"] for e in con.execute("SELECT path, path_key FROM excluded_dirs")
+                               if store.is_under(key, e["path_key"])]
+            if parent_excluded:
+                raise ValueError(f"{path} is inside the unticked folder {parent_excluded[0]}: "
+                                 "tick that folder in the root folder's tree instead")
+            if cur.rowcount:
+                _changed(con)
+                con.commit()
+                return path
             raise ValueError(f"{path} is already covered by the root folder {r['path']}")
         if store.is_under(r["path_key"], key):
             raise ValueError(f"{path} contains the root folder {r['path']}: remove that one first")

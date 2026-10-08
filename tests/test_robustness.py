@@ -49,6 +49,45 @@ def test_index_finds_files_in_deep_folders(tmp_path, make_cfg):
     assert stats.scan_errors == 0 and stats.by_status == {"ok": 1}
 
 
+def test_stuck_file_does_not_block_the_run(tmp_path, make_cfg, monkeypatch):
+    from dmx_docs import indexer
+
+    root = tmp_path / "root"
+    root.mkdir()
+    for i in range(3):
+        make_pdf(str(root / f"ok{i}.pdf"), [f"Document normal numéro {i}."])
+    make_pdf(str(root / "bloque.hang.pdf"), ["Ce fichier ne finit jamais."])
+    monkeypatch.setenv("DMX_DOCS_TEST_HANG_SUFFIX", ".hang.pdf")  # inherited by the workers
+    monkeypatch.setattr(indexer, "STALL_S", 3)
+    monkeypatch.setattr(indexer, "SOLO_TIMEOUT_S", 3)
+    t = time.perf_counter()
+    stats = run_index(make_cfg(root), progress=quiet)
+    assert time.perf_counter() - t < 60
+    assert stats.by_status == {"ok": 3, "error": 1}
+    con = store.connect(make_cfg(root).db_path)
+    err = con.execute("SELECT error FROM docs WHERE name = 'bloque.hang.pdf'").fetchone()[0]
+    con.close()
+    assert "did not finish" in err
+
+
+def test_adding_an_unticked_subfolder_ticks_it_again(tmp_path, make_cfg):
+    from dmx_docs import sources
+
+    root = tmp_path / "root"
+    (root / "A").mkdir(parents=True)
+    (root / "B").mkdir()
+    cfg = make_cfg(root)
+    con = store.connect(cfg.db_path)
+    sources.refresh(cfg, con)
+    sources.set_excluded(con, str(root / "A"), True)
+    assert sources.add_root(con, str(root / "A")) == str(root / "A")
+    assert con.execute("SELECT count(*) FROM excluded_dirs").fetchone()[0] == 0
+    assert [r[0] for r in con.execute("SELECT path FROM roots")] == [str(root)]
+    with pytest.raises(ValueError, match="already covered"):
+        sources.add_root(con, str(root / "B"))
+    con.close()
+
+
 def test_new_extractor_version_reextracts_everything_once(corpus_copy, make_cfg):
     cfg = make_cfg(corpus_copy)
     first = run_index(cfg, progress=quiet)

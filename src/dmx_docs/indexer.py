@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import multiprocessing
 import os
+import subprocess
+import sys
 import time
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
@@ -28,6 +30,8 @@ _MP = multiprocessing.get_context("spawn")
 
 COMMIT_EVERY = 200
 PROGRESS_EVERY_S = 15
+STALL_S = 600         # no file finished for this long: the running ones are stuck
+SOLO_TIMEOUT_S = 300  # per-file limit when stuck or crashed files are retried alone
 
 
 class Cancelled(Exception):
@@ -82,6 +86,60 @@ def scan(cfg: Config, root: str, stats: Stats):
             except OSError as e:
                 stats.scan_errors += 1
                 log.warning("cannot stat %s: %s", path, e)
+
+
+def _kill_automation_word() -> None:
+    """End the Word instances started for .doc conversion (they outlive killed workers).
+    The user's own Word windows are not started with /Automation and are left alone."""
+    if sys.platform != "win32":
+        return
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command",
+                        "Get-CimInstance Win32_Process -Filter \"Name='WINWORD.EXE'\" | "
+                        "Where-Object { $_.CommandLine -match '/Automation|-Embedding' } | "
+                        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
+                       capture_output=True, timeout=60)
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not stop Word: %s", e)
+
+
+def _kill_pool(executor: ProcessPoolExecutor) -> None:
+    """Stop a pool whose workers may be stuck: shutdown(wait=True) would wait forever."""
+    for proc in list((getattr(executor, "_processes", None) or {}).values()):
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+    executor.shutdown(wait=False, cancel_futures=True)
+    _kill_automation_word()
+
+
+def _shutdown(executor: ProcessPoolExecutor) -> None:
+    executor.shutdown(wait=True, cancel_futures=True)
+
+
+def _extract_alone(path: str, options: dict, check_stop) -> Extracted:
+    """Extract one file in its own process, giving up after SOLO_TIMEOUT_S."""
+    solo = ProcessPoolExecutor(max_workers=1, mp_context=_MP)
+    fut = solo.submit(extract_file, path, options)
+    deadline = time.monotonic() + SOLO_TIMEOUT_S
+    try:
+        while True:
+            done, _ = wait([fut], timeout=1)  # short steps: Ctrl+C stays responsive
+            if done:
+                try:
+                    return fut.result()
+                except Exception as e:  # noqa: BLE001
+                    return Extracted(status="error", error=f"extraction crashed: {type(e).__name__}")
+            check_stop()
+            if time.monotonic() > deadline:
+                return Extracted(status="error",
+                                 error=f"extraction did not finish within {SOLO_TIMEOUT_S // 60} min (skipped)")
+    finally:
+        if fut.done():
+            _shutdown(solo)
+        else:
+            _kill_pool(solo)
 
 
 class _Writer:
@@ -176,12 +234,45 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_st
                 result = Extracted(status="error", error=f"{type(e).__name__}: {e}"[:500])
             writer.save(path, size, mtime, result, existed)
 
+    def new_pool(n: int = workers) -> ProcessPoolExecutor:
+        return ProcessPoolExecutor(max_workers=n, mp_context=_MP)
+
+    last_done = time.monotonic()
+
+    def drain(until_below: int | None) -> None:
+        """Collect finished files until fewer than `until_below` are pending (None: all).
+        Waits in 1 s steps so that Ctrl+C and the Stop button work, and restarts the
+        workers when none of them has finished a file for STALL_S."""
+        nonlocal executor, last_done
+        while pending and (until_below is None or len(pending) >= until_below):
+            done, _ = wait(pending, return_when=FIRST_COMPLETED, timeout=1)
+            if done:
+                collect(done)
+                last_done = time.monotonic()
+                if crashed and getattr(executor, "_broken", False):
+                    collect(list(pending))  # the remaining futures fail the same way
+                    _kill_pool(executor)
+                    executor = new_pool()
+            elif time.monotonic() - last_done > STALL_S:
+                stuck = [p for p, *_ in list(pending.values())[:workers]]
+                progress(f"WARNING: no file finished for {STALL_S // 60} min. Restarting the workers; "
+                         f"the {len(pending)} pending files are retried one by one "
+                         f"({SOLO_TIMEOUT_S // 60} min max each). Probably stuck: " + "; ".join(stuck))
+                log.warning("stall, probably stuck: %s", stuck)
+                crashed.extend(pending.values())
+                pending.clear()
+                _kill_pool(executor)
+                executor = new_pool()
+                last_done = time.monotonic()
+            check_stop()
+            report()
+
     if not cfg.roots:
         progress("No root folder configured: add one on the configuration page.")
-    executor = ProcessPoolExecutor(max_workers=workers, mp_context=_MP)
+    executor = new_pool()
     try:
         for root in cfg.roots:
-            if not os.path.isdir(root):
+            if not os.path.isdir(store.fs_path(root)):
                 progress(f"WARNING: root not reachable, skipped: {root}")
                 continue
             progress(f"Scanning {root} ...")
@@ -204,42 +295,27 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_st
                 try:
                     fut = executor.submit(extract_file, path, options)
                 except BrokenProcessPool:
-                    executor = ProcessPoolExecutor(max_workers=workers, mp_context=_MP)
+                    executor = new_pool()
                     fut = executor.submit(extract_file, path, options)
                 pending[fut] = (path, size, mtime, bool(row))
-                if len(pending) >= workers * 4:
-                    done, _ = wait(pending, return_when=FIRST_COMPLETED)
-                    collect(done)
-                    if crashed and getattr(executor, "_broken", False):
-                        collect(list(pending))  # the remaining futures fail the same way
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        executor = ProcessPoolExecutor(max_workers=workers, mp_context=_MP)
+                drain(until_below=workers * 4)
                 report()
-        while pending:
-            check_stop()
-            done, _ = wait(pending, return_when=FIRST_COMPLETED, timeout=1)
-            collect(done)
-            report()
+        drain(until_below=None)
+        _shutdown(executor)
+
+        # Files whose worker crashed (e.g. a malformed file crashing the PDF library) or
+        # got stuck: retry them one at a time so only the culprit is marked as an error.
+        for path, size, mtime, existed in crashed:
+            progress(f"  retrying alone: {path}")
+            writer.save(path, size, mtime, _extract_alone(path, options, check_stop), existed)
     except (KeyboardInterrupt, Cancelled):
         # Keep what was extracted so far; the next run resumes from there.
         progress("Interrupted - saving progress ...")
-        executor.shutdown(wait=False, cancel_futures=True)
+        _kill_pool(executor)
         writer.commit()
         con.execute("COMMIT")
         con.close()
         raise
-    finally:
-        executor.shutdown(wait=True, cancel_futures=True)
-
-    # A worker crashed (e.g. a malformed file crashing the PDF library): retry
-    # those files one at a time so only the culprit is marked as an error.
-    for path, size, mtime, existed in crashed:
-        with ProcessPoolExecutor(max_workers=1, mp_context=_MP) as solo:
-            try:
-                result = solo.submit(extract_file, path, options).result()
-            except Exception as e:
-                result = Extracted(status="error", error=f"extraction crashed: {type(e).__name__}")
-        writer.save(path, size, mtime, result, existed)
 
     # Remove documents of root folders that were removed or of excluded folders.
     for r in con.execute("SELECT id, path_key FROM docs").fetchall():
