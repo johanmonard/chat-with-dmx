@@ -87,7 +87,7 @@ function Test-Gpu { [bool](Get-Command nvidia-smi -ErrorAction SilentlyContinue)
 
 function Install-Env {
     if (-not (Test-Path $Uv)) { throw "uv.exe not found in $(Split-Path $Uv)" }
-    New-Item -ItemType Directory -Force $Local, $LocalData | Out-Null
+    New-Item -ItemType Directory -Force $Local, $LocalData, (Join-Path $Local 'exports') | Out-Null  # exports: export_image
     if (-not (Test-Path $Py)) {
         Say "Creating the Python 3.12 environment in $Venv ..."
         Invoke-Native $Uv @('venv', $Venv, '--python', '3.12')
