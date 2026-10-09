@@ -474,13 +474,17 @@ class NoConverter(ValueError):
 
 def kill_office_automation(*exe_names: str) -> None:
     """End the Office instances started by automation (/Automation or -Embedding on their
-    command line). The user's own Word or PowerPoint windows are left alone."""
+    command line) that have no visible window. The user's own Word or PowerPoint windows are left
+    alone, also when they live in an automation instance: PowerPoint runs one instance, so a
+    deck the user opens while the hidden one is alive opens in that very process."""
     if sys.platform != "win32" or not exe_names:
         return
     names = " OR ".join(f"Name='{n}'" for n in exe_names)
     subprocess.run(["powershell", "-NoProfile", "-Command",
                     f"Get-CimInstance Win32_Process -Filter \"{names}\" | "
                     "Where-Object { $_.CommandLine -match '/Automation|-Embedding' } | "
+                    "Where-Object { (Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue)"
+                    ".MainWindowHandle -eq 0 } | "
                     "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
                    capture_output=True, timeout=60)
 
@@ -509,6 +513,14 @@ def _ppt_slot():
 
         _ppt_slots = win32event.CreateSemaphore(None, 1, 1, "dmx_docs_powerpoint")
     return _ppt_slots
+
+
+def _close_ppt_slot() -> None:
+    """Drop this process's handle on the semaphore (see _ppt_slot); a later call opens it again."""
+    global _ppt_slots
+    if _ppt_slots is not None:
+        _ppt_slots.Close()
+        _ppt_slots = None
 
 
 def _powerpoint():

@@ -10,12 +10,13 @@ from __future__ import annotations
 import logging
 import multiprocessing
 import os
+import sys
 import time
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 
-from . import facets, sources, store
+from . import extract, facets, sources, store
 from .chunking import make_chunks
 from .config import Config
 from .extract import EXTRACT_VERSION, Extracted, extract_file, kill_office_automation
@@ -93,6 +94,43 @@ def _kill_automation_office() -> None:
         kill_office_automation("WINWORD.EXE", "POWERPNT.EXE")
     except Exception as e:  # noqa: BLE001
         log.warning("could not stop Word/PowerPoint: %s", e)
+
+
+def _kill_automation_office_after_run() -> None:
+    """End-of-run cleanup of the hidden Word/PowerPoint instances. Word is ended at once. PowerPoint
+    is a single instance shared by every process of the machine, and a conversion in another
+    process (the MCP server) may be using it right now: it is ended only while this process holds
+    the PowerPoint slot, which a conversion holds for its whole duration. If the slot stays taken
+    for POWERPOINT_TIMEOUT_S, a conversion is running and PowerPoint is left alone."""
+    try:
+        kill_office_automation("WINWORD.EXE")
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not stop Word: %s", e)
+    if sys.platform != "win32":
+        return
+    try:
+        import win32event
+    except ImportError:  # no pywin32: this program cannot have started a PowerPoint
+        return
+    opened_here = extract._ppt_slots is None  # a handle this process opened only for the cleanup is closed again
+    try:
+        slot = extract._ppt_slot()
+        try:
+            if win32event.WaitForSingleObject(slot, int(extract.POWERPOINT_TIMEOUT_S * 1000)) != win32event.WAIT_OBJECT_0:
+                log.warning("PowerPoint was left running: a .ppt conversion in another process still "
+                            "holds it after %s s", extract.POWERPOINT_TIMEOUT_S)
+                return
+            try:
+                kill_office_automation("POWERPNT.EXE")
+            finally:
+                win32event.ReleaseSemaphore(slot, 1)
+        finally:
+            if opened_here:
+                # The semaphore lives as long as any process has a handle on it: one kept by this
+                # long-lived process would hold the count of a worker killed mid-conversion at zero.
+                extract._close_ppt_slot()
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not stop PowerPoint: %s", e)
 
 
 def _kill_pool(executor: ProcessPoolExecutor) -> None:
@@ -301,7 +339,7 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_st
             progress(f"  retrying alone: {path}")
             writer.save(path, size, mtime, _extract_alone(path, options, check_stop), existed)
         if ".ppt" in cfg.extensions:
-            _kill_automation_office()  # the hidden PowerPoint started for conversions
+            _kill_automation_office_after_run()  # the hidden Word/PowerPoint started for conversions
     except (KeyboardInterrupt, Cancelled):
         # Keep what was extracted so far; the next run resumes from there.
         progress("Interrupted - saving progress ...")

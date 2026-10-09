@@ -145,6 +145,83 @@ def test_stuck_powerpoint_times_out_and_frees_the_slot(tmp_path, monkeypatch):
         extract._convert_with_powerpoint(str(tmp_path / "stuck2.ppt"), str(tmp_path))
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows processes")
+def test_kill_office_automation_spares_instances_with_a_visible_window(monkeypatch):
+    # PowerPoint is single-instance: a deck the user opens while the hidden automation instance is
+    # alive lives in that very process. It has a window now and must not be killed.
+    from dmx_docs import extract
+    commands = []
+    monkeypatch.setattr(extract.subprocess, "run", lambda cmd, **kw: commands.append(cmd))
+    extract.kill_office_automation("WINWORD.EXE", "POWERPNT.EXE")
+    assert len(commands) == 1 and commands[0][:2] == ["powershell", "-NoProfile"]
+    script = commands[0][-1]
+    assert "Name='WINWORD.EXE' OR Name='POWERPNT.EXE'" in script
+    assert "/Automation|-Embedding" in script
+    assert "MainWindowHandle" in script and "Stop-Process" in script
+    assert script.index("/Automation|-Embedding") < script.index("MainWindowHandle") < script.index("Stop-Process")
+    assert "-eq 0" in script[script.index("MainWindowHandle"):script.index("Stop-Process")]
+
+
+@pytest.fixture
+def ppt_slot(monkeypatch):
+    """A private stand-in for the machine-wide PowerPoint semaphore, free at the start."""
+    import win32event
+    from dmx_docs import extract
+    slot = win32event.CreateSemaphore(None, 1, 1, None)
+    monkeypatch.setattr(extract, "_ppt_slot", lambda: slot)
+    return slot
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows semaphores")
+def test_end_of_run_cleanup_holds_the_powerpoint_slot_around_the_kill(ppt_slot, monkeypatch):
+    # Another process (the MCP server on the same machine) may be converting a .ppt right now: it
+    # holds the slot, and ending PowerPoint under it would lose that conversion.
+    import win32event
+    from dmx_docs import indexer
+    seen = []
+
+    def fake_kill(*names):
+        if "POWERPNT.EXE" in names:  # (probing takes the slot when it is free, so only here)
+            seen.append((names, win32event.WaitForSingleObject(ppt_slot, 0)))  # WAIT_TIMEOUT = the slot is held
+
+    monkeypatch.setattr(indexer, "kill_office_automation", fake_kill)
+    indexer._kill_automation_office_after_run()
+    powerpoint = [state for names, state in seen if "POWERPNT.EXE" in names]
+    assert powerpoint == [win32event.WAIT_TIMEOUT]
+    assert win32event.WaitForSingleObject(ppt_slot, 0) == win32event.WAIT_OBJECT_0  # released again
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows semaphores")
+def test_end_of_run_cleanup_leaves_powerpoint_alone_while_a_conversion_runs(ppt_slot, monkeypatch, caplog):
+    import logging
+
+    import win32event
+    from dmx_docs import extract, indexer
+    assert win32event.WaitForSingleObject(ppt_slot, 0) == win32event.WAIT_OBJECT_0  # another process converts
+    killed = []
+    monkeypatch.setattr(extract, "POWERPOINT_TIMEOUT_S", 0.2)  # the wait is bounded by this
+    monkeypatch.setattr(indexer, "kill_office_automation", lambda *names: killed.append(names))
+    with caplog.at_level(logging.WARNING, logger="dmx_docs.indexer"):
+        indexer._kill_automation_office_after_run()
+    assert all("POWERPNT.EXE" not in names for names in killed)
+    assert "PowerPoint" in caplog.text and "conversion" in caplog.text
+    # The slot was not ours: it must not have been released into existence.
+    assert win32event.WaitForSingleObject(ppt_slot, 0) == win32event.WAIT_TIMEOUT
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows semaphores")
+def test_end_of_run_cleanup_is_part_of_an_index_run_with_ppt(tmp_path, make_cfg, monkeypatch):
+    from dmx_docs import indexer
+    calls = []
+    monkeypatch.setattr(indexer, "_kill_automation_office_after_run", lambda: calls.append("cleanup"))
+    root = tmp_path / "Empty"
+    root.mkdir()
+    run_index(make_cfg(root, extensions=[".pdf"]), progress=quiet)
+    assert calls == []                                    # no .ppt: PowerPoint was never started
+    run_index(make_cfg(root, extensions=[".pdf", ".ppt"]), progress=quiet)
+    assert calls == ["cleanup"]
+
+
 def _has_powerpoint():
     from dmx_docs.extract import _powerpoint_installed
     return _powerpoint_installed()
