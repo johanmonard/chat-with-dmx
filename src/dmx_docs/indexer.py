@@ -10,8 +10,6 @@ from __future__ import annotations
 import logging
 import multiprocessing
 import os
-import subprocess
-import sys
 import time
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
@@ -20,7 +18,7 @@ from dataclasses import dataclass, field
 from . import facets, sources, store
 from .chunking import make_chunks
 from .config import Config
-from .extract import EXTRACT_VERSION, Extracted, extract_file
+from .extract import EXTRACT_VERSION, Extracted, extract_file, kill_office_automation
 
 log = logging.getLogger("dmx_docs.indexer")
 
@@ -88,19 +86,13 @@ def scan(cfg: Config, root: str, stats: Stats):
                 log.warning("cannot stat %s: %s", path, e)
 
 
-def _kill_automation_word() -> None:
-    """End the Word instances started for .doc conversion (they outlive killed workers).
-    The user's own Word windows are not started with /Automation and are left alone."""
-    if sys.platform != "win32":
-        return
+def _kill_automation_office() -> None:
+    """End the Word/PowerPoint instances started for .doc/.ppt conversion (they outlive killed
+    workers; PowerPoint is never quit by the workers). The user's own windows are left alone."""
     try:
-        subprocess.run(["powershell", "-NoProfile", "-Command",
-                        "Get-CimInstance Win32_Process -Filter \"Name='WINWORD.EXE'\" | "
-                        "Where-Object { $_.CommandLine -match '/Automation|-Embedding' } | "
-                        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
-                       capture_output=True, timeout=60)
+        kill_office_automation("WINWORD.EXE", "POWERPNT.EXE")
     except Exception as e:  # noqa: BLE001
-        log.warning("could not stop Word: %s", e)
+        log.warning("could not stop Word/PowerPoint: %s", e)
 
 
 def _kill_pool(executor: ProcessPoolExecutor) -> None:
@@ -111,7 +103,7 @@ def _kill_pool(executor: ProcessPoolExecutor) -> None:
         except Exception:  # noqa: BLE001
             pass
     executor.shutdown(wait=False, cancel_futures=True)
-    _kill_automation_word()
+    _kill_automation_office()
 
 
 def _shutdown(executor: ProcessPoolExecutor) -> None:
@@ -308,6 +300,8 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_st
         for path, size, mtime, existed in crashed:
             progress(f"  retrying alone: {path}")
             writer.save(path, size, mtime, _extract_alone(path, options, check_stop), existed)
+        if ".ppt" in cfg.extensions:
+            _kill_automation_office()  # the hidden PowerPoint started for conversions
     except (KeyboardInterrupt, Cancelled):
         # Keep what was extracted so far; the next run resumes from there.
         progress("Interrupted - saving progress ...")

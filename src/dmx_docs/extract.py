@@ -84,6 +84,8 @@ def extract_file(path: str, options: dict | None = None) -> Extracted:
             return extract_doc(path, options.get("doc_converter", "auto"), options.get("libreoffice_path"))
         if ext == ".pptx":
             return extract_pptx(fs)
+        if ext == ".ppt":
+            return extract_ppt(path, options.get("doc_converter", "auto"), options.get("libreoffice_path"))
         return Extracted(status="skipped", error=f"unsupported extension {ext}")
     except Exception as e:  # corrupt or unreadable files must not stop the run
         return Extracted(status="error", error=f"{type(e).__name__}: {e}"[:500])
@@ -253,16 +255,16 @@ def _word_available() -> bool:
         return False
 
 
-def _convert_with_libreoffice(soffice: str, path: str, out_dir: str) -> str:
+def _convert_with_libreoffice(soffice: str, path: str, out_dir: str, target: str = "docx") -> str:
     # A private profile per call lets several worker processes convert at once.
     profile = os.path.join(out_dir, "lo_profile")
     profile_url = "file:///" + profile.replace("\\", "/").lstrip("/")
     subprocess.run(
         [soffice, f"-env:UserInstallation={profile_url}", "--headless", "--norestore",
-         "--convert-to", "docx", "--outdir", out_dir, path],
+         "--convert-to", target, "--outdir", out_dir, path],
         check=True, capture_output=True, timeout=180,
     )
-    out = os.path.join(out_dir, os.path.splitext(os.path.basename(path))[0] + ".docx")
+    out = os.path.join(out_dir, os.path.splitext(os.path.basename(path))[0] + "." + target)
     if not os.path.exists(out):
         raise RuntimeError("LibreOffice produced no output")
     return out
@@ -464,3 +466,119 @@ def extract_pptx(path: str) -> Extracted:
     if not pages:
         return Extracted(status="empty", n_pages=len(slides), title=title)
     return Extracted(status="ok", pages=pages, n_pages=len(slides), title=title)
+
+
+class NoConverter(ValueError):
+    """No program is installed to convert an old Office format."""
+
+
+def kill_office_automation(*exe_names: str) -> None:
+    """End the Office instances started by automation (/Automation or -Embedding on their
+    command line). The user's own Word or PowerPoint windows are left alone."""
+    if sys.platform != "win32" or not exe_names:
+        return
+    names = " OR ".join(f"Name='{n}'" for n in exe_names)
+    subprocess.run(["powershell", "-NoProfile", "-Command",
+                    f"Get-CimInstance Win32_Process -Filter \"{names}\" | "
+                    "Where-Object { $_.CommandLine -match '/Automation|-Embedding' } | "
+                    "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
+                   capture_output=True, timeout=60)
+
+
+def _powerpoint_installed() -> bool:
+    if sys.platform != "win32" or not _word_available():  # _word_available: pywin32 is installed
+        return False
+    import winreg
+
+    try:
+        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, r"PowerPoint.Application\CurVer"))
+        return True
+    except OSError:
+        return False
+
+
+POWERPOINT_TIMEOUT_S = 120  # a .ppt conversion taking longer is stuck (usually an invisible dialog)
+_ppt_slots = None
+
+
+def _ppt_slot():
+    """Machine-wide semaphore: PowerPoint runs one instance shared by every worker process."""
+    global _ppt_slots
+    if _ppt_slots is None:
+        import win32event
+
+        _ppt_slots = win32event.CreateSemaphore(None, 1, 1, "dmx_docs_powerpoint")
+    return _ppt_slots
+
+
+def _powerpoint():
+    """The running PowerPoint (possibly the user's own) or a new hidden one. Never quit here:
+    the indexer ends the automation instances after the run (kill_office_automation)."""
+    import pythoncom
+    import win32com.client
+
+    pythoncom.CoInitialize()
+    app = win32com.client.DispatchEx("PowerPoint.Application")
+    try:
+        app.DisplayAlerts = 1        # ppAlertsNone
+        app.AutomationSecurity = 3   # msoAutomationSecurityForceDisable: no macros
+    except Exception:
+        pass
+    return app
+
+
+def _convert_with_powerpoint(path: str, out_dir: str) -> str:
+    import threading
+
+    import win32event
+
+    out = os.path.join(out_dir, "converted.pptx")
+    slot = _ppt_slot()
+    if win32event.WaitForSingleObject(slot, POWERPOINT_TIMEOUT_S * 3 * 1000) != win32event.WAIT_OBJECT_0:
+        raise TimeoutError("PowerPoint is blocked by another .ppt conversion")
+    timed_out = threading.Event()
+
+    def kill():
+        timed_out.set()
+        kill_office_automation("POWERPNT.EXE")
+
+    watchdog = threading.Timer(POWERPOINT_TIMEOUT_S, kill)
+    watchdog.start()
+    try:
+        app = _powerpoint()
+        # ReadOnly, Untitled=False, WithWindow=False: nothing appears on screen.
+        pres = app.Presentations.Open(os.path.abspath(path), True, False, False)
+        try:
+            pres.SaveAs(out, 24)  # ppSaveAsOpenXMLPresentation (.pptx)
+        finally:
+            pres.Close()
+    except Exception:
+        if timed_out.is_set():
+            raise TimeoutError(f"PowerPoint did not convert the file within {POWERPOINT_TIMEOUT_S} s") from None
+        raise
+    finally:
+        watchdog.cancel()
+        win32event.ReleaseSemaphore(slot, 1)
+    if not os.path.exists(out):
+        raise RuntimeError("PowerPoint produced no output")
+    return out
+
+
+def convert_ppt(path: str, out_dir: str, converter: str = "auto", libreoffice_path: str | None = None) -> str:
+    """Convert an old .ppt into a .pptx in out_dir and return its path. 'auto' prefers LibreOffice;
+    'word' (= Microsoft Office) uses PowerPoint."""
+    soffice = find_libreoffice(libreoffice_path) if converter in ("auto", "libreoffice") else None
+    if soffice:
+        return _convert_with_libreoffice(soffice, path, out_dir, target="pptx")
+    if converter in ("auto", "word") and _powerpoint_installed():
+        return _convert_with_powerpoint(path, out_dir)
+    raise NoConverter("no .ppt converter (install LibreOffice or Microsoft PowerPoint + pywin32)")
+
+
+def extract_ppt(path: str, converter: str = "auto", libreoffice_path: str | None = None) -> Extracted:
+    with tempfile.TemporaryDirectory(prefix="dmx_ppt_") as tmp:
+        try:
+            converted = convert_ppt(path, tmp, converter, libreoffice_path)
+        except NoConverter as e:
+            return Extracted(status="skipped", error=str(e))
+        return extract_pptx(converted)

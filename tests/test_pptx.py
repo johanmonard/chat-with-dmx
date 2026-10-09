@@ -95,3 +95,78 @@ def test_pptx_table_keeps_columns_under_a_vertical_merge(tmp_path):
     assert "Group | Speed" in lines
     assert "| Max" in lines  # Max stays in the second column: the covered cell leaves an empty slot
     assert "Motor | 3 kW" in lines
+
+
+def test_ppt_without_converter_is_skipped(tmp_path, monkeypatch):
+    from dmx_docs import extract
+    monkeypatch.setattr(extract, "find_libreoffice", lambda configured=None: None)
+    monkeypatch.setattr(extract, "_powerpoint_installed", lambda: False)
+    old = tmp_path / "old.ppt"
+    old.write_bytes(b"old powerpoint")
+    r = extract.extract_file(str(old))
+    assert r.status == "skipped" and "no .ppt converter" in r.error
+
+
+def test_ppt_converter_choice(tmp_path, monkeypatch):
+    from dmx_docs import extract
+    calls = []
+    monkeypatch.setattr(extract, "find_libreoffice", lambda configured=None: "soffice.exe")
+    monkeypatch.setattr(extract, "_convert_with_libreoffice",
+                        lambda soffice, path, out_dir, target="docx": calls.append(("lo", target)) or "x.pptx")
+    monkeypatch.setattr(extract, "_powerpoint_installed", lambda: True)
+    monkeypatch.setattr(extract, "_convert_with_powerpoint", lambda path, out_dir: calls.append(("ppt",)) or "y.pptx")
+    assert extract.convert_ppt("a.ppt", str(tmp_path)) == "x.pptx"                    # auto: LibreOffice first
+    assert extract.convert_ppt("a.ppt", str(tmp_path), converter="word") == "y.pptx"  # Microsoft Office
+    assert calls == [("lo", "pptx"), ("ppt",)]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows semaphores")
+def test_stuck_powerpoint_times_out_and_frees_the_slot(tmp_path, monkeypatch):
+    import threading
+
+    from dmx_docs import extract
+    released = threading.Event()
+
+    class FakePresentations:
+        def Open(self, *args):
+            released.wait(30)  # a hidden dialog: Open returns only when PowerPoint is killed
+            raise RuntimeError("The RPC server is unavailable.")
+
+    class FakeApp:
+        Presentations = FakePresentations()
+
+    monkeypatch.setattr(extract, "POWERPOINT_TIMEOUT_S", 1)
+    monkeypatch.setattr(extract, "_powerpoint", lambda: FakeApp())
+    monkeypatch.setattr(extract, "kill_office_automation", lambda *names: released.set())
+    with pytest.raises(TimeoutError, match="within 1 s"):
+        extract._convert_with_powerpoint(str(tmp_path / "stuck.ppt"), str(tmp_path))
+    released.clear()
+    with pytest.raises(TimeoutError, match="within 1 s"):  # not "blocked": the slot was released
+        extract._convert_with_powerpoint(str(tmp_path / "stuck2.ppt"), str(tmp_path))
+
+
+def _has_powerpoint():
+    from dmx_docs.extract import _powerpoint_installed
+    return _powerpoint_installed()
+
+
+@pytest.mark.skipif(not _has_powerpoint(), reason="Microsoft PowerPoint + pywin32 not available")
+def test_ppt_conversion_with_powerpoint(tmp_path):
+    import pythoncom
+    import win32com.client
+
+    from dmx_docs import extract
+    deck = tmp_path / "Deck.pptx"
+    make_pptx(deck)
+    old = tmp_path / "Deck.ppt"
+    pythoncom.CoInitialize()
+    app = win32com.client.DispatchEx("PowerPoint.Application")
+    pres = app.Presentations.Open(str(deck), True, False, False)
+    pres.SaveAs(str(old), 1)  # ppSaveAsPresentation (PowerPoint 97-2003)
+    pres.Close()
+    try:
+        r = extract.extract_file(str(old), {"doc_converter": "word"})
+        assert r.status == "ok", r.error
+        assert "Hygienic design" in dict(r.pages)[2]
+    finally:
+        extract.kill_office_automation("POWERPNT.EXE")
