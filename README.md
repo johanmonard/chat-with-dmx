@@ -222,6 +222,11 @@ The index itself never runs on the share (SQLite is not safe there): each run ta
 copies the index to `C:\dmx-rag` on the machine, works on it and copies it back.
 Only one machine can work on the index at a time.
 
+Each family of documents is a **world** (projects, marketing...) with its own index, so each
+can be shared with its own audience. Worlds are declared in `config.toml`
+(`[worlds.<name>]`: title, profile, file types, first root folders); every command takes
+`--world <name>` (default: projects).
+
 ```
 U:\DMX-RAG\
   1 - Setup this machine.cmd           builds C:\dmx-rag\venv (GPU runtime on NVIDIA machines)
@@ -229,18 +234,27 @@ U:\DMX-RAG\
   3 - Index new and changed files.cmd
   4 - Compute embeddings.cmd           from a cmd prompt you can add e.g. --max-minutes 300
   5 - Update Claude Desktop copy.cmd   local copy for Claude Desktop + the configuration to paste
+  7 - Update a world (index + embeddings).cmd   unattended run, e.g. on the GPU machine
   Unlock after a crash.cmd
-  config.toml      settings for all machines (data_dir = 'C:\dmx-rag\data')
+  config.toml      settings for all machines (data_dir = 'C:\dmx-rag\data') + [worlds.<name>]
+  thesaurus.toml   search vocabulary shared by every world
   app\             this repository (git pull here to update; machines reinstall automatically)
-  data\            index.sqlite3, index.prev.sqlite3 (previous version), LOCK
+  worlds\<name>\   index.sqlite3, index.prev.sqlite3 (previous version), LOCK, register.csv (projects)
   models\          embedding model, copied to each machine once
   tools\uv.exe     installs Python and the packages without admin rights
   logs\            one log per run
 ```
 
-* The launchers are in `scripts\launchers` and the logic in `scripts\dmx.ps1`.
+* Every launcher asks for the world (Enter = projects); from a cmd prompt give it as first
+  argument, e.g. `"7 - Update a world (index + embeddings).cmd" marketing`.
+* One machine at a time works on a world; two machines can work on two different worlds.
+* Local copies are in `C:\dmx-rag\data\<world>`. Claude Desktop gets one server per world:
+  `dmx-docs` for projects, `dmx-<world>` for the others (launcher 5 prints the entry).
+* The launchers are in `scripts\launchers` and the logic in `scripts\dmx.ps1`. The first run
+  of the new script moves the old single index (`data\`) to `worlds\projects` (renames only).
 * Use UNC paths for root folders (`\\server\share\...`): drive letters can differ between machines.
-* Indexing `.doc` files needs Word or LibreOffice on the machine that indexes.
+* Indexing `.doc` files needs Word or LibreOffice, `.ppt` files PowerPoint or LibreOffice, on
+  the machine that indexes.
 * If a machine crashes during a run, run the same command again on that machine: it continues
   from its local copy. From another machine, *Unlock after a crash* releases the lock (the
   unsaved work of the crashed run is then lost).
@@ -266,6 +280,9 @@ folder, or the `DMX_DOCS_CONFIG` environment variable).
   pages follow Word's last saved page breaks when available), `.doc` converted to `.docx`.
   Extraction runs in several processes. A file that crashes a worker is retried alone and
   marked as an error.
+* PowerPoint: python-pptx, one slide = one page (titles, text, tables, speaker notes); .ppt converted to .pptx first.
+  PowerPoint files are indexed only when `.pptx` and/or `.ppt` are in `extensions`
+  (see `[worlds.marketing]` in config.example.toml).
 * Chunks: ~1,200–2,000 characters, never spanning two pages, so every hit has a page number.
 * Keyword search: SQLite FTS5 with BM25 ranking, case- and accent-insensitive. Codes like
   `MN-114` are matched as phrases.

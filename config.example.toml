@@ -17,8 +17,10 @@ roots = [
 # to this config file.
 data_dir = 'C:\dmx-docs-data'
 
-# File types to index. '.doc' (Word 97-2003) needs LibreOffice or Microsoft
-# Word installed for conversion; remove it from the list to skip those files.
+# File types to index. '.doc' (Word 97-2003) needs LibreOffice or Microsoft Word installed for
+# conversion; remove it from the list to skip those files. Add '.pptx' to index PowerPoint, and
+# '.ppt' (PowerPoint 97-2003) if LibreOffice or Microsoft PowerPoint is installed. A world can
+# have its own list (see [worlds] below).
 extensions = ['.pdf', '.docx', '.doc']
 
 # Initial exclusion patterns (editable later on the configuration page).
@@ -40,8 +42,8 @@ max_pdf_pages = 3000
 # Parallel extraction processes (default: number of CPU cores - 1, max 8).
 # workers = 6
 
-# How to convert old .doc files: 'auto' (LibreOffice, then Word), 'libreoffice',
-# 'word', or 'none'.
+# How to convert old .doc/.ppt files: 'auto' (LibreOffice, then Microsoft Office), 'libreoffice',
+# 'word' (Microsoft Office: Word for .doc, PowerPoint for .ppt), or 'none'.
 doc_converter = 'auto'
 # libreoffice_path = 'C:\Program Files\LibreOffice\program\soffice.exe'
 
@@ -75,3 +77,18 @@ max_read_chars = 40000
 # 'exports' next to data_dir (C:\dmx-rag\exports). Add this folder to a Claude Desktop
 # workspace to build presentations with the pictures.
 # export_dir = 'C:\dmx-rag\exports'
+
+# Worlds: separate indexes for separate families of documents, each shared with its own
+# audience (local files in data_dir\<world>). Choose one with `dmx-docs --world <name>`
+# (default: projects). Without [worlds] tables there is a single index directly in data_dir.
+# profile: 'projects' (project folders, machine register), 'marketing' (category = first
+# folder) or 'none'. A world may set its own extensions, exclude and roots (first-run seed).
+# [worlds.projects]
+# title = "Projects"
+# profile = "projects"
+#
+# [worlds.marketing]
+# title = "Marketing"
+# profile = "marketing"
+# extensions = ['.pdf', '.docx', '.doc', '.pptx', '.ppt']
+# roots = ['\\server\share\Marketing']
