@@ -80,7 +80,8 @@ max_read_chars = 40000
 
 # Worlds: separate indexes for separate families of documents, each shared with its own
 # audience (local files in data_dir\<world>). Choose one with `dmx-docs --world <name>`
-# (default: projects). Without [worlds] tables there is a single index directly in data_dir.
+# (default: projects). Without [worlds] tables there is a single index directly in data_dir
+# (the shared-folder launchers, dmx.ps1, still need at least a [worlds.projects] table).
 # profile: 'projects' (project folders, machine register), 'marketing' (category = first
 # folder) or 'none'. A world may set its own extensions, exclude and roots (first-run seed).
 # [worlds.projects]

@@ -220,12 +220,14 @@ To index or embed from whichever machine is available (a GPU VM for embeddings, 
 overnight...), keep everything in a shared folder and use the launchers in it.
 The index itself never runs on the share (SQLite is not safe there): each run takes a lock,
 copies the index to `C:\dmx-rag` on the machine, works on it and copies it back.
-Only one machine can work on the index at a time.
+Only one machine at a time works on a given world's index.
 
 Each family of documents is a **world** (projects, marketing...) with its own index, so each
 can be shared with its own audience. Worlds are declared in `config.toml`
 (`[worlds.<name>]`: title, profile, file types, first root folders); every command takes
-`--world <name>` (default: projects).
+`--world <name>` (default: projects). Without `[worlds]` tables the command line still works
+with a single index, but the shared-folder launchers (`dmx.ps1`) need at least a
+`[worlds.projects]` table.
 
 ```
 U:\DMX-RAG\
