@@ -250,7 +250,14 @@ class Searcher:
             values = [v.strip() for v in str(value).split(",") if v.strip()] if value else []
             if values:
                 marks = ",".join("?" * len(values))
-                if col == "project":  # a project name or one of its sub-projects (machines)
+                if col == "machine":  # documents of projects with that machine family or model
+                    from .machines import confirmed_sql
+                    clauses.append(
+                        "d.id IN (SELECT doc_id FROM doc_facets WHERE project IN (SELECT project FROM "
+                        f"project_machines pm WHERE {confirmed_sql()} AND (family COLLATE NOCASE IN ({marks}) "
+                        f"OR model COLLATE NOCASE IN ({marks}))))")
+                    params += values + values
+                elif col == "project":  # a project name or one of its sub-projects (machines)
                     clauses.append(f"d.id IN (SELECT doc_id FROM doc_facets WHERE project COLLATE NOCASE "
                                    f"IN ({marks}) OR subproject COLLATE NOCASE IN ({marks}))")
                     params += values + values

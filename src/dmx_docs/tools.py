@@ -12,7 +12,7 @@ import sys
 import urllib.request
 from datetime import datetime
 
-from . import facets, sources, store
+from . import facets, machines, sources, store
 from .config import Config
 from .extract import extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
@@ -218,11 +218,12 @@ class DocTools:
     def search(self, query: str, folder: str | None = None, file_type: str | None = None,
                modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
                project: str | None = None, doc_type: str | None = None, section: str | None = None,
-               collection: str | None = None) -> str:
+               collection: str | None = None, machine: str | None = None) -> str:
         if mode not in ("hybrid", "keyword", "semantic"):
             raise ValueError("mode must be 'hybrid', 'keyword' or 'semantic'")
         limit = max(1, min(int(limit), 30))
-        facet_filter = {"project": project, "doc_type": doc_type, "section": section, "collection": collection}
+        facet_filter = {"project": project, "doc_type": doc_type, "section": section, "collection": collection,
+                        "machine": machine}
         con = self._con()
         try:
             if folder:
@@ -272,8 +273,13 @@ class DocTools:
             return {}
         ids = list(doc_ids)
         out = {}
+        machine_cache: dict[str, str] = {}
         for r in con.execute(f"SELECT * FROM doc_facets WHERE doc_id IN ({','.join('?' * len(ids))})", ids):
             project = r["project"] and (r["project"] + (f" / {r['subproject']}" if r["subproject"] else ""))
+            if r["project"] and r["project"] not in machine_cache:
+                machine_cache[r["project"]] = machines.describe(con, r["project"], limit=2)
+            if r["project"] and machine_cache[r["project"]]:
+                project += f" [{machine_cache[r['project']]}]"
             parts = [f"project {project}" if project else None,
                      f"({r['collection']})" if r["collection"] else None,
                      f"section {r['section']}" if r["section"] else None,
@@ -351,7 +357,8 @@ class DocTools:
         return f"Opened {path} {how}."
 
     # ------------------------------------------------------- list_projects
-    def list_projects(self, name: str | None = None, collection: str | None = None, limit: int = 300) -> str:
+    def list_projects(self, name: str | None = None, collection: str | None = None,
+                      machine: str | None = None, limit: int = 300) -> str:
         limit = max(1, min(int(limit), 1000))
         con = self._con()
         try:
@@ -359,6 +366,13 @@ class DocTools:
             if collection:
                 where = " AND coalesce(f.collection, '') LIKE ?"
                 params.append(f"%{collection}%")
+            if machine:  # a family ("Paloma") or a model ("Paloma 4R"), comma-separated
+                values = [v.strip() for v in machine.split(",") if v.strip()]
+                marks = ",".join("?" * len(values))
+                where += (f" AND f.project IN (SELECT project FROM project_machines pm WHERE "
+                          f"{machines.confirmed_sql()} AND (family COLLATE NOCASE IN ({marks}) "
+                          f"OR model COLLATE NOCASE IN ({marks})))")
+                params += values + values
             if name:  # match the project or any of its sub-projects, but list the whole project
                 having = " HAVING f.project LIKE ? OR coalesce(group_concat(f.subproject), '') LIKE ?"
                 params += [f"%{name}%", f"%{name}%"]
@@ -370,15 +384,20 @@ class DocTools:
                       GROUP BY f.project, f.collection{having}
                       ORDER BY f.collection IS NOT NULL, f.project LIMIT ?"""
             rows = con.execute(sql, params + [limit]).fetchall()
+            machine_text = {r["project"]: machines.describe(con, r["project"]) for r in rows}
         finally:
             con.close()
         if not rows:
             return "No matching project in the index."
-        lines = [f"{len(rows)} projects (project | collection | indexed documents | last modified | sections):"]
+        lines = [f"{len(rows)} projects (project | collection | indexed documents | last modified | "
+                 "machines found in the documents | sections):"]
         for r in rows:
             subs = f" | sub-projects: {', '.join(sorted(r['subprojects'].split(',')))}" if r["subprojects"] else ""
             lines.append(f"- {r['project']} | {r['collection'] or 'current'} | {r['n']} docs | {_date(r['last'])} | "
-                         f"{r['sections'] or '-'}{subs}")
+                         f"{machine_text[r['project']] or 'machine unknown'} | {r['sections'] or '-'}{subs}")
+        if machine:
+            lines.append("(machine types come from file names and from offers, specifications, FAT/SAT... "
+                         "a project whose documents never name its machine is not listed)")
         return "\n".join(lines)
 
     # --------------------------------------------------------- find_files

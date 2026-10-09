@@ -39,7 +39,10 @@ Never answer from the first search alone. Follow this loop for every question:
    If it names a project, check its exact name with `list_projects` and filter with
    project= (project names are often ordinary words: ANGE, BOULE, LEON). Use doc_type= when
    the answer lives in a known kind of document (fat, sat, offre, cahier_des_charges,
-   mise_en_service, manuel...). Old projects (collections such as 2_Hors_Garantie) are less
+   mise_en_service, manuel...). If the question is about a machine type (Paloma, Presto,
+   Hector, Delfi, Astor, Nestor, FeedPlacer, or a model like "Paloma 4R"), filter with
+   machine=; for "which projects ..." questions, get the complete candidate list with
+   list_projects(machine=...) and check them one by one. Old projects (collections such as 2_Hors_Garantie) are less
    well classified: if a filtered search is thin, repeat it without doc_type/section. What is
    indexed changes: check with `list_projects` before concluding from an absence of results.
 2. RETRIEVE with `search` (hybrid by default; mode="keyword" for codes and names).
@@ -74,7 +77,7 @@ def build_server(cfg: Config) -> MCPServer:
     def search(query: str, folder: str | None = None, file_type: str | None = None,
                modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
                project: str | None = None, doc_type: str | None = None, section: str | None = None,
-               collection: str | None = None) -> str:
+               collection: str | None = None, machine: str | None = None) -> str:
         """Search the documentation by meaning and keywords. Returns excerpts with file path and page,
         how each one matched (keyword, semantic or both) and its meaning similarity to the query
         (strong >= 0.86, medium 0.83-0.86, weak < 0.83 = often off topic). These are hints: judge by reading.
@@ -95,25 +98,32 @@ def build_server(cfg: Config) -> MCPServer:
             section: Optional project section(s): Vente, Finances, Electrique, Mecanique, Soft, Gestion,
                 Rapports_Tests, Photos_Videos, Documentation, SAV, Cloture.
             collection: Optional collection (folder grouping projects), e.g. "2_Hors_Garantie".
+            machine: Optional machine family or model of the project, comma-separated: "Paloma",
+                "Presto", "Hector", "Delfi", "Astor", "Nestor", "FeedPlacer", or a model like
+                "Paloma 4R", "Presto 2R", "Paloma 8R SQ".
             Facet filters leave out documents whose facet is unknown (mostly old projects):
             search again without them when results are thin.
         """
         return tools.search(query, folder=folder, file_type=file_type, modified_after=modified_after,
                             limit=limit, mode=mode, project=project, doc_type=doc_type,
-                            section=section, collection=collection)
+                            section=section, collection=collection, machine=machine)
 
     @mcp.tool(**kw)
-    def list_projects(name: str | None = None, collection: str | None = None, limit: int = 300) -> str:
+    def list_projects(name: str | None = None, collection: str | None = None, machine: str | None = None,
+                      limit: int = 300) -> str:
         """List the projects in the index with their collection (current projects, 2_Hors_Garantie...),
-        number of documents, last modification date and sections. Use it to find the exact project
-        name before filtering searches with project=, or to answer questions about projects.
+        number of documents, last modification date, the machine models found in their documents
+        (Paloma 11R, Presto 2R...) and sections. Use it to find the exact project name before
+        filtering searches with project=, to get ALL the projects with a given machine
+        (machine="Paloma") before checking them one by one, or to answer questions about projects.
 
         Args:
             name: Optional part of the project name.
             collection: Optional part of the collection name.
+            machine: Optional machine family or model, e.g. "Paloma", "Presto 2R".
             limit: Maximum projects listed (default 300).
         """
-        return tools.list_projects(name=name, collection=collection, limit=limit)
+        return tools.list_projects(name=name, collection=collection, machine=machine, limit=limit)
 
     @mcp.tool(**kw)
     def find_files(name: str, folder: str | None = None, limit: int = 30) -> str:

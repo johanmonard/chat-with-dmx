@@ -197,6 +197,8 @@ def refresh(con, roots: list[str]) -> int:
     con.executemany(f"INSERT OR REPLACE INTO doc_facets ({','.join(COLUMNS)}) "
                     f"VALUES ({','.join('?' * len(COLUMNS))})", rows)
     con.execute("COMMIT") if autocommit else con.commit()
+    from . import machines
+    machines.refresh(con)  # machine types per project; no-op when nothing changed
     return len(rows)
 
 
