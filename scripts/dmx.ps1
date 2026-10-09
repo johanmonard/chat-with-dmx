@@ -28,8 +28,8 @@ first argument; otherwise the script asks (Enter = projects).
   pull           refresh this machine's read-only copy for Claude Desktop (no lock)
   status         index statistics of the local copy
   search "..."   test a search on the local copy
-  unlock -Force  remove a stale lock left by a machine that crashed
-  migrate        one-time move from the single-index layout (every command does it first)
+  unlock -Force  remove a stale lock left by a machine that crashed (also one of the old layout)
+  migrate        one-time move from the single-index layout (every command but unlock does it first)
 #>
 param(
     [Parameter(Position = 0, Mandatory = $true)]
@@ -166,8 +166,10 @@ function Resolve-World {
     }
     if (-not $script:World) {
         $answer = Read-Host "World ($($known -join ', ')) [projects]"
-        $script:World = if ($answer.Trim()) { $answer.Trim().ToLower() } else { 'projects' }
+        $script:World = if ($answer.Trim()) { $answer.Trim() } else { 'projects' }
     }
+    # The command line tool knows the configured (lower-case) names only.
+    $script:World = $script:World.Trim().ToLowerInvariant()
     if ($known -notcontains $script:World) { throw "Unknown world '$($script:World)'. Configured worlds: $($known -join ', ')" }
 }
 
@@ -193,51 +195,109 @@ function Stop-LocalServers([string]$world) {
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
+function New-Move([string]$from, [string]$to) { [pscustomobject]@{ From = $from; To = $to } }
+
+function Select-Pending([object[]]$moves) {
+    # The items that are still at the old place and not yet at the new one.
+    $moves | Where-Object { (Test-Path $_.From) -and -not (Test-Path $_.To) }
+}
+
+function Move-One($move, [switch]$Required) {
+    # A rename. One that fails is reported with the real reason and left for the next run,
+    # unless it is Required: then the command stops here.
+    try { Move-Item $move.From $move.To -ErrorAction Stop }
+    catch {
+        $reason = $_.Exception.Message
+        if ($Required) { throw "Could not move $($move.From) to $($move.To): $reason" }
+        Say "Could not move $($move.From) ($reason): the next run tries again."
+    }
+}
+
+function Read-LockFile([string]$path) {
+    $text = "$(Get-Content $path -Raw)".Trim()
+    if ($text) { $text } else { '(empty lock file)' }
+}
+
 function Move-LegacyLayout {
     # Before worlds there was one index (<shared>\data, C:\dmx-rag\data): it becomes the
-    # "projects" world. Renames only, never copies; does nothing once done.
+    # "projects" world. Renames only, never copies. Every item is moved when it is still at the
+    # old place and not yet at the new one, whether or not the index itself moved before: a move
+    # that was interrupted or that failed is completed by the next run, and nothing is left to do
+    # once done.
     $oldData = Join-Path $Shared 'data'
-    $oldMaster = Join-Path $oldData 'index.sqlite3'
+    $oldLock = Join-Path $oldData 'LOCK'
     $projects = Join-Path $Shared 'worlds\projects'
-    if ((Test-Path $oldMaster) -and -not (Test-Path (Join-Path $projects 'index.sqlite3'))) {
-        $oldLock = Join-Path $oldData 'LOCK'
-        if (Test-Path $oldLock) {
-            throw "The index is being worked on with the old layout ($((Get-Content $oldLock -Raw).Trim())). Let that run finish (or unlock it), then run this again."
+    $localProjects = Join-Path $LocalData 'projects'
+
+    $sharedIndex = @(Select-Pending @(New-Move (Join-Path $oldData 'index.sqlite3') (Join-Path $projects 'index.sqlite3')))
+    $sharedMore = @(Select-Pending @(
+        (New-Move (Join-Path $oldData 'index.prev.sqlite3') (Join-Path $projects 'index.prev.sqlite3')),
+        (New-Move (Join-Path $Shared 'register.csv') (Join-Path $projects 'register.csv'))))
+    $sharedLock = @(Select-Pending @(New-Move $oldLock (Join-Path $projects 'LOCK')))
+
+    $localIndex = @(Select-Pending @(New-Move (Join-Path $LocalData 'index.sqlite3') (Join-Path $localProjects 'index.sqlite3')))
+    $localMoves = @()
+    foreach ($name in 'index.sqlite3-wal', 'index.sqlite3-shm', 'logs') {
+        $localMoves += New-Move (Join-Path $LocalData $name) (Join-Path $localProjects $name)
+    }
+    if (Test-Path $LocalData) {
+        foreach ($file in @(Get-ChildItem $LocalData -Filter 'vec_*' -File)) {   # search caches
+            $localMoves += New-Move $file.FullName (Join-Path $localProjects $file.Name)
         }
+    }
+    $localMoves += New-Move (Join-Path $Local 'register.csv') (Join-Path $localProjects 'register.csv')
+    $localMore = @(Select-Pending $localMoves)
+
+    if ($sharedIndex.Count + $sharedMore.Count + $sharedLock.Count + $localIndex.Count + $localMore.Count -gt 0) {
+        # Refuse before moving anything.
+        if (@(Get-Worlds) -notcontains 'projects') {
+            throw "The single index becomes the 'projects' world, but there is no [worlds.projects] table: add it to $SharedConfig first. Nothing was moved."
+        }
+        if ($sharedLock.Count -gt 0) {
+            $held = Read-LockFile $oldLock
+            $fields = $held.Split('|')
+            $lockPid = if ($fields.Count -ge 5) { $fields[4] -as [int] } else { $null }
+            $mine = $fields[0] -eq $env:COMPUTERNAME
+            if ($mine -and $lockPid -and (Get-Process -Id $lockPid -ErrorAction SilentlyContinue | Where-Object ProcessName -match 'powershell')) {
+                throw "The index is being worked on with the old layout by a run that is still going on this machine ($held). Lock file: $oldLock. Let that run finish, then run this again."
+            }
+            if (-not $mine) {
+                throw "The index is locked with the old layout by $($fields[0]) ($held). Lock file: $oldLock. Run the interrupted command again on that machine (it will continue). If that machine crashed and its work can be dropped, run 'Unlock after a crash' for projects (or delete that file), then run this again."
+            }
+            # A run of this machine that was cut short: its lock moves with the index, so the next
+            # locked run continues with the local copy (which is moved below) instead of replacing it.
+        }
+    }
+
+    if ($sharedIndex.Count + $sharedMore.Count + $sharedLock.Count -gt 0) {
         Say 'One-time move of the shared index to worlds\projects ...'
         New-Item -ItemType Directory -Force $projects | Out-Null
-        Move-Item $oldMaster $projects
-        $prev = Join-Path $oldData 'index.prev.sqlite3'
-        if (Test-Path $prev) { Move-Item $prev $projects }
-        $reg = Join-Path $Shared 'register.csv'
-        if (Test-Path $reg) { Move-Item $reg $projects }
-        if (-not (Get-ChildItem $oldData -Force)) { Remove-Item $oldData }
+        foreach ($move in $sharedIndex) { Move-One $move -Required }
+        foreach ($move in $sharedMore) { Move-One $move }
+        foreach ($move in $sharedLock) { Move-One $move -Required }
     }
-    $oldLocal = Join-Path $LocalData 'index.sqlite3'
-    $localProjects = Join-Path $LocalData 'projects'
-    if ((Test-Path $oldLocal) -and -not (Test-Path (Join-Path $localProjects 'index.sqlite3'))) {
+    if ((Test-Path $oldData) -and -not (Get-ChildItem $oldData -Force)) { Remove-Item $oldData -ErrorAction SilentlyContinue }
+
+    if ($localIndex.Count -gt 0) {
         Say 'One-time move of the local index to data\projects ...'
         Copy-Item $SharedConfig $LocalConfig -Force   # a restarted server must find the new layout
         New-Item -ItemType Directory -Force $localProjects | Out-Null
         $moved = $false
+        $reason = ''
         for ($try = 1; $try -le 5 -and -not $moved; $try++) {
             Stop-LocalServers 'projects'
             Start-Sleep -Milliseconds 500
-            try { Move-Item $oldLocal $localProjects -ErrorAction Stop; $moved = $true } catch { }
+            try { Move-Item $localIndex[0].From $localIndex[0].To -ErrorAction Stop; $moved = $true } catch { $reason = $_.Exception.Message }
         }
         if (-not $moved) {
-            throw 'The local index is in use (Claude Desktop?). Quit Claude Desktop completely and run this again. Nothing was moved on this machine.'
+            throw "The local index is in use (Claude Desktop?). Quit Claude Desktop completely and run this again. Nothing was moved on this machine. ($reason)"
         }
-        foreach ($name in 'index.sqlite3-wal', 'index.sqlite3-shm') {
-            $p = Join-Path $LocalData $name
-            if (Test-Path $p) { Move-Item $p $localProjects -Force -ErrorAction SilentlyContinue }
-        }
-        # Search caches are rebuilt if one cannot be moved.
-        Get-ChildItem $LocalData -Filter 'vec_*' -File | ForEach-Object { Move-Item $_.FullName $localProjects -Force -ErrorAction SilentlyContinue }
-        $oldLogs = Join-Path $LocalData 'logs'
-        if (Test-Path $oldLogs) { Move-Item $oldLogs $localProjects -ErrorAction SilentlyContinue }
-        $oldReg = Join-Path $Local 'register.csv'
-        if (Test-Path $oldReg) { Move-Item $oldReg $localProjects -Force }
+    }
+    if ($localMore.Count -gt 0) {
+        # Search caches and logs are not essential: a failed move is reported and retried by the next run.
+        if ($localIndex.Count -eq 0) { Say 'One-time move of the local files to data\projects ...' }
+        New-Item -ItemType Directory -Force $localProjects | Out-Null
+        foreach ($move in $localMore) { Move-One $move }
     }
 }
 
@@ -362,7 +422,8 @@ $tag = if ($needsWorld) { "$($World)_$Command" } else { $Command }
 $log = Join-Path $Logs ("{0}_{1}_{2}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $env:COMPUTERNAME, $tag)
 Start-Transcript -Path $log -Append | Out-Null
 try {
-    Move-LegacyLayout
+    # unlock must work even while the layout cannot be moved (a lock of the old layout is why).
+    if ($Command -ne 'unlock') { Move-LegacyLayout }
     switch ($Command) {
         'setup' { Install-Env; Sync-Models }
         'migrate' { Say 'The layout is up to date.' }
@@ -396,9 +457,20 @@ try {
         'search' { Assert-Env; Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $WorldArgs + @('search') + $Rest) -AllowFail }
         'unlock' {
             $held = Get-LockInfo
-            if (-not $held) { Say "Not locked ($World)." }
-            elseif (-not $Force) { Say "Locked by: $held`nRun again with -Force to remove the lock (only if that machine is no longer working on it)." }
-            else { Exit-Lock; Say "Lock of '$World' removed (was: $held)." }
+            # Before the move to worlds\ the lock of the projects index was <shared>\data\LOCK.
+            $oldLock = Join-Path $Shared 'data\LOCK'
+            $hasOld = ($World -eq 'projects') -and (Test-Path $oldLock)
+            if (-not $held -and -not $hasOld) { Say "Not locked ($World)." }
+            else {
+                if ($held -and $Force) { Exit-Lock; Say "Lock of '$World' removed (was: $held)." }
+                elseif ($held) { Say "Locked by: $held" }
+                if ($hasOld) {
+                    $oldHeld = Read-LockFile $oldLock
+                    if ($Force) { Remove-Item $oldLock -Force; Say "Lock of the old layout removed (was: $oldHeld)." }
+                    else { Say "Locked by (old layout): $oldHeld" }
+                }
+                if (-not $Force) { Say 'Run again with -Force to remove the lock (only if that machine is no longer working on it).' }
+            }
         }
     }
 } finally {
