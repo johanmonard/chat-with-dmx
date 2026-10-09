@@ -15,7 +15,8 @@ import re
 import unicodedata
 
 # Bump when the rules change: every document's facets are recomputed (from its path only).
-FACETS_VERSION = 3
+FACETS_VERSION = 3             # projects
+MARKETING_FACETS_VERSION = 1
 
 
 def _norm(s: str) -> str:
@@ -157,6 +158,25 @@ def compute(path: str, root: str) -> dict:
     return out
 
 
+def compute_marketing(path: str, root: str) -> dict:
+    """Marketing world: the category is the first folder below the root (Brochures, Presentations...)."""
+    rel = os.path.relpath(path, root) if root else path
+    parts = [p for p in rel.replace("/", "\\").split("\\") if p and p != "."]
+    if len(parts) > 1:
+        return {"category": parts[0], "facet_source": "folder"}
+    return {}
+
+
+RULES = {"projects": compute, "marketing": compute_marketing}
+
+
+def _version(profile: str) -> str:
+    # Projects keeps the plain number stored before worlds existed: nothing is recomputed.
+    if profile == "projects":
+        return str(FACETS_VERSION)
+    return f"{profile}:{MARKETING_FACETS_VERSION if profile == 'marketing' else 1}"
+
+
 TABLE = """
 CREATE TABLE IF NOT EXISTS doc_facets (
     doc_id        INTEGER PRIMARY KEY,
@@ -165,41 +185,47 @@ CREATE TABLE IF NOT EXISTS doc_facets (
     section       TEXT,
     doc_type      TEXT,
     facet_source  TEXT,
-    subproject    TEXT
+    subproject    TEXT,
+    category      TEXT
 );
 CREATE INDEX IF NOT EXISTS doc_facets_project ON doc_facets(project COLLATE NOCASE);
 """
-COLUMNS = ("doc_id", "project", "collection", "section", "doc_type", "facet_source", "subproject")
+COLUMNS = ("doc_id", "project", "collection", "section", "doc_type", "facet_source", "subproject", "category")
 
 
-def refresh(con, roots: list[str]) -> int:
-    """Compute facets for documents that have none (or were computed by older rules).
-    Cheap when everything is up to date. Returns the number of documents updated."""
+def refresh(con, roots: list[str], profile: str = "projects") -> int:
+    """Compute facets for documents that have none (or were computed by older rules or another
+    profile). Cheap when everything is up to date. Returns the number of documents updated."""
     from . import store
 
     con.executescript(TABLE)
-    if "subproject" not in {r[1] for r in con.execute("PRAGMA table_info(doc_facets)")}:
+    cols = {r[1] for r in con.execute("PRAGMA table_info(doc_facets)")}
+    if "subproject" not in cols:
         con.execute("ALTER TABLE doc_facets ADD COLUMN subproject TEXT")  # tables from version 1
-    if store.get_meta(con, "facets_version") != str(FACETS_VERSION):
+    if "category" not in cols:
+        con.execute("ALTER TABLE doc_facets ADD COLUMN category TEXT")  # tables from before worlds
+    if store.get_meta(con, "facets_version") != _version(profile):
         con.execute("DELETE FROM doc_facets")
-        store.set_meta(con, "facets_version", FACETS_VERSION)
+        store.set_meta(con, "facets_version", _version(profile))
     con.execute("DELETE FROM doc_facets WHERE doc_id NOT IN (SELECT id FROM docs)")
     todo = con.execute("""SELECT d.id, d.path, d.path_key FROM docs d
                           LEFT JOIN doc_facets f ON f.doc_id = d.id WHERE f.doc_id IS NULL""").fetchall()
     root_keys = [(store.path_key(r), r) for r in roots]
+    rule = RULES.get(profile, lambda path, root: {})
     rows = []
     for doc_id, path, key in todo:
-        f = compute(path, root_of(key, root_keys) or "")
-        rows.append((doc_id,) + tuple(f[c] for c in COLUMNS[1:]))
+        f = rule(path, root_of(key, root_keys) or "")
+        rows.append((doc_id,) + tuple(f.get(c) for c in COLUMNS[1:]))
     autocommit = con.isolation_level is None
     if autocommit:
         con.execute("BEGIN")  # one transaction, not one per row
     con.executemany(f"INSERT OR REPLACE INTO doc_facets ({','.join(COLUMNS)}) "
                     f"VALUES ({','.join('?' * len(COLUMNS))})", rows)
     con.execute("COMMIT") if autocommit else con.commit()
-    from . import machines, register
-    machines.refresh(con)  # machine types per project; no-op when nothing changed
-    con.executescript(register.TABLE)  # filled by register.refresh (needs the register file)
+    if profile == "projects":  # machine types and the register belong to the project documentation
+        from . import machines, register
+        machines.refresh(con)  # machine types per project; no-op when nothing changed
+        con.executescript(register.TABLE)  # filled by register.refresh (needs the register file)
     return len(rows)
 
 

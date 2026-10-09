@@ -340,7 +340,7 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_st
     store.set_meta(con, "last_index_finished", time.time())
     writer.commit()
     con.execute("COMMIT")
-    facets.refresh(con, cfg.roots)
+    facets.refresh(con, cfg.roots, cfg.profile)
     report(force=True)
     con.close()
     return stats

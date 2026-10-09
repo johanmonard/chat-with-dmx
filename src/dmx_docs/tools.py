@@ -203,8 +203,9 @@ class DocTools:
         con = store.connect(self.cfg.db_path, create=False)
         # Root/excluded folders may have changed on the configuration page.
         sources.refresh(self.cfg, con)
-        facets.refresh(con, self.cfg.roots)  # no-op when every document has its facets
-        register.refresh(con, self.cfg.register_path)  # no-op when neither the file nor the documents changed
+        facets.refresh(con, self.cfg.roots, self.cfg.profile)  # no-op when every document has its facets
+        if self.cfg.profile == "projects":  # the machine register belongs to the project documentation
+            register.refresh(con, self.cfg.register_path)  # no-op when neither the file nor the documents changed
         return con
 
     def _resolve(self, path: str) -> tuple[str, str]:
@@ -250,12 +251,12 @@ class DocTools:
                modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
                project: str | None = None, doc_type: str | None = None, section: str | None = None,
                collection: str | None = None, machine: str | None = None, expand: bool | None = None,
-               client: str | None = None, country: str | None = None) -> str:
+               client: str | None = None, country: str | None = None, category: str | None = None) -> str:
         if mode not in ("hybrid", "keyword", "semantic"):
             raise ValueError("mode must be 'hybrid', 'keyword' or 'semantic'")
         limit = max(1, min(int(limit), 30))
         facet_filter = {"project": project, "doc_type": doc_type, "section": section, "collection": collection,
-                        "machine": machine, "client": client, "country": country}
+                        "machine": machine, "client": client, "country": country, "category": category}
         con = self._con()
         try:
             if folder:
@@ -301,12 +302,14 @@ class DocTools:
             lines.append("")
         return "\n".join(lines).rstrip()
 
-    @staticmethod
-    def _facets(con, doc_ids: set[int]) -> dict[int, str]:
-        """One line per document: project / collection / section / type (and how the type was found)."""
-        if not doc_ids:
+    def _facets(self, con, doc_ids: set[int]) -> dict[int, str]:
+        """One line per document: project / collection / section / type (projects) or category."""
+        if not doc_ids or self.cfg.profile == "none":
             return {}
         ids = list(doc_ids)
+        if self.cfg.profile == "marketing":
+            return {r["doc_id"]: f"category {r['category'] or 'unknown'}" for r in con.execute(
+                f"SELECT doc_id, category FROM doc_facets WHERE doc_id IN ({','.join('?' * len(ids))})", ids)}
         out = {}
         machine_cache: dict[str, str] = {}
         for r in con.execute(f"SELECT * FROM doc_facets WHERE doc_id IN ({','.join('?' * len(ids))})", ids):
@@ -807,7 +810,8 @@ class DocTools:
         finally:
             con.close()
         total = sum(r["n"] for r in by_status)
-        lines = [f"Indexed documents: {total}",
+        lines = ([f"World: {self.cfg.world_title} ({self.cfg.world})"] if self.cfg.world else []) + [
+                 f"Indexed documents: {total}",
                  "By status: " + ", ".join(f"{r['status']}={r['n']}" for r in by_status),
                  "Readable by type: " + ", ".join(f"{TYPE_LABEL.get(r['ext'], r['ext'])}={r['n']}" for r in by_ext),
                  f"Chunks: {chunks[0]}, with embeddings: {chunks[1] or 0}"
