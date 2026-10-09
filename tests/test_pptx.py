@@ -170,3 +170,74 @@ def test_ppt_conversion_with_powerpoint(tmp_path):
         assert "Hygienic design" in dict(r.pages)[2]
     finally:
         extract.kill_office_automation("POWERPNT.EXE")
+
+
+def _fake_powerpoint(already_open, fail_save=False):
+    """A PowerPoint that belongs to the user: alerts on, macros allowed, the .ppt maybe open."""
+    import os
+    log = []
+
+    class FakePresentation:
+        def SaveCopyAs(self, path, file_format):
+            log.append(("SaveCopyAs", os.path.basename(path), file_format, app.DisplayAlerts, app.AutomationSecurity))
+            if fail_save:
+                raise RuntimeError("disk full")
+            with open(path, "wb") as f:
+                f.write(b"pptx")
+
+        def SaveAs(self, path, file_format):
+            log.append(("SaveAs",))  # would rename the user's presentation
+
+        def Close(self):
+            log.append(("Close",))
+
+    class FakePresentations:
+        Count = 1 if already_open else 0
+
+        def Open(self, *args):
+            log.append(("Open",) + args[1:])
+            if not already_open:  # an open file is returned as it is: the collection does not grow
+                self.Count += 1
+            return FakePresentation()
+
+    class FakeApp:
+        DisplayAlerts = 2        # ppAlertsAll
+        AutomationSecurity = 1   # msoAutomationSecurityLow
+        Presentations = FakePresentations()
+
+    app = FakeApp()
+    return app, log
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows semaphores")
+def test_powerpoint_conversion_leaves_a_presentation_the_user_has_open(tmp_path, monkeypatch):
+    from dmx_docs import extract
+    app, log = _fake_powerpoint(already_open=True)
+    monkeypatch.setattr(extract, "_powerpoint", lambda: app)
+    out = extract._convert_with_powerpoint(str(tmp_path / "Deck.ppt"), str(tmp_path))
+    assert out == str(tmp_path / "converted.pptx")
+    assert [entry[0] for entry in log] == ["Open", "SaveCopyAs"]  # not SaveAs, and not closed
+    assert log[0][1:] == (True, False, False)                     # ReadOnly, not untitled, no window
+    assert log[1] == ("SaveCopyAs", "converted.pptx", 24, 1, 3)   # quiet during the conversion
+    assert (app.DisplayAlerts, app.AutomationSecurity) == (2, 1)  # and back as the user had them
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows semaphores")
+def test_powerpoint_conversion_closes_the_presentation_it_opened(tmp_path, monkeypatch):
+    from dmx_docs import extract
+    app, log = _fake_powerpoint(already_open=False)
+    monkeypatch.setattr(extract, "_powerpoint", lambda: app)
+    extract._convert_with_powerpoint(str(tmp_path / "Deck.ppt"), str(tmp_path))
+    assert [entry[0] for entry in log] == ["Open", "SaveCopyAs", "Close"]
+    assert (app.DisplayAlerts, app.AutomationSecurity) == (2, 1)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows semaphores")
+def test_powerpoint_settings_come_back_when_the_conversion_fails(tmp_path, monkeypatch):
+    from dmx_docs import extract
+    app, log = _fake_powerpoint(already_open=False, fail_save=True)
+    monkeypatch.setattr(extract, "_powerpoint", lambda: app)
+    with pytest.raises(RuntimeError, match="disk full"):
+        extract._convert_with_powerpoint(str(tmp_path / "Deck.ppt"), str(tmp_path))
+    assert [entry[0] for entry in log] == ["Open", "SaveCopyAs", "Close"]
+    assert (app.DisplayAlerts, app.AutomationSecurity) == (2, 1)

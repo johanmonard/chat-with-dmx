@@ -518,13 +518,36 @@ def _powerpoint():
     import win32com.client
 
     pythoncom.CoInitialize()
-    app = win32com.client.DispatchEx("PowerPoint.Application")
+    return win32com.client.DispatchEx("PowerPoint.Application")
+
+
+def _quiet_powerpoint(app) -> dict:
+    """No alert boxes and no macros while converting. Returns the previous values: when the app
+    is the user's own PowerPoint, they must be put back afterwards (_restore_powerpoint)."""
+    previous = {}
+    for name, value in (("DisplayAlerts", 1),         # ppAlertsNone
+                        ("AutomationSecurity", 3)):   # msoAutomationSecurityForceDisable
+        try:
+            previous[name] = getattr(app, name)
+            setattr(app, name, value)
+        except Exception:
+            pass
+    return previous
+
+
+def _restore_powerpoint(app, previous: dict) -> None:
+    for name, value in previous.items():
+        try:
+            setattr(app, name, value)
+        except Exception:  # the instance may have been killed
+            pass
+
+
+def _presentation_count(app):
     try:
-        app.DisplayAlerts = 1        # ppAlertsNone
-        app.AutomationSecurity = 3   # msoAutomationSecurityForceDisable: no macros
+        return app.Presentations.Count
     except Exception:
-        pass
-    return app
+        return None
 
 
 def _convert_with_powerpoint(path: str, out_dir: str) -> str:
@@ -544,19 +567,28 @@ def _convert_with_powerpoint(path: str, out_dir: str) -> str:
 
     watchdog = threading.Timer(POWERPOINT_TIMEOUT_S, kill)
     watchdog.start()
+    app, previous = None, {}
     try:
         app = _powerpoint()
+        previous = _quiet_powerpoint(app)
+        count = _presentation_count(app)
         # ReadOnly, Untitled=False, WithWindow=False: nothing appears on screen.
         pres = app.Presentations.Open(os.path.abspath(path), True, False, False)
+        # If the user already has this file open, Open returns their presentation: leave it open.
+        # Only a presentation that this call added to the collection is closed.
+        opened = count is not None and (_presentation_count(app) or 0) > count
         try:
-            pres.SaveAs(out, 24)  # ppSaveAsOpenXMLPresentation (.pptx)
+            pres.SaveCopyAs(out, 24)  # ppSaveAsOpenXMLPresentation (.pptx); SaveAs would rename the presentation
         finally:
-            pres.Close()
+            if opened:
+                pres.Close()
     except Exception:
         if timed_out.is_set():
             raise TimeoutError(f"PowerPoint did not convert the file within {POWERPOINT_TIMEOUT_S} s") from None
         raise
     finally:
+        if app is not None:
+            _restore_powerpoint(app, previous)
         watchdog.cancel()
         win32event.ReleaseSemaphore(slot, 1)
     if not os.path.exists(out):
