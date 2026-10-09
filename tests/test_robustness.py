@@ -88,6 +88,32 @@ def test_adding_an_unticked_subfolder_ticks_it_again(tmp_path, make_cfg):
     con.close()
 
 
+def test_vector_cache_one_file_pair_per_version(corpus_copy, make_cfg):
+    from dmx_docs.embeddings import run_embed
+    from dmx_docs.search import VectorIndex
+
+    cfg = make_cfg(corpus_copy)
+    run_index(cfg, progress=quiet)
+    run_embed(cfg, progress=quiet)
+    con = store.connect(cfg.db_path)
+    v1 = store.get_meta(con, "vec_version")
+    vi = VectorIndex(cfg)
+    assert vi.ensure(con)
+    assert {p.name for p in cfg.data_dir.glob("vec_*.npy")} == {f"vec_ids.{v1}.npy", f"vec_mat.{v1}.npy"}
+    other = VectorIndex(cfg)  # another process: loads the cache files, not the database
+    con.execute("DELETE FROM vectors")  # would make a database load empty
+    assert other.ensure(con) and len(other.ids) == len(vi.ids)
+    con.rollback()
+    store.bump_vector_version(con)
+    con.commit()
+    v2 = store.get_meta(con, "vec_version")
+    vi.mat = vi.ids = None  # release the old mapping, as a new search would
+    assert VectorIndex(cfg).ensure(con)
+    names = {p.name for p in cfg.data_dir.glob("vec_*.npy")}
+    assert f"vec_mat.{v2}.npy" in names and f"vec_mat.{v1}.npy" not in names or os.name == "nt"
+    con.close()
+
+
 def test_new_extractor_version_reextracts_everything_once(corpus_copy, make_cfg):
     cfg = make_cfg(corpus_copy)
     first = run_index(cfg, progress=quiet)

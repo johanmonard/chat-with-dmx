@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -119,19 +118,30 @@ class VectorIndex:
         self.mat: np.ndarray | None = None
         self.lock = threading.Lock()
 
-    def _cache_paths(self):
+    def _cache_paths(self, version: str):
+        # One file pair per vector version: a new cache never has to replace a file that
+        # another process (e.g. Claude Desktop's server) still has memory-mapped.
         d = self.cfg.data_dir
-        return d / "vec_cache.json", d / "vec_ids.npy", d / "vec_mat.npy"
+        safe = re.sub(r"[^0-9A-Za-z]", "", version)[:40] or "0"
+        return d / f"vec_ids.{safe}.npy", d / f"vec_mat.{safe}.npy"
+
+    def _cleanup_old_caches(self, keep: str) -> None:
+        keep_names = {p.name for p in self._cache_paths(keep)}
+        for p in list(self.cfg.data_dir.glob("vec_*.npy")) + list(self.cfg.data_dir.glob("vec_*.tmp")) + list(self.cfg.data_dir.glob("vec_cache.json")):
+            if p.name not in keep_names:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass  # still in use by another process: removed by a later run
 
     def ensure(self, con) -> bool:
         version = store.get_meta(con, "vec_version", "0")
         with self.lock:
             if version == self.version and self.mat is not None:
                 return len(self.ids) > 0
-            meta_p, ids_p, mat_p = self._cache_paths()
+            ids_p, mat_p = self._cache_paths(version)
             try:
-                cached = json.loads(meta_p.read_text())
-                if cached.get("version") == version:
+                if ids_p.exists() and mat_p.exists():
                     self.ids = np.load(ids_p, mmap_mode="r")
                     self.mat = np.load(mat_p, mmap_mode="r")
                     self.version = version
@@ -139,6 +149,7 @@ class VectorIndex:
                 pass
             if self.version != version or self.mat is None:
                 self._load_from_db(con, version)
+            self._cleanup_old_caches(version)
             if self.mat.nbytes * 2 <= FLOAT32_MAX_BYTES:
                 self.mat = np.asarray(self.mat, dtype=np.float32)
             return len(self.ids) > 0
@@ -157,14 +168,15 @@ class VectorIndex:
             mat[i] = np.frombuffer(row[1], dtype=np.float16)
             i += 1
         self.ids, self.mat, self.version = ids[:i], mat[:i], version
-        meta_p, ids_p, mat_p = self._cache_paths()
+        ids_p, mat_p = self._cache_paths(version)
         try:
-            for p, arr in ((ids_p, self.ids), (mat_p, self.mat)):
-                tmp = p.with_suffix(".tmp.npy")
-                np.save(tmp, arr)
+            # ids last: a cache counts as complete only when both files exist.
+            for p, arr in ((mat_p, self.mat), (ids_p, self.ids)):
+                tmp = p.with_name(p.stem + f".{os.getpid()}.tmp")
+                with open(tmp, "wb") as f:
+                    np.save(f, arr)
                 os.replace(tmp, p)
-            meta_p.write_text(json.dumps({"version": version}))
-        except OSError as e:  # e.g. cache file in use by another process on Windows
+        except OSError as e:
             log.warning("could not write vector cache: %s", e)
 
     def query(self, qvec: np.ndarray, k: int) -> list[tuple[int, float]]:

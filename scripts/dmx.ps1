@@ -243,6 +243,9 @@ try {
             if ($held) { Say "Note: $($held.Split('|')[0]) is working on the index right now; you get the last saved version." }
             Copy-MasterToLocal
             Copy-Item $SharedConfig $LocalConfig -Force
+            # Build the vector cache and facets now, so Claude's first question is fast.
+            Say 'Preparing the search cache (about 30-60 s) ...'
+            Invoke-Native $Py @('-c', "from dmx_docs.config import load_config; from dmx_docs.tools import DocTools; DocTools(load_config(r'$LocalConfig')).search('warm-up', limit=1)") -AllowFail
             Invoke-Native $Py @('-m', 'dmx_docs.cli', '--config', $LocalConfig, 'status') -AllowFail
             $snippet = @{ mcpServers = @{ 'dmx-docs' = @{ command = $Py; args = @('-m', 'dmx_docs.cli', '--config', $LocalConfig, 'serve') } } } | ConvertTo-Json -Depth 5
             Say "Claude Desktop configuration for this machine:`n$snippet"
