@@ -84,6 +84,38 @@ def test_register_links_projects_and_filters(tmp_path, make_cfg):
     assert "SPACE" not in tools.search("cadence", country="France", mode="keyword")
 
 
+def test_documents_win_over_register(tmp_path, make_cfg):
+    root = tmp_path / "RMA"
+    docs = {
+        ("ALPHA", r"0_Vente\00_Offres", "Offre ALPHA.pdf"): "Offre Presto 2R.",
+        ("ALPHA", r"5_Gestion\56_Acceptation_machine", "FAT ALPHA.pdf"): "FAT de la Presto 2R.",
+        ("BETA", r"0_Vente\00_Offres", "Offre BETA.pdf"): "Offre.",
+        ("GAMMA", r"5_Gestion", "FAT 0100710777.pdf"): "FAT.",
+        ("GAMMA", r"5_Gestion", "SAT 0100710777.pdf"): "SAT.",
+    }
+    for (proj, sub, name), text in docs.items():
+        d = root / proj / sub
+        d.mkdir(parents=True, exist_ok=True)
+        make_pdf(str(d / name), [text])
+    cfg = make_cfg(root)
+    cfg.register_path = str(tmp_path / "register.csv")
+    write_register(cfg.register_path, [
+        dict(project="ALPHA", path=r"N:\ALPHA", serial="100710001", model="Paloma 4R", client="ACME"),
+        dict(project="BETA", path=r"N:\BETA", serial="0100710777", model="Delfi 3R", client="ACME"),
+    ])
+    run_index(cfg, progress=quiet)
+    tools = DocTools(cfg)
+
+    card = tools.project_card("ALPHA")
+    assert "⚠ the documents name Presto 2R (2 docs), not Paloma 4R" in card
+    assert "ALPHA" not in tools.list_projects(machine="Paloma")  # the documents' machine is used
+    assert "ALPHA" in tools.list_projects(machine="Presto")
+    # BETA's machine number is in GAMMA's file names only: it is GAMMA's machine
+    assert "0100710777" in tools.project_card("GAMMA") and "register files it under BETA" in tools.project_card("GAMMA")
+    assert "-> GAMMA" in tools.project_card("BETA")
+    assert "not in the register" in tools.list_projects(name="BETA")
+
+
 def test_register_reloads_when_file_changes(tmp_path, make_cfg):
     root = tmp_path / "RMA"
     (root / "THOR").mkdir(parents=True)

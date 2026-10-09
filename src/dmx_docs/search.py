@@ -302,8 +302,8 @@ class Searcher:
                         "d.id IN (SELECT doc_id FROM doc_facets WHERE project IN (SELECT project FROM "
                         f"project_machines pm WHERE {confirmed_sql()} AND (family COLLATE NOCASE IN ({marks}) "
                         f"OR model COLLATE NOCASE IN ({marks}))) OR project IN (SELECT project FROM "
-                        f"register_machines WHERE family COLLATE NOCASE IN ({marks}) "
-                        f"OR model COLLATE NOCASE IN ({marks})))")
+                        f"register_machines WHERE family_ok = 1 AND (family COLLATE NOCASE IN ({marks}) "
+                        f"OR (model_ok = 1 AND model COLLATE NOCASE IN ({marks})))))")
                     params += values * 4
                 elif col in ("client", "country"):  # projects of that client / installed in that country
                     from . import register

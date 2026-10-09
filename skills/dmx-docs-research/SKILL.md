@@ -71,7 +71,10 @@ Turn the question into **2-4 search queries** before the first search:
   machines whose documents are not indexed - and filter searches with `client=` / `country=`.
   Client, machines and years come from the company's machine register (installed base); a
   project missing from the register is not found by these filters: fall back to `find_files`
-  or a search without filter, and say so.
+  or a search without filter, and say so. The register is a hand-made list: **when it disagrees
+  with the documents, the documents win** (the card marks these lines with ⚠ and gives what the
+  documents say; machine/year filters already use the documents' version). Report the
+  disagreement in the answer.
 - **Machine type in the question?** Each project carries the machine models found in its documents (file names, offers, specifications, FAT/SAT...), shown in every hit as `project THOR [Paloma 7R (65 docs), Paloma 10R (45 docs)]`. Filter with `machine="Paloma"` (family: Paloma, Presto, Hector, Delfi, Astor, Nestor, FeedPlacer) or `machine="Paloma 4R"` (model). Projects whose documents never name the machine are not matched: say so if it matters.
 - **Kind of document known?** Filter with `doc_type=` (FAT findings → `fat,reception`; client
   requirement → `cahier_des_charges`; price/scope offered → `offre`; commissioning → `mise_en_service,sat`;

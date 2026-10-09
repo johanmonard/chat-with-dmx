@@ -383,8 +383,8 @@ class DocTools:
                 where += (f" AND (f.project IN (SELECT project FROM project_machines pm WHERE "
                           f"{machines.confirmed_sql()} AND (family COLLATE NOCASE IN ({marks}) "
                           f"OR model COLLATE NOCASE IN ({marks}))) OR f.project IN (SELECT project FROM "
-                          f"register_machines WHERE family COLLATE NOCASE IN ({marks}) "
-                          f"OR model COLLATE NOCASE IN ({marks})))")
+                          f"register_machines WHERE family_ok = 1 AND (family COLLATE NOCASE IN ({marks}) "
+                          f"OR (model_ok = 1 AND model COLLATE NOCASE IN ({marks})))))")
                 params += values * 4
             reg_cond, reg_params = self._register_filter(client, country, year_from, year_to)
             if reg_cond:
@@ -508,7 +508,13 @@ class DocTools:
                 agents = {r["agent"] for r in reg if r["agent"]}
                 if agents:
                     lines.append(f"Through agent/integrator: {', '.join(sorted(agents))}")
-                lines.append(f"\nMachines delivered (machine register, {len(reg)}):")
+            if name:
+                found = machines.describe(con, name, limit=6)
+                if found:
+                    lines.append(f"\nMachines named in the documents: {found}")
+            if reg:
+                lines.append(f"\nMachines delivered (machine register, {len(reg)}; where it disagrees with the "
+                             "documents, the documents are more reliable - see ⚠):")
                 for r in reg:
                     bits = [r["serial"] or r["order_no"] or "no serial", r["model"] or "model ?"]
                     if r["year"]:
@@ -527,11 +533,15 @@ class DocTools:
                         bits.append(r["status"])
                     if r["notes"]:
                         bits.append(r["notes"])
-                    lines.append("- " + " · ".join(bits))
+                    lines.append("- " + " · ".join(bits) + (f"\n    ⚠ {r['doc_note']}" if r["doc_note"] else ""))
             if name:
-                found = machines.describe(con, name, limit=6)
-                if found:
-                    lines.append(f"\nMachines named in the documents: {found}")
+                moved = con.execute("SELECT serial, order_no, model, project FROM register_machines "
+                                    "WHERE reg_project = ?", (name,)).fetchall()
+                if moved:
+                    lines.append("\nFiled under this project in the register, but their numbers are in another "
+                                 "project's documents (counted there): " + "; ".join(
+                                     f"{m['serial'] or m['order_no']} {m['model'] or ''} -> {m['project']}"
+                                     for m in moved))
                 evidence = {}
                 for (path,) in con.execute("SELECT d.path FROM docs d JOIN doc_facets f ON f.doc_id = d.id "
                                            "WHERE f.project = ?", (name,)):
@@ -570,8 +580,9 @@ class DocTools:
                         for p, m, y, idx in others))
         finally:
             con.close()
-        lines.append("\n(client, machines delivered and years come from the company's machine register; "
-                     "the rest from the indexed documents)")
+        lines.append("\n(client, machines delivered and years come from the company's machine register, a "
+                     "hand-made list: when it disagrees with the documents, trust the documents; the rest "
+                     "comes from the indexed documents)")
         return "\n".join(lines)
 
     # --------------------------------------------------------- find_files

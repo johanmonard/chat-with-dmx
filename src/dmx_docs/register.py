@@ -14,7 +14,7 @@ import os
 import re
 import unicodedata
 
-REGISTER_VERSION = 1
+REGISTER_VERSION = 2
 
 TABLE = """
 CREATE TABLE IF NOT EXISTS register_machines (
@@ -44,7 +44,12 @@ CREATE TABLE IF NOT EXISTS register_machines (
     status      TEXT,
     notes       TEXT,
     source      TEXT,
-    client_key  TEXT       -- folded client + group, for client= filters
+    client_key  TEXT,      -- folded client + group, for client= filters
+    reg_project TEXT,      -- project the register itself points to, when the documents say otherwise
+    reg_year    INTEGER,   -- year in the register, when the documents say otherwise
+    family_ok   INTEGER NOT NULL DEFAULT 1,  -- 0: the documents name another machine family
+    model_ok    INTEGER NOT NULL DEFAULT 1,  -- 0: the documents name another robot count
+    doc_note    TEXT       -- what the documents say instead (they are more reliable than the register)
 );
 CREATE INDEX IF NOT EXISTS register_project ON register_machines(project);
 """
@@ -99,13 +104,15 @@ def refresh(con, path: str | None) -> bool:
     from . import store
 
     con.executescript(TABLE)
+    if "doc_note" not in {r[1] for r in con.execute("PRAGMA table_info(register_machines)")}:
+        con.executescript("DROP TABLE register_machines;" + TABLE)  # table of version 1
     if path and os.path.isfile(path):
         st = os.stat(path)
         file_state = f"{st.st_mtime_ns}:{st.st_size}"
     else:
         file_state = "none"
     n, last = con.execute("SELECT count(*), max(indexed_at) FROM docs").fetchone()
-    state = f"{REGISTER_VERSION}:{file_state}:{n}:{last}"
+    state = f"{REGISTER_VERSION}:{file_state}:{n}:{last}:{store.get_meta(con, 'machines_state')}"
     if store.get_meta(con, "register_state") == state:
         return False
     rows = load(path) if file_state != "none" else []
@@ -116,7 +123,11 @@ def refresh(con, path: str | None) -> bool:
         b = _base(p)
         by_base[b] = p if b not in by_base else None  # ambiguous: not used
     num_docs = _number_evidence(con) if rows else {}
+    doc_models = _doc_models(con) if rows else {}
+    doc_years = _doc_years(con) if rows else {}
 
+    # When the register and the documents disagree, the documents win (the register was typed
+    # by hand from several sources): the register value is kept as a note.
     out = []
     for r in rows:
         folder = (r.get("path") or "").rstrip("\\/").replace("/", "\\").split("\\")[-1]
@@ -126,22 +137,53 @@ def refresh(con, path: str | None) -> bool:
             if value and not project:
                 project = by_key.get(_key(value)) or by_base.get(_base(value))
                 how = method if project else None
-        if not project:
-            project = _by_number(numbers(r.get("order_no"), r.get("serial")), num_docs)
-            how = "order" if project else None
-        year = _int(r.get("year")) or _int((r.get("order_date") or "")[:4])
+        nums = numbers(r.get("order_no"), r.get("serial"))
+        reg_project = None
+        owner = _by_number(nums, num_docs, strong=bool(project))
+        if owner and project and owner != project and not any(project in num_docs.get(n, {}) for n in nums):
+            reg_project, project, how = project, owner, "order"  # its number is in that project's files
+        elif not project:
+            project, how = owner, "order" if owner else None
+        model = r.get("model", "")
+        family = _family(model)
+        notes, family_ok, model_ok = [], 1, 1
+        if reg_project:
+            notes.append(f"the register files it under {reg_project}; its number is in {project}'s documents")
+        found = doc_models.get(project, {})
+        if family in KNOWN_FAMILIES and found:
+            families = {f for f, _ in found}
+            with_model = {f for f, m in found if m}
+            text = ", ".join([f"{m or f} ({d} docs)" for (f, m), d in sorted(found.items(), key=lambda kv: -kv[1])
+                              if m or f not in with_model][:3])
+            if family not in families:
+                family_ok = model_ok = 0
+                notes.append(f"the documents name {text}, not {model}")
+            elif re.search(r"\d+R", model) and any(f == family and m for f, m in found) and not any(
+                    m == model or m.startswith(model + " ") for _, m in found):
+                model_ok = 0
+                notes.append(f"the documents name {text}, not {model}")
+        order_date = r.get("order_date") or ""
+        reg_year = year = int(order_date[:4]) if re.match(r"\d{4}", order_date) else _int(r.get("year"))
+        span = doc_years.get(project)
+        if year and span and not (span[0] - 2 <= year <= span[1] + 1):
+            notes.append(f"the register says {year}; the project's offers/orders/FAT/SAT are dated {span[0]}-{span[1]}")
+            year = span[0]
+        else:
+            reg_year = None
         client, grp = r.get("client", ""), r.get("group", "")
         out.append((project, how, name, r.get("path", ""), r.get("order_no", ""), r.get("serial", ""),
-                    r.get("model", ""), _family(r.get("model", "")), year, _int(r.get("robots")),
+                    model, family, year, _int(r.get("robots")),
                     r.get("cells", ""), r.get("controller", ""), r.get("camera", ""), client, grp,
                     r.get("industry", ""), r.get("city", ""), r.get("country", ""), r.get("site", ""),
-                    r.get("agent", ""), r.get("maintenance", ""), r.get("order_date", ""), r.get("status", ""),
-                    r.get("notes", ""), r.get("source", ""), f" {fold(client)} | {fold(grp)} "))
+                    r.get("agent", ""), r.get("maintenance", ""), order_date, r.get("status", ""),
+                    r.get("notes", ""), r.get("source", ""), f" {fold(client)} | {fold(grp)} ",
+                    reg_project, reg_year, family_ok, model_ok, "; ".join(notes)))
     autocommit = con.isolation_level is None
     if autocommit:
         con.execute("BEGIN")
     con.execute("DELETE FROM register_machines")
-    cols = ("project", "matched_by") + FIELDS + ("client_key",)
+    cols = ("project", "matched_by") + FIELDS + ("client_key", "reg_project", "reg_year", "family_ok", "model_ok",
+                                                "doc_note")
     con.executemany(f"INSERT INTO register_machines ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", out)
     store.set_meta(con, "register_state", state)
     con.execute("COMMIT") if autocommit else con.commit()
@@ -171,8 +213,39 @@ def _number_evidence(con) -> dict[str, dict[str, list[int]]]:
     return ev
 
 
-def _by_number(nums: set[str], ev: dict) -> str | None:
-    """The project whose documents carry these numbers - only if clearly its own."""
+KNOWN_FAMILIES = ("Paloma", "Presto", "Hector", "Delfi", "Astor", "Nestor", "FeedPlacer")
+OWN_TYPES = ("offre", "commande", "cahier_des_charges", "fat", "sat", "reception", "mise_en_service", "liberation")
+
+
+def _doc_models(con) -> dict[str, dict[tuple[str, str], int]]:
+    """project -> {(family, model): documents} for the machines confirmed by the documents."""
+    out: dict[str, dict] = {}
+    for p, f, m, d in con.execute("SELECT project, family, model, docs FROM project_machines WHERE confirmed = 1"):
+        out.setdefault(p, {})[(f, m)] = d
+    return out
+
+
+def _doc_years(con) -> dict[str, tuple[int, int]]:
+    """project -> (first, last) year of its own offers/orders/FAT/SAT files (10% trimmed each side)."""
+    from datetime import datetime
+
+    years: dict[str, list[int]] = {}
+    for p, t in con.execute(
+            f"""SELECT f.project, d.mtime FROM docs d JOIN doc_facets f ON f.doc_id = d.id
+                WHERE f.project IS NOT NULL AND d.mtime IS NOT NULL
+                AND f.doc_type IN ({','.join('?' * len(OWN_TYPES))})""", OWN_TYPES):
+        years.setdefault(p, []).append(datetime.fromtimestamp(t).year)
+    out = {}
+    for p, ys in years.items():
+        if len(ys) >= 3:
+            ys.sort()
+            out[p] = (ys[len(ys) // 10], ys[-1 - len(ys) // 10])
+    return out
+
+
+def _by_number(nums: set[str], ev: dict, strong: bool = False) -> str | None:
+    """The project whose documents carry these numbers - only if clearly its own. strong: enough
+    evidence to overrule the register's own link (several file names or documents)."""
     score: dict[str, list[int]] = {}
     for n in nums:
         for p, (docs, named) in ev.get(n, {}).items():
@@ -183,7 +256,8 @@ def _by_number(nums: set[str], ev: dict) -> str | None:
         return None
     total = sum(s[0] for s in score.values())
     best, (docs, named) = max(score.items(), key=lambda kv: kv[1][0])
-    if (docs >= 2 or named >= 1) and docs >= 0.6 * total:
+    enough = (named >= 2 or docs >= 4) if strong else (docs >= 2 or named >= 1)
+    if enough and docs >= 0.6 * total:
         return best
     return None
 
