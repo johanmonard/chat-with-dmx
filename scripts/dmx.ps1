@@ -165,16 +165,40 @@ function Enter-Lock([string]$what) {
 
 function Exit-Lock { Remove-Item $Lock -Force -ErrorAction SilentlyContinue }
 
-function Copy-MasterToLocal {
-    New-Item -ItemType Directory -Force $LocalData | Out-Null
+function Stop-LocalServers {
+    # Claude Desktop's dmx-docs server keeps the local index open; it restarts it by itself.
+    Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+        Where-Object { $_.CommandLine -match 'dmx_docs\.cli' -and $_.CommandLine -match ' serve' } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
+
+function Remove-LocalDb {
+    # Returns $false if the file stays in use (the old copy is then left untouched).
+    for ($try = 1; $try -le 5; $try++) {
+        if (-not (Test-Path $LocalDb)) { break }
+        Stop-LocalServers
+        Start-Sleep -Milliseconds 500
+        try { [IO.File]::Delete($LocalDb) } catch { }
+    }
+    if (Test-Path $LocalDb) { return $false }
     Remove-Item "$LocalDb-wal", "$LocalDb-shm" -Force -ErrorAction SilentlyContinue
+    return $true
+}
+
+function Copy-MasterToLocal {
+    # Never copy over the local index in place: a copy interrupted by a reader corrupts it.
+    New-Item -ItemType Directory -Force $LocalData | Out-Null
+    $new = "$LocalDb.new"
     if (Test-Path $Master) {
         Say 'Copying the index from the shared folder ...'
-        Copy-Item $Master $LocalDb -Force
-    } else {
-        Say 'No index in the shared folder yet: starting a new one.'
-        Remove-Item $LocalDb -Force -ErrorAction SilentlyContinue
+        Copy-Item $Master $new -Force
     }
+    if (-not (Remove-LocalDb)) {
+        Remove-Item $new -Force -ErrorAction SilentlyContinue
+        throw "The local index is in use (Claude Desktop?). Quit Claude Desktop completely and run this again. The current local copy was left as it was."
+    }
+    if (Test-Path $new) { [IO.File]::Move($new, $LocalDb) }
+    else { Say 'No index in the shared folder yet: starting a new one.' }
 }
 
 function Save-LocalToMaster {
