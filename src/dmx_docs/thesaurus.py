@@ -34,11 +34,15 @@ class Thesaurus:
     def __init__(self, concepts: dict[str, list[str]]):
         self.concepts = concepts                      # concept id -> terms (original spelling)
         self.index: dict[str, str] = {}               # normalized term -> concept id
+        self.duplicates: dict[str, list[str]] = {}    # term listed in several concepts (first one wins)
         for cid, terms in concepts.items():
             for t in terms:
                 key = norm(t)
-                if key:
-                    self.index.setdefault(key, cid)
+                if not key:
+                    continue
+                if key in self.index and self.index[key] != cid:
+                    self.duplicates.setdefault(key, [self.index[key]]).append(cid)
+                self.index.setdefault(key, cid)
 
     @classmethod
     def load(cls, path: str | os.PathLike | None) -> "Thesaurus | None":
@@ -65,7 +69,9 @@ class Thesaurus:
                 key = " ".join(keys[i:i + n])
                 cid = self.index.get(key)
                 if cid:
-                    others = [t for t in self.concepts[cid] if norm(t) != key]
+                    # Short abbreviations (AU, ES, MES, FAT...) trigger an expansion when typed but are
+                    # never added: the index ignores case, so they would also match au, es, mes, fat...
+                    others = [t for t in self.concepts[cid] if norm(t) != key and len(norm(t).replace(" ", "")) > 3]
                     out.append((" ".join(words[i:i + n]), others))
                     i += n
                     break

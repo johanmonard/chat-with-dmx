@@ -31,7 +31,8 @@ def test_expansion_of_words_and_phrases(tmp_path):
     expanded = []
     q = build_fts_query("réglage du Préhenseur et arrêt d'urgence casse", thesaurus=th, expanded=expanded)
     assert '("Préhenseur" OR "pince" OR "gripper" OR "end effector" OR "Greifer")' in q
-    assert '("arrêt d urgence" OR "AU" OR "emergency stop" OR "Not Halt")' in q
+    assert '("arrêt d urgence" OR "emergency stop" OR "Not Halt")' in q  # AU is never added
+    assert '("AU" OR "arrêt d urgence"' in build_fts_query("AU", thesaurus=th)  # but triggers when typed
     assert '"casse"' in q and "breakage" not in q  # status "no" is ignored
     assert [t for t, _ in expanded] == ["Préhenseur", "arrêt d urgence"]
     assert build_fts_query("préhenseur", thesaurus=None) == '"préhenseur"'
