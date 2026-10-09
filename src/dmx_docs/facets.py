@@ -15,7 +15,7 @@ import re
 import unicodedata
 
 # Bump when the rules change: every document's facets are recomputed (from its path only).
-FACETS_VERSION = 2
+FACETS_VERSION = 3
 
 
 def _norm(s: str) -> str:
@@ -49,10 +49,10 @@ DOC_TYPES = [
     ("sat",               ["sat", "reception site"],                                             ["sat", "site acceptance", "reception site"]),
     ("reception",         ["acceptation machine", "reception", "acceptation", "acceptation fat handover sat", "handover"],
                                                                           ["pv de reception", "proces verbal", "protocole de reception", "handover"]),
-    ("liberation",        ["liberation interne", "liberation avant livraison", "liberation"],
+    ("liberation",        ["liberation interne", "liberation avant livraison", "liberation", "internal release"],
                                                                           ["liberation interne", "liberation avant livraison"]),
     ("qualification",     ["iq oq", "iq oq pq", "qualification"],         ["iq oq", "iq oq pq", "qualification"]),
-    ("securite",          ["analyse securite", "analyse de securite", "securite", "analyse de risques", "marquage ce"],
+    ("securite",          ["analyse securite", "analyse de securite", "securite", "securit", "analyse de risques", "marquage ce", "ce"],
                                                                           ["analyse de risque", "analyse de risques", "analyse securite", "declaration ce", "marquage ce", "risk assessment"]),
     ("mise_en_service",   ["mes", "mise en service", "rapports interventions", "documents mes"],
                                                                           ["mise en service", "commissioning", "rapport d intervention", "inbetriebnahme"]),
@@ -61,7 +61,7 @@ DOC_TYPES = [
                            "mesure de bruit", "mesures de bruit"],
                                                                           ["test", "tests", "essai", "essais", "mesure de bruit", "mesures de bruit"]),
     ("checklist",         ["check lists", "checklists", "check list", "checklist"], ["check list", "checklist"]),
-    ("qualite",           ["qg", "qg process", "qg processus", "qa", "quality gates", "qualite"],
+    ("qualite",           ["qg", "qg process", "qg processus", "qa", "quality gates", "qualite", "qmm", "qg1", "qg2", "qg3", "qg4", "qg5"],
                                                                           ["quality gate", "qg"]),
     ("offre",             ["offres", "offre", "prix final"],                       ["offre", "offer", "quotation", "devis", "angebot", "price summary"]),
     ("commande",          ["commandes", "commande", "commandes complementaires"],     ["commande", "bon de commande", "purchase order", "bestellung", "order confirmation"]),
@@ -78,7 +78,9 @@ DOC_TYPES = [
     ("sav",               ["sav", "service apres vente"],                 ["sav"]),
     ("doc_fournisseur",   ["materiel tiers", "received doc", "third party", "oem doc", "suppliers", "fournisseurs"],
                                                                           ["datasheet", "data sheet", "fiche technique"]),
-    ("suivi",             ["suivi", "correspondance e mails"],            ["compte rendu", "cr", "minutes", "reunion", "meeting", "pv"]),
+    ("suivi",             ["suivi", "seances", "pv seances"],             ["compte rendu", "cr", "minutes", "reunion", "meeting", "pv", "pv seance", "rapport de seance"]),
+    ("correspondance",    ["correspondance e mails", "correspondance", "fax", "e mails", "emails", "courrier"],
+                                                                          ["fax", "lettre", "courrier", "e mail"]),
     ("planning",          ["planning"],                                   ["planning", "gantt"]),
     ("transport",         ["transport", "supply chain", "shipping doc", "shipping", "expedition"],                  ["transport", "packing list", "colisage"]),
     ("nomenclature",      ["bom internal use", "nomenclature"],           ["bom", "nomenclature"]),
