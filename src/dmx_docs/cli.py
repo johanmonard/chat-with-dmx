@@ -31,6 +31,9 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="dmx-docs", description=__doc__)
     parser.add_argument("--config", default=os.environ.get("DMX_DOCS_CONFIG", "config.toml"),
                         help="path to config.toml (default: ./config.toml or $DMX_DOCS_CONFIG)")
+    parser.add_argument("--world", default=None,
+                        help="world (family of documents) to use, e.g. projects or marketing "
+                             "(default: $DMX_DOCS_WORLD, else projects)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("web", help="open the configuration page (folders, scans, status)")
@@ -66,7 +69,10 @@ def main(argv: list[str] | None = None) -> None:
     if not config_path.exists():
         parser.error(f"config file not found: {config_path.resolve()} "
                      "(copy config.example.toml to config.toml and edit it)")
-    cfg = load_config(config_path)
+    try:
+        cfg = load_config(config_path, world=args.world)
+    except ValueError as e:
+        parser.error(str(e))
     from .sources import refresh
     refresh(cfg)  # root/excluded folders are managed on the configuration page
 

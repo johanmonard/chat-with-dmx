@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_EXCLUDES = ["~$*", ".*", "$RECYCLE.BIN", "System Volume Information"]
+WORLD_NAME = re.compile(r"[a-z0-9_-]+")
+# Facet rules, MCP tools and server instructions of a world (see facets.py and server.py).
+PROFILES = ("projects", "marketing", "none")
 
 
 def _default_workers() -> int:
@@ -47,6 +51,11 @@ class Config:
     register_path: str | None = None    # register.csv (installed machines) next to config.toml by default
     export_dir: str | None = None  # where export_image saves files (default: ~\Claude\dmx-images)
     config_path: Path | None = None
+    # A world is one family of documents with its own index (projects, marketing...), chosen
+    # with --world. None: a config without [worlds] tables, one index directly in data_dir.
+    world: str | None = None
+    world_title: str | None = None
+    profile: str = "projects"
 
     def __post_init__(self) -> None:
         self.extensions = [e.lower() if e.startswith(".") else "." + e.lower() for e in self.extensions]
@@ -78,16 +87,26 @@ class Config:
         return any(is_under(key, rk) for rk in self.root_keys) and not self.is_excluded_dir(key)
 
     @property
+    def world_dir(self) -> Path:
+        """Local folder of this world's index, search cache and logs."""
+        return self.data_dir / self.world if self.world else self.data_dir
+
+    @property
     def db_path(self) -> Path:
-        return self.data_dir / "index.sqlite3"
+        return self.world_dir / "index.sqlite3"
 
     @property
     def models_dir(self) -> Path:
-        return self.data_dir / "models"
+        return self.data_dir / "models"  # one embedding model for every world
 
     @property
     def logs_dir(self) -> Path:
-        return self.data_dir / "logs"
+        return self.world_dir / "logs"
+
+    @property
+    def server_name(self) -> str:
+        """MCP server name in Claude Desktop (dmx-docs for the project documentation)."""
+        return "dmx-docs" if self.world in (None, "projects") else f"dmx-{self.world}"
 
     def is_excluded(self, name: str, path: str) -> bool:
         name_l = name.lower()
@@ -107,13 +126,31 @@ class Config:
         }
 
 
-def load_config(path: str | os.PathLike) -> Config:
+def load_config(path: str | os.PathLike, world: str | None = None) -> Config:
+    """Read config.toml. When it has [worlds.<name>] tables, one world is used: `world`, else
+    $DMX_DOCS_WORLD, else 'projects'. A world table may set title, profile, extensions, exclude,
+    roots (first-run seed) and register; all other settings are shared by every world."""
     path = Path(path)
     with open(path, "rb") as f:
         raw = tomllib.load(f)
-    idx = raw.get("index", {})
+    idx = dict(raw.get("index", {}))
     emb = raw.get("embeddings", {})
     srv = raw.get("server", {})
+    worlds = raw.get("worlds") or {}
+
+    name = world or os.environ.get("DMX_DOCS_WORLD") or None
+    if worlds:
+        name = name or ("projects" if "projects" in worlds else None)
+        if name not in worlds:
+            raise ValueError(f"Unknown world '{name or ''}'. Configured worlds in {path}: {', '.join(worlds)}")
+        if not WORLD_NAME.fullmatch(name):
+            raise ValueError(f"World names use lowercase letters, digits, '-' and '_' only: '{name}'")
+    elif name:
+        raise ValueError(f"{path} has no [worlds.<name>] tables: --world {name} cannot be used")
+    w = worlds.get(name, {}) if name else {}
+    for key in ("roots", "extensions", "exclude"):
+        if key in w:
+            idx[key] = w[key]
 
     roots = idx.get("roots") or []
     data_dir = Path(idx.get("data_dir", "data"))
@@ -121,6 +158,11 @@ def load_config(path: str | os.PathLike) -> Config:
         data_dir = (path.parent / data_dir).resolve()
 
     kwargs: dict = {"roots": [str(r) for r in roots], "data_dir": data_dir, "config_path": path.resolve()}
+    if name:
+        profile = w.get("profile", "none")
+        if profile not in PROFILES:
+            raise ValueError(f"World '{name}': unknown profile '{profile}' (use {', '.join(PROFILES)})")
+        kwargs.update(world=name, world_title=w.get("title") or name.capitalize(), profile=profile)
     for key in ("extensions", "exclude", "max_file_mb", "max_pdf_pages", "workers",
                 "doc_converter", "libreoffice_path"):
         if key in idx:
@@ -146,10 +188,16 @@ def load_config(path: str | os.PathLike) -> Config:
         tp = Path(os.path.expandvars(str(thesaurus)))
         kwargs["thesaurus_path"] = str(tp if tp.is_absolute() else (path.parent / tp))
     kwargs["expand_synonyms"] = bool(srch.get("expand", False))
-    register = srch.get("register", "register.csv")
-    if register:
-        rp = Path(os.path.expandvars(str(register)))
-        kwargs["register_path"] = str(rp if rp.is_absolute() else (path.parent / rp))
+    if name:  # the machine register belongs to a world: data_dir\<world>\register.csv
+        register = w.get("register", "register.csv" if kwargs["profile"] == "projects" else None)
+        if register:
+            rp = Path(os.path.expandvars(str(register)))
+            kwargs["register_path"] = str(rp if rp.is_absolute() else data_dir / name / rp)
+    else:
+        register = srch.get("register", "register.csv")
+        if register:
+            rp = Path(os.path.expandvars(str(register)))
+            kwargs["register_path"] = str(rp if rp.is_absolute() else (path.parent / rp))
     if srv.get("export_dir"):
         kwargs["export_dir"] = os.path.expandvars(os.path.expanduser(str(srv["export_dir"])))
     return Config(**kwargs)

@@ -147,13 +147,13 @@ class VectorIndex:
     def _cache_paths(self, version: str):
         # One file pair per vector version: a new cache never has to replace a file that
         # another process (e.g. Claude Desktop's server) still has memory-mapped.
-        d = self.cfg.data_dir
+        d = self.cfg.world_dir
         safe = re.sub(r"[^0-9A-Za-z]", "", version)[:40] or "0"
         return d / f"vec_ids.{safe}.npy", d / f"vec_mat.{safe}.npy"
 
     def _cleanup_old_caches(self, keep: str) -> None:
         keep_names = {p.name for p in self._cache_paths(keep)}
-        for p in list(self.cfg.data_dir.glob("vec_*.npy")) + list(self.cfg.data_dir.glob("vec_*.tmp")) + list(self.cfg.data_dir.glob("vec_cache.json")):
+        for p in list(self.cfg.world_dir.glob("vec_*.npy")) + list(self.cfg.world_dir.glob("vec_*.tmp")) + list(self.cfg.world_dir.glob("vec_cache.json")):
             if p.name not in keep_names:
                 try:
                     p.unlink()
