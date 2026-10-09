@@ -122,9 +122,10 @@ def _drives() -> list[str]:
 
 def claude_desktop_snippet(cfg: Config) -> str:
     config_path = str(cfg.config_path) if cfg.config_path else "config.toml"
-    return json.dumps({"mcpServers": {"dmx-docs": {
+    world = ["--world", cfg.world] if cfg.world else []
+    return json.dumps({"mcpServers": {cfg.server_name: {
         "command": sys.executable,
-        "args": ["-m", "dmx_docs.cli", "--config", config_path, "serve"],
+        "args": ["-m", "dmx_docs.cli", "--config", config_path] + world + ["serve"],
     }}}, indent=2)
 
 
@@ -182,7 +183,8 @@ def create_app(cfg: Config, allowed_hosts: set[str] | None = None) -> FastAPI:
             "roots": roots,
             "patterns": cfg.exclude,
             "extensions": cfg.extensions,
-            "data_dir": str(cfg.data_dir),
+            "data_dir": str(cfg.world_dir),
+            "world": cfg.world_title or "",
             "config_path": str(cfg.config_path or ""),
             "embeddings_enabled": cfg.embeddings_enabled,
             "embedding_model": cfg.embedding_model,

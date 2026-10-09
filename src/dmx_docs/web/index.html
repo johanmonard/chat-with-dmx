@@ -377,7 +377,8 @@ async function refresh(full = true) {
     renderRoots();
     if (document.activeElement !== $("patterns")) $("patterns").value = state.patterns.join("\n");
     $("snippet").textContent = state.claude_desktop;
-    $("settings-info").textContent = `File types: ${state.extensions.join(", ")} · Index stored in ${state.data_dir}` +
+    $("settings-info").textContent = (state.world ? `World: ${state.world} · ` : "") +
+      `File types: ${state.extensions.join(", ")} · Index stored in ${state.data_dir}` +
       (state.config_path ? ` · Other settings in ${state.config_path}` : "");
   }
   renderJob();

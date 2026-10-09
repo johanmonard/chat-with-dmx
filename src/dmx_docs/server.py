@@ -73,13 +73,52 @@ Never answer from the first search alone. Follow this loop for every question:
    uncertain; never fill gaps with general knowledge presented as coming from the documents.
 """
 
+MARKETING_INSTRUCTIONS = """\
+Read-only access to the company's marketing documents (Demaurex: robotic packaging lines):
+brochures, datasheets, presentations (sales, trainings, company), exhibitions, competition
+analyses and publications; PDF, Word and PowerPoint, mostly English and French, also German.
+Each search hit shows its category = the top folder: Brochures, Competition, Datasheets,
+Exhibition, Graphics, Pictures, Presentations, Publications, Videos. PowerPoint files are read
+slide by slide ("slide" instead of "page").
+
+Never answer from the first search alone. Follow this loop for every question:
+
+1. REFORMULATE the question into 2-4 search queries: English and French terms, product names
+   (Paloma, Presto, Hector, Delfi, Astor, Nestor, FeedPlacer), exact names in "double quotes".
+   Filter with category= when the kind of document is known (category="Competition" for
+   competitors, "Datasheets" for technical data, "Presentations" for sales decks).
+2. RETRIEVE with `search` (hybrid by default; mode="keyword" for names and codes); browse a
+   category with `list_folder`.
+3. EVALUATE each hit: does the excerpt answer the question or only share words? Read the best
+   documents with `read_document` / `find_in_document`; look at pictures with `view_page`
+   (PDF pages; for PowerPoint, page = slide and image = n-th picture on it).
+4. RETRY with other words or another language if coverage is thin, at most 3 rounds.
+5. SYNTHESIZE in the user's language, only from what you read. Cite every fact as full path +
+   page or slide. Marketing material is promotional: say so when a figure only comes from a
+   brochure. State clearly what was not found.
+"""
+
+GENERIC_INSTRUCTIONS = """\
+Read-only access to the company's "{title}" documents (Demaurex: robotic packaging lines).
+Search with `search` (2-4 reformulated queries, several languages), check each hit by reading it
+with `read_document` / `find_in_document`, look at pictures with `view_page`, browse with
+`list_folder`, and answer only from what you read, citing full path + page.
+"""
+
+
+def instructions_for(cfg: Config) -> str:
+    if cfg.profile == "projects":
+        return INSTRUCTIONS
+    if cfg.profile == "marketing":
+        return MARKETING_INSTRUCTIONS
+    return GENERIC_INSTRUCTIONS.format(title=cfg.world_title or cfg.world)
+
 
 def build_server(cfg: Config) -> MCPServer:
     tools = DocTools(cfg)
-    mcp = MCPServer("dmx-docs", instructions=INSTRUCTIONS)
+    mcp = MCPServer(cfg.server_name, instructions=instructions_for(cfg))
     kw = {"annotations": READ_ONLY} if READ_ONLY is not None else {}
 
-    @mcp.tool(**kw)
     def search(query: str, folder: str | None = None, file_type: str | None = None,
                modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
                project: str | None = None, doc_type: str | None = None, section: str | None = None,
@@ -122,7 +161,6 @@ def build_server(cfg: Config) -> MCPServer:
                             section=section, collection=collection, machine=machine, expand=expand,
                             client=client, country=country)
 
-    @mcp.tool(**kw)
     def list_projects(name: str | None = None, collection: str | None = None, machine: str | None = None,
                       limit: int = 300, client: str | None = None, country: str | None = None,
                       year_from: int | None = None, year_to: int | None = None) -> str:
@@ -148,7 +186,6 @@ def build_server(cfg: Config) -> MCPServer:
         return tools.list_projects(name=name, collection=collection, machine=machine, limit=limit,
                                    client=client, country=country, year_from=year_from, year_to=year_to)
 
-    @mcp.tool(**kw)
     def project_card(project: str) -> str:
         """One page about a project: client (group, industry, site, country), every machine
         delivered (serial number, model, year, robots, controller, camera, maintenance contract,
@@ -264,6 +301,58 @@ def build_server(cfg: Config) -> MCPServer:
         """Show what is indexed: number of documents per status and type, embeddings coverage,
         root folders and last indexing date."""
         return tools.index_status()
+
+    def marketing_search(query: str, folder: str | None = None, file_type: str | None = None,
+                         modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
+                         category: str | None = None, expand: bool | None = None) -> str:
+        """Search the marketing documents by meaning and keywords. Returns excerpts with file path
+        and page (slide for PowerPoint), how each one matched (keyword, semantic or both) and its
+        meaning similarity to the query (strong >= 0.86, medium 0.83-0.86, weak < 0.83 = often off
+        topic). These are hints: judge by reading.
+
+        Args:
+            query: What to look for (any language; documents are mostly English and French).
+                Use "double quotes" for exact phrases or names, and word* for prefix matches.
+            folder: Optional folder path to restrict the search to (includes subfolders).
+            file_type: Optional 'pdf', 'docx', 'doc', 'pptx' or 'ppt'.
+            modified_after: Optional date (YYYY, YYYY-MM or YYYY-MM-DD) - only files modified since then.
+            limit: Number of results (1-30, default 10). At most 3 excerpts per document.
+            mode: 'hybrid' (default), 'keyword' (exact words, codes, names) or 'semantic' (by meaning).
+            category: Optional top folder(s), comma-separated: Brochures, Competition, Datasheets,
+                Exhibition, Graphics, Pictures, Presentations, Publications, Videos.
+            expand: Widen the keyword part with the company thesaurus. Default: as configured.
+        """
+        return tools.search(query, folder=folder, file_type=file_type, modified_after=modified_after,
+                            limit=limit, mode=mode, category=category, expand=expand)
+
+    def plain_search(query: str, folder: str | None = None, file_type: str | None = None,
+                     modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
+                     expand: bool | None = None) -> str:
+        """Search the documents by meaning and keywords. Returns excerpts with file path and page,
+        how each one matched and its meaning similarity to the query (strong >= 0.86, medium
+        0.83-0.86, weak < 0.83). These are hints: judge by reading.
+
+        Args:
+            query: What to look for (any language). "double quotes" for exact phrases, word* for prefixes.
+            folder: Optional folder path to restrict the search to (includes subfolders).
+            file_type: Optional file type, e.g. 'pdf', 'docx', 'pptx'.
+            modified_after: Optional date (YYYY, YYYY-MM or YYYY-MM-DD).
+            limit: Number of results (1-30, default 10).
+            mode: 'hybrid' (default), 'keyword' or 'semantic'.
+            expand: Widen the keyword part with the company thesaurus. Default: as configured.
+        """
+        return tools.search(query, folder=folder, file_type=file_type, modified_after=modified_after,
+                            limit=limit, mode=mode, expand=expand)
+
+    # Tools that depend on the world's profile.
+    if cfg.profile == "projects":
+        mcp.tool(**kw)(search)
+        mcp.tool(**kw)(list_projects)
+        mcp.tool(**kw)(project_card)
+    elif cfg.profile == "marketing":
+        mcp.tool(name="search", **kw)(marketing_search)
+    else:
+        mcp.tool(name="search", **kw)(plain_search)
 
     return mcp
 

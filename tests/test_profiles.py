@@ -70,3 +70,43 @@ def test_projects_facets_version_is_unchanged(corpus_copy, make_cfg):
     con = store.connect(cfg.db_path)
     assert store.get_meta(con, "facets_version") == str(facets.FACETS_VERSION)
     con.close()
+
+
+import asyncio
+import json
+
+
+def test_marketing_server_tools(marketing):
+    cfg, _ = marketing
+    from mcp import Client
+
+    from dmx_docs.server import build_server
+
+    async def run():
+        async with Client(build_server(cfg)) as client:
+            listed = {t.name: t for t in (await client.list_tools()).tools}
+            res = await client.call_tool("search", {"query": "Paloma", "mode": "keyword", "category": "Brochures"})
+            return listed, res
+
+    listed, res = asyncio.run(run())
+    assert set(listed) == {"search", "find_files", "list_folder", "read_document", "find_in_document",
+                           "index_status", "view_page", "open_document", "export_image"}
+    search_tool = listed["search"]  # mcp 2 names it input_schema, mcp 1 inputSchema
+    props = (getattr(search_tool, "input_schema", None) or search_tool.inputSchema)["properties"]
+    assert "category" in props and "project" not in props and "machine" not in props
+    assert "Paloma brochure.pdf" in res.content[0].text and "Sales training" not in res.content[0].text
+
+
+def test_instructions_and_name_follow_the_profile(marketing, corpus_copy, make_cfg):
+    from dmx_docs.server import INSTRUCTIONS, instructions_for
+    cfg, _ = marketing
+    assert cfg.server_name == "dmx-marketing"
+    assert "Brochures" in instructions_for(cfg) and "0_Vente" not in instructions_for(cfg)
+    assert instructions_for(make_cfg(corpus_copy)) == INSTRUCTIONS
+
+
+def test_claude_desktop_snippet_names_the_world(marketing):
+    from dmx_docs.web import claude_desktop_snippet
+    cfg, _ = marketing
+    entry = json.loads(claude_desktop_snippet(cfg))["mcpServers"]["dmx-marketing"]
+    assert entry["args"][-3:] == ["--world", "marketing", "serve"]
