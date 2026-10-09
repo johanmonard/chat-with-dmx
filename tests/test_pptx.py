@@ -241,3 +241,19 @@ def test_powerpoint_settings_come_back_when_the_conversion_fails(tmp_path, monke
         extract._convert_with_powerpoint(str(tmp_path / "Deck.ppt"), str(tmp_path))
     assert [entry[0] for entry in log] == ["Open", "SaveCopyAs", "Close"]
     assert (app.DisplayAlerts, app.AutomationSecurity) == (2, 1)
+
+
+def test_slide_pictures_view_and_export(deck_tools, tmp_path):
+    from dmx_docs.extract import pymupdf
+    t, deck = deck_tools
+    caption, data, _ = t.view_page(str(deck), page=3, image=2)
+    assert "picture 2 of 2 on slide 3/3" in caption
+    assert tuple(pymupdf.Pixmap(data).pixel(5, 5)) == (0, 0, 255)
+    with pytest.raises(ValueError, match="Slide 1 has no picture.*Slides with pictures: 3"):
+        t.view_page(str(deck), page=1)
+    with pytest.raises(ValueError, match="between 1 and 3"):
+        t.view_page(str(deck), page=4)
+    t.cfg.export_dir = str(tmp_path / "exports")
+    out = t.export_image(str(deck), page=3, image=1)
+    target = tmp_path / "exports" / "Deck_s3_img1.png"
+    assert str(target) in out and tuple(pymupdf.Pixmap(str(target)).pixel(5, 5)) == (255, 0, 0)

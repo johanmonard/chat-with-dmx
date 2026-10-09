@@ -164,18 +164,52 @@ def _docx_picture_raw(fs: str, image: int | None) -> tuple[bytes, str, int, int]
         return z.read(shown[k - 1]), os.path.splitext(shown[k - 1])[1].lower(), k, len(shown)
 
 
-def _docx_picture(fs: str, path: str, image: int | None) -> tuple[str, bytes, str]:
+def _scaled_picture(raw: bytes, ext: str) -> tuple[bytes, str, int, int]:
+    """A picture file, scaled down for Claude when larger than VIEW_MAX_PX: (data, format, w, h)."""
     from .extract import pymupdf
 
-    raw, ext, k, total = _docx_picture_raw(fs, image)
     with pymupdf.open(stream=raw, filetype=ext.lstrip(".")) as img:
         p = img[0]
         zoom = min(1.0, VIEW_MAX_PX / max(p.rect.width, p.rect.height))
         pix = p.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
     data, fmt = _encode(pix)
+    return data, fmt, pix.width, pix.height
+
+
+def _docx_picture(fs: str, path: str, image: int | None) -> tuple[str, bytes, str]:
+    raw, ext, k, total = _docx_picture_raw(fs, image)
+    data, fmt, w, h = _scaled_picture(raw, ext)
     caption = (f"{path} — picture {k} of {total} embedded in the Word file (document order; Word "
-               f"files have no fixed pages), {pix.width}x{pix.height} px. Use image=N for the others.")
+               f"files have no fixed pages), {w}x{h} px. Use image=N for the others.")
     return caption, data, fmt
+
+
+def _slide_picture_raw(fs: str, path: str, slide: int, image: int | None,
+                       options: dict) -> tuple[bytes, str, int, int, int]:
+    """Original bytes of a picture on a PowerPoint slide: (data, extension, number, pictures on
+    the slide, slides). Old .ppt files are converted first (LibreOffice or PowerPoint)."""
+    import tempfile
+
+    from .extract import convert_ppt, pptx_pictures
+
+    with tempfile.TemporaryDirectory(prefix="dmx_view_") as tmp:
+        src = fs
+        if path.lower().endswith(".ppt"):
+            src = convert_ppt(path, tmp, options.get("doc_converter", "auto"), options.get("libreoffice_path"))
+        slides = pptx_pictures(src)
+    n = len(slides)
+    if not 1 <= slide <= n:
+        raise ValueError(f"page (slide number) must be between 1 and {n}")
+    pictures = slides[slide - 1]
+    if not pictures:
+        others = [str(i + 1) for i, p in enumerate(slides) if p]
+        raise ValueError(f"Slide {slide} has no picture that can be shown. " + (
+            f"Slides with pictures: {', '.join(others[:50])}" if others else "This file has no pictures."))
+    k = 1 if image is None else int(image)
+    if not 1 <= k <= len(pictures):
+        raise ValueError(f"image must be between 1 and {len(pictures)} (pictures on slide {slide})")
+    data, ext = pictures[k - 1]
+    return data, ext, k, len(pictures), n
 
 
 def _date(ts: float | None) -> str:
@@ -342,7 +376,8 @@ class DocTools:
     # ----------------------------------------------------------- view_page
     def view_page(self, path: str, page: int = 1, region: str | None = None,
                   image: int | None = None) -> tuple[str, bytes, str]:
-        """Render a PDF page (or a region of it) or return a picture embedded in a .docx.
+        """Render a PDF page (or a region of it) or return a picture embedded in a .docx or on a
+        PowerPoint slide.
         Returns (caption, image bytes, format). Reads the live file: needs the network share."""
         self._con().close()  # loads the root/excluded folders that _resolve checks against
         path, _ = self._resolve(path)
@@ -354,13 +389,18 @@ class DocTools:
             return _render_pdf_page(fs, path, int(page), region)
         if ext == ".docx":
             return _docx_picture(fs, path, image)
+        if ext in SLIDE_EXTS:
+            raw, pic_ext, k, total, n = _slide_picture_raw(fs, path, int(page), image, self.cfg.extract_options())
+            data, fmt, w, h = _scaled_picture(raw, pic_ext)
+            return (f"{path} — picture {k} of {total} on slide {page}/{n}, {w}x{h} px. Use image=N for "
+                    "the others (whole slides cannot be shown, only their pictures)."), data, fmt
         raise ValueError(f"Pictures of {TYPE_LABEL.get(ext, ext)} files cannot be shown "
-                         "(only PDF pages and pictures embedded in .docx files).")
+                         "(only PDF pages and pictures in .docx and PowerPoint files).")
 
     # -------------------------------------------------------- export_image
     def export_image(self, path: str, page: int = 1, region: str | None = None,
                      image: int | None = None, name: str | None = None) -> str:
-        """Save a PDF page/region rendering or a .docx picture as an image file in the export
+        """Save a PDF page/region rendering or a .docx or PowerPoint picture as an image file in the export
         folder (default C:\\dmx-rag\\exports), e.g. to put it on slides."""
         self._con().close()  # loads the root/excluded folders that _resolve checks against
         path, _ = self._resolve(path)
@@ -377,8 +417,12 @@ class DocTools:
         elif ext == ".docx":
             data, out_ext, k, total = _docx_picture_raw(fs, image)  # original resolution
             default, what = f"{stem}_img{k}", f"picture {k} of {total}"
+        elif ext in SLIDE_EXTS:
+            data, out_ext, k, total, _ = _slide_picture_raw(fs, path, int(page), image, self.cfg.extract_options())
+            default, what = f"{stem}_s{int(page)}_img{k}", f"picture {k} of {total} on slide {page}"
         else:
-            raise ValueError(f"Images can only be exported from PDF pages and .docx files, not {ext}")
+            raise ValueError(f"Images can only be exported from PDF pages and pictures in .docx and "
+                             f"PowerPoint files, not {ext}")
         folder = self.cfg.export_dir or default_export_dir(self.cfg)
         os.makedirs(folder, exist_ok=True)
         base = _safe_name(name) if name else default
