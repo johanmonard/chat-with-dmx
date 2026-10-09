@@ -410,9 +410,13 @@ def pptx_shapes(shapes):
 def _pptx_table_text(table) -> str:
     lines = []
     for row in table.rows:
-        # A cell covered by a merge has no text of its own: skip it, keep every other cell
-        # (equal neighbouring values are data, not repeats).
-        cells = [" ".join(cell.text.split()) for cell in row.cells if not cell.is_spanned]
+        cells = []
+        for cell in row.cells:
+            # Covered from the left: the text belongs to the origin cell, so skip it. Covered from
+            # above: keep an empty slot so the cells below stay in their column.
+            if cell._tc.hMerge:
+                continue
+            cells.append("" if cell._tc.vMerge else " ".join(cell.text.split()))
         if any(cells):
             lines.append(" | ".join(cells))
     return "\n".join(lines)

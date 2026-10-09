@@ -72,3 +72,26 @@ def test_pptx_table_keeps_repeated_values_and_merged_cells(tmp_path):
     assert "A B | C" in text.splitlines()
     assert "Robots | 4 | 4" in text.splitlines()
     assert "|  |" not in text  # no empty cell where the merged cell was
+
+
+def test_pptx_table_keeps_columns_under_a_vertical_merge(tmp_path):
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    deck = tmp_path / "Vertical.pptx"
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # Blank
+    table = slide.shapes.add_table(3, 2, Inches(1), Inches(1), Inches(6), Inches(3)).table
+    table.cell(0, 0).merge(table.cell(1, 0))  # "Group" spans the first two rows of the first column
+    table.cell(0, 0).text = "Group"
+    table.cell(0, 1).text = "Speed"
+    table.cell(1, 1).text = "Max"
+    table.cell(2, 0).text = "Motor"
+    table.cell(2, 1).text = "3 kW"
+    prs.save(str(deck))
+    r = extract_file(str(deck))
+    assert r.status == "ok"
+    lines = dict(r.pages)[1].splitlines()
+    assert "Group | Speed" in lines
+    assert "| Max" in lines  # Max stays in the second column: the covered cell leaves an empty slot
+    assert "Motor | 3 kW" in lines
