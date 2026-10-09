@@ -215,6 +215,36 @@ class DocTools:
                              "some subfolders may be excluded)")
         return path, key
 
+    def _resolve_folder(self, con, folder: str) -> tuple[str, str]:
+        """Like _resolve, but also accepts a folder given by name only ("MAURIUS") or relative to a
+        root ("RMA_PROJETS\\2_Hors_Garantie\\X", "2_Hors_Garantie\\X"): the shallowest indexed
+        folder with that name."""
+        try:
+            return self._resolve(folder)
+        except ValueError:
+            if re.match(r"^([a-zA-Z]:|[\\/]{2})", folder.strip()):
+                raise  # a full path outside the indexed folders
+        rel = folder.strip().strip("\\/").replace("/", "\\")
+        for root in self.cfg.roots:
+            base = root.rstrip("\\/").split("\\")[-1]
+            tail = rel[len(base):].lstrip("\\") if rel.lower() == base.lower() or rel.lower().startswith(
+                base.lower() + "\\") else rel
+            cand = os.path.join(root, tail) if tail else root
+            key = store.path_key(cand)
+            if self.cfg.allows(key) and con.execute(
+                    "SELECT 1 FROM docs WHERE substr(path_key, 1, ?) = ? LIMIT 1",
+                    (len(key) + 1, key.rstrip(os.sep) + os.sep)).fetchone():
+                return cand, key
+        needle = os.sep + os.path.normcase(rel) + os.sep
+        row = con.execute("SELECT path, path_key FROM docs WHERE instr(path_key, ?) > 0 "
+                          "ORDER BY instr(path_key, ?) LIMIT 1", (needle, needle)).fetchone()
+        if row:
+            end = row["path_key"].find(needle) + len(needle) - 1
+            path = row["path"][:end] if len(row["path"]) == len(row["path_key"]) else row["path_key"][:end]
+            return self._resolve(path)
+        raise ValueError(f"No indexed folder named '{folder}'. Give a full path from a search result, "
+                         "or a project name from list_projects.")
+
     # ------------------------------------------------------------ search
     def search(self, query: str, folder: str | None = None, file_type: str | None = None,
                modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
@@ -229,7 +259,7 @@ class DocTools:
         con = self._con()
         try:
             if folder:
-                folder, _ = self._resolve(folder)
+                folder, _ = self._resolve_folder(con, folder)
             hits = self.searcher.search(con, query, limit=limit, folder=folder, file_type=file_type,
                                         modified_after=modified_after, mode=mode,
                                         allowed=self.cfg.allows, facets=facet_filter, expand=expand)
@@ -596,7 +626,7 @@ class DocTools:
         con = self._con()
         try:
             if folder:
-                _, key = self._resolve(folder)
+                _, key = self._resolve_folder(con, folder)
                 prefix = key.rstrip(os.sep) + os.sep
                 clauses.append("substr(d.path_key, 1, ?) = ?")
                 params += [len(prefix), prefix]
@@ -634,7 +664,7 @@ class DocTools:
                 if self.cfg.excluded_dirs:
                     lines.append("Excluded folders: " + ", ".join(self.cfg.excluded_dirs))
                 return "\n".join(lines)
-            path, key = self._resolve(path)
+            path, key = self._resolve_folder(con, path)
             indexed = {r["path_key"]: r for r in con.execute(
                 "SELECT path_key, status, n_pages FROM docs WHERE folder_key = ?", (key,))}
         finally:

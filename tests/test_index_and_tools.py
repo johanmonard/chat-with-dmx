@@ -118,6 +118,13 @@ def test_find_files_and_list_folder(indexed):
     assert "[folder] Projets" in out
     assert "budget.xlsx" in out and "not indexed (file type)" in out
     assert "~$" not in out
+    # folders given by name only, or relative to the root (as Claude sometimes does)
+    for name in ("P1234_Nestle", "Projets\\P1234_Nestle", root.name + "\\Projets\\P1234_Nestle"):
+        assert "Spec_cellule.pdf" in tools.list_folder(name), name
+        assert "Rapport_MES.docx" in tools.find_files("rapport", folder=name), name
+    assert "Spec_cellule.pdf" in tools.search("cellule", folder="P1234_Nestle", mode="keyword")
+    with pytest.raises(ValueError, match="No indexed folder named"):
+        tools.list_folder("NO_SUCH_PROJECT")
 
 
 def test_read_and_find_in_document(indexed):
