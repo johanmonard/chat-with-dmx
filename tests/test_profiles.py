@@ -41,6 +41,14 @@ def test_marketing_category_is_the_first_folder(marketing):
     assert cfg.db_path.parent.name == "marketing"
 
 
+def test_marketing_category_needs_a_root_and_a_folder_below_it():
+    root = r"\\srv\Marketing"
+    assert facets.compute_marketing(root + r"\Brochures\a.pdf", root) == {"category": "Brochures", "facet_source": "folder"}
+    assert facets.compute_marketing(root + r"\a.pdf", root) == {}  # directly in the root
+    # A document under no configured root: the whole path must not turn into a category (the server name).
+    assert facets.compute_marketing(r"\\DMX-FS01\Old\a.pdf", "") == {}
+
+
 def test_search_by_category_any_case_several_values(marketing):
     cfg, _ = marketing
     out = DocTools(cfg).search("Paloma", mode="keyword", category="brochures, DATASHEETS")

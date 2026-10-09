@@ -159,8 +159,12 @@ def compute(path: str, root: str) -> dict:
 
 
 def compute_marketing(path: str, root: str) -> dict:
-    """Marketing world: the category is the first folder below the root (Brochures, Presentations...)."""
-    rel = os.path.relpath(path, root) if root else path
+    """Marketing world: the category is the first folder below the root (Brochures, Presentations...).
+    A document under no configured root (root empty) has no category: the whole path would make the
+    server name one."""
+    if not root:
+        return {}
+    rel = os.path.relpath(path, root)
     parts = [p for p in rel.replace("/", "\\").split("\\") if p and p != "."]
     if len(parts) > 1:
         return {"category": parts[0], "facet_source": "folder"}
