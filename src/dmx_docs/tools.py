@@ -17,7 +17,9 @@ from .config import Config
 from .extract import extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
 
-TYPE_LABEL = {".pdf": "PDF", ".docx": "Word", ".doc": "Word 97-2003"}
+TYPE_LABEL = {".pdf": "PDF", ".docx": "Word", ".doc": "Word 97-2003",
+              ".pptx": "PowerPoint", ".ppt": "PowerPoint 97-2003"}
+SLIDE_EXTS = (".pptx", ".ppt")
 
 # Query/passage cosine similarity with multilingual-e5-large, calibrated on the indexed
 # documents (short and long queries): the best hit of on-topic queries scores 0.84-0.89,
@@ -191,7 +193,13 @@ def _size(n: int | None) -> str:
 
 
 def _page_label(ext: str) -> str:
+    if ext in SLIDE_EXTS:
+        return "slide"
     return "page" if ext == ".pdf" else "page (approx.)"
+
+
+def _units(ext: str) -> str:
+    return "slides" if ext in SLIDE_EXTS else "pages"
 
 
 class DocTools:
@@ -763,7 +771,7 @@ class DocTools:
             out.append(block)
             used += len(block)
             shown_until = p
-        header = (f"{path} ({TYPE_LABEL.get(info.get('ext'), info.get('ext'))}, {last} pages, "
+        header = (f"{path} ({TYPE_LABEL.get(info.get('ext'), info.get('ext'))}, {last} {_units(info.get('ext', ''))}, "
                   f"modified {_date(info.get('mtime'))}; source: {info['source']})")
         if info.get("status") == "no_text":
             header += "\nNote: this PDF has (almost) no text layer — probably a scan; content may be missing."

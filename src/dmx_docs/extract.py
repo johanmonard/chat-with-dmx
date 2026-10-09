@@ -1,4 +1,4 @@
-"""Text extraction from PDF, DOCX and DOC files.
+"""Text extraction from PDF, DOCX, DOC, PPTX and PPT files.
 
 `extract_file` runs in worker processes, so it only takes and returns plain,
 picklable values.
@@ -82,6 +82,8 @@ def extract_file(path: str, options: dict | None = None) -> Extracted:
             return extract_docx(fs)
         if ext == ".doc":
             return extract_doc(path, options.get("doc_converter", "auto"), options.get("libreoffice_path"))
+        if ext == ".pptx":
+            return extract_pptx(fs)
         return Extracted(status="skipped", error=f"unsupported extension {ext}")
     except Exception as e:  # corrupt or unreadable files must not stop the run
         return Extracted(status="error", error=f"{type(e).__name__}: {e}"[:500])
@@ -390,3 +392,73 @@ def extract_doc(path: str, converter: str = "auto", libreoffice_path: str | None
     with tempfile.TemporaryDirectory(prefix="dmx_doc_") as tmp:
         converted = _convert_with_libreoffice(soffice, path, tmp) if soffice else _convert_with_word(path, tmp)
         return extract_docx(converted)
+
+
+# -------------------------------------------------------------- PowerPoint
+
+def pptx_shapes(shapes):
+    """The shapes of a slide in order, the shapes inside groups included."""
+    from pptx.shapes.group import GroupShape
+
+    for shape in shapes:
+        if isinstance(shape, GroupShape):
+            yield from pptx_shapes(shape.shapes)
+        else:
+            yield shape
+
+
+def _pptx_table_text(table) -> str:
+    lines = []
+    for row in table.rows:
+        cells: list[str] = []
+        for cell in row.cells:
+            t = " ".join(cell.text.split())
+            if not cells or cells[-1] != t:  # merged cells repeat their text
+                cells.append(t)
+        if any(cells):
+            lines.append(" | ".join(cells))
+    return "\n".join(lines)
+
+
+def pptx_slides(path: str) -> tuple[list[str], str | None]:
+    """Text of each slide: its title as a heading, the other shapes in order (groups and
+    placeholders included), tables, then the speaker notes. SmartArt and charts are left out."""
+    from pptx import Presentation
+
+    prs = Presentation(path)
+    try:
+        title = (prs.core_properties.title or "").strip() or None
+    except Exception:
+        title = None
+    slides = []
+    for slide in prs.slides:
+        parts = []
+        heading = slide.shapes.title
+        heading_id = heading.shape_id if heading is not None else None
+        if heading is not None and heading.has_text_frame and heading.text_frame.text.strip():
+            parts.append("# " + " ".join(heading.text_frame.text.split()))
+        for shape in pptx_shapes(slide.shapes):
+            if shape.shape_id == heading_id:
+                continue
+            if shape.has_text_frame:
+                text = shape.text_frame.text.replace("\v", "\n").strip()  # \v = line break in a paragraph
+            elif getattr(shape, "has_table", False):
+                text = _pptx_table_text(shape.table)
+            else:
+                continue
+            if text:
+                parts.append(text)
+        if slide.has_notes_slide:
+            notes = slide.notes_slide.notes_text_frame
+            if notes is not None and notes.text.strip():
+                parts.append("Notes: " + notes.text.replace("\v", "\n").strip())
+        slides.append(clean_text("\n\n".join(parts)))
+    return slides, title
+
+
+def extract_pptx(path: str) -> Extracted:
+    slides, title = pptx_slides(path)
+    pages = [(i + 1, t) for i, t in enumerate(slides) if t]
+    if not pages:
+        return Extracted(status="empty", n_pages=len(slides), title=title)
+    return Extracted(status="ok", pages=pages, n_pages=len(slides), title=title)

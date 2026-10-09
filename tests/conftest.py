@@ -42,6 +42,35 @@ def make_docx(path):
     d.save(path)
 
 
+def make_png(path, rgb, size=(40, 20)):
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, *size), False)
+    pix.set_rect(pix.irect, tuple(rgb))
+    pix.save(str(path))
+
+
+def make_pptx(path, pictures=()):
+    """Slide 1: title, subtitle, speaker notes. Slide 2: title, table, text box inside a group.
+    Slide 3: the given pictures only (no text)."""
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    prs = Presentation()
+    s1 = prs.slides.add_slide(prs.slide_layouts[0])  # Title Slide
+    s1.shapes.title.text = "Paloma 4R"
+    s1.placeholders[1].text = "Pick and place robot for biscuits"
+    s1.notes_slide.notes_text_frame.text = "Mention the washdown version."
+    s2 = prs.slides.add_slide(prs.slide_layouts[5])  # Title Only
+    s2.shapes.title.text = "Technical data"
+    table = s2.shapes.add_table(2, 2, Inches(1), Inches(2), Inches(6), Inches(1)).table
+    for (r, c), text in {(0, 0): "Cadence", (0, 1): "120 ppm", (1, 0): "Robots", (1, 1): "4"}.items():
+        table.cell(r, c).text = text
+    group = s2.shapes.add_group_shape()
+    group.shapes.add_textbox(Inches(1), Inches(4), Inches(3), Inches(1)).text_frame.text = "Hygienic design"
+    s3 = prs.slides.add_slide(prs.slide_layouts[6])  # Blank
+    for i, picture in enumerate(pictures):
+        s3.shapes.add_picture(str(picture), Inches(1 + 3 * i), Inches(1))
+    prs.save(str(path))
+
 @pytest.fixture(scope="session")
 def corpus(tmp_path_factory):
     root = tmp_path_factory.mktemp("corpus")
