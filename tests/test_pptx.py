@@ -257,3 +257,22 @@ def test_slide_pictures_view_and_export(deck_tools, tmp_path):
     out = t.export_image(str(deck), page=3, image=1)
     target = tmp_path / "exports" / "Deck_s3_img1.png"
     assert str(target) in out and tuple(pymupdf.Pixmap(str(target)).pixel(5, 5)) == (255, 0, 0)
+
+
+def test_unreadable_picture_is_left_out_not_the_whole_deck(deck_tools, tmp_path, monkeypatch):
+    from pptx.parts.image import Image
+
+    from dmx_docs.extract import pymupdf
+    t, deck = deck_tools
+    red = (tmp_path / "red.png").read_bytes()
+    real_ext = Image.ext  # the lazy property of python-pptx
+
+    def ext(self):  # Pillow does not know this format (as for WebP or MPO): python-pptx raises
+        if self.blob == red:
+            raise ValueError("unsupported image format, expected one of: ['BMP', 'GIF'], got 'WEBP'")
+        return real_ext.__get__(self, Image)
+
+    monkeypatch.setattr(Image, "ext", property(ext))
+    caption, data, _ = t.view_page(str(deck), page=3, image=1)  # the red one is left out: blue is picture 1
+    assert "picture 1 of 1 on slide 3/3" in caption
+    assert tuple(pymupdf.Pixmap(data).pixel(5, 5)) == (0, 0, 255)

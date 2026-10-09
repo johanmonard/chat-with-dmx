@@ -621,7 +621,8 @@ PICTURE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff")
 
 def pptx_pictures(path: str) -> list[list[tuple[bytes, str]]]:
     """Embedded pictures of each slide in shape order: one list of (bytes, '.png') per slide.
-    Vector pictures (WMF/EMF) and linked pictures are left out: they cannot be shown."""
+    Vector pictures (WMF/EMF), linked pictures and pictures in a format python-pptx cannot read
+    are left out: they cannot be shown."""
     from pptx import Presentation
     from pptx.shapes.picture import Picture
 
@@ -633,10 +634,11 @@ def pptx_pictures(path: str) -> list[list[tuple[bytes, str]]]:
                 continue
             try:
                 image = shape.image
-            except Exception:  # linked to an outside file, not embedded
+                ext = "." + image.ext.lower()  # raises for a format python-pptx does not know
+                blob = image.blob
+            except Exception:  # linked to an outside file, or unreadable/unsupported: left out
                 continue
-            ext = "." + image.ext.lower()
             if ext in PICTURE_EXTS:
-                pictures.append((image.blob, ext))
+                pictures.append((blob, ext))
         slides.append(pictures)
     return slides
