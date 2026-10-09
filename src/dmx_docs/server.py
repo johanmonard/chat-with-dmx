@@ -42,7 +42,11 @@ Never answer from the first search alone. Follow this loop for every question:
    mise_en_service, manuel...). If the question is about a machine type (Paloma, Presto,
    Hector, Delfi, Astor, Nestor, FeedPlacer, or a model like "Paloma 4R"), filter with
    machine=; for "which projects ..." questions, get the complete candidate list with
-   list_projects(machine=...) and check them one by one. Old projects (collections such as 2_Hors_Garantie) are less
+   list_projects(machine=...) and check them one by one. For questions about a client, a
+   country or delivery years ("what did we deliver to client X?", "projects in the UK since
+   2015"), use list_projects(client=/country=/year_from=) and filter searches with client= or
+   country=; `project_card` gives a project's client, delivered machines (serial numbers,
+   models, years, robots), order numbers and key documents. Old projects (collections such as 2_Hors_Garantie) are less
    well classified: if a filtered search is thin, repeat it without doc_type/section. What is
    indexed changes: check with `list_projects` before concluding from an absence of results.
 2. RETRIEVE with `search` (hybrid by default; mode="keyword" for codes and names).
@@ -78,7 +82,7 @@ def build_server(cfg: Config) -> MCPServer:
                modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
                project: str | None = None, doc_type: str | None = None, section: str | None = None,
                collection: str | None = None, machine: str | None = None,
-               expand: bool | None = None) -> str:
+               expand: bool | None = None, client: str | None = None, country: str | None = None) -> str:
         """Search the documentation by meaning and keywords. Returns excerpts with file path and page,
         how each one matched (keyword, semantic or both) and its meaning similarity to the query
         (strong >= 0.86, medium 0.83-0.86, weak < 0.83 = often off topic). These are hints: judge by reading.
@@ -104,29 +108,57 @@ def build_server(cfg: Config) -> MCPServer:
                 "Paloma 4R", "Presto 2R", "Paloma 8R SQ".
             expand: Widen the keyword part with the company thesaurus (synonyms, translations,
                 abbreviations). Default: as configured.
+            client: Optional client or client group (any part of the name, comma = or), e.g.
+                "Acme", "Acme Foods": documents of the projects delivered to that client
+                (from the machine register).
+            country: Optional country of installation in English, e.g. "France", "United Kingdom".
             Facet filters leave out documents whose facet is unknown (mostly old projects):
             search again without them when results are thin.
         """
         return tools.search(query, folder=folder, file_type=file_type, modified_after=modified_after,
                             limit=limit, mode=mode, project=project, doc_type=doc_type,
-                            section=section, collection=collection, machine=machine, expand=expand)
+                            section=section, collection=collection, machine=machine, expand=expand,
+                            client=client, country=country)
 
     @mcp.tool(**kw)
     def list_projects(name: str | None = None, collection: str | None = None, machine: str | None = None,
-                      limit: int = 300) -> str:
+                      limit: int = 300, client: str | None = None, country: str | None = None,
+                      year_from: int | None = None, year_to: int | None = None) -> str:
         """List the projects in the index with their collection (current projects, 2_Hors_Garantie...),
         number of documents, last modification date, the machine models found in their documents
-        (Paloma 11R, Presto 2R...) and sections. Use it to find the exact project name before
-        filtering searches with project=, to get ALL the projects with a given machine
-        (machine="Paloma") before checking them one by one, or to answer questions about projects.
+        (Paloma 11R, Presto 2R...), the client, machines delivered and year from the company's
+        machine register, and sections. Use it to find the exact project name before filtering
+        searches with project=, to get ALL the projects with a given machine (machine="Paloma"),
+        client, country or delivery period before checking them one by one, or to answer
+        questions about projects. With client/country/year/machine filters it also lists machines
+        of the register whose project documents are not indexed.
 
         Args:
             name: Optional part of the project name.
             collection: Optional part of the collection name.
             machine: Optional machine family or model, e.g. "Paloma", "Presto 2R".
             limit: Maximum projects listed (default 300).
+            client: Optional client or client group, any part of the name (e.g. "Acme").
+            country: Optional country of installation in English (e.g. "France", "Germany").
+            year_from: Optional first year of manufacture/order (e.g. 2015).
+            year_to: Optional last year.
         """
-        return tools.list_projects(name=name, collection=collection, machine=machine, limit=limit)
+        return tools.list_projects(name=name, collection=collection, machine=machine, limit=limit,
+                                   client=client, country=country, year_from=year_from, year_to=year_to)
+
+    @mcp.tool(**kw)
+    def project_card(project: str) -> str:
+        """One page about a project: client (group, industry, site, country), every machine
+        delivered (serial number, model, year, robots, controller, camera, maintenance contract,
+        order date), order numbers, machines named in the documents, document counts by type,
+        the newest key documents (offer, order, specification, FAT, SAT, commissioning) and the
+        client's other projects. Use it first when a question is about one project.
+
+        Args:
+            project: Project name as in list_projects (e.g. "THOR"), or a project name from the
+                machine register.
+        """
+        return tools.project_card(project)
 
     @mcp.tool(**kw)
     def find_files(name: str, folder: str | None = None, limit: int = 30) -> str:

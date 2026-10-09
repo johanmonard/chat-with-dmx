@@ -61,7 +61,17 @@ Turn the question into **2-4 search queries** before the first search:
 - **Name a project?** Check its exact name with `list_projects name="..."` (it also lists sub-projects), then filter with
   `project="THOR"` (several: `project="THOR,YAKUMA"`). Many project names are ordinary words
   (ANGE, BOULE, LEON, VENUS, SPACE): without the filter, a keyword search mixes the project with the word.
-  For a client or machine, use `find_files` (names often contain them) or a search without filter.
+- **One project?** Start with `project_card project="THOR"`: client (group, industry, site,
+  country), every machine delivered (serial number, model, year, robots, controller, camera,
+  maintenance contract, order date), order numbers, document counts by type, the newest offer /
+  order / specification / FAT / SAT, and the client's other projects. Then search for details.
+- **Client, country or period in the question?** ("what did we deliver to client X?", "Paloma lines
+  in the UK since 2015") Use `list_projects client="<client or group>"` / `country="United Kingdom"` /
+  `year_from=2015` (combinable with `machine=`) for the complete list - it also lists register
+  machines whose documents are not indexed - and filter searches with `client=` / `country=`.
+  Client, machines and years come from the company's machine register (installed base); a
+  project missing from the register is not found by these filters: fall back to `find_files`
+  or a search without filter, and say so.
 - **Machine type in the question?** Each project carries the machine models found in its documents (file names, offers, specifications, FAT/SAT...), shown in every hit as `project THOR [Paloma 7R (65 docs), Paloma 10R (45 docs)]`. Filter with `machine="Paloma"` (family: Paloma, Presto, Hector, Delfi, Astor, Nestor, FeedPlacer) or `machine="Paloma 4R"` (model). Projects whose documents never name the machine are not matched: say so if it matters.
 - **Kind of document known?** Filter with `doc_type=` (FAT findings → `fat,reception`; client
   requirement → `cahier_des_charges`; price/scope offered → `offre`; commissioning → `mise_en_service,sat`;
@@ -120,7 +130,7 @@ If evaluation finds missing parts, weak or off-topic results, or contradictions 
 | an exact code/name not found | `mode="keyword"`, partial code with `*`, `find_files` on the name |
 | one part of the question unanswered | a dedicated query for that sub-question only |
 | answer probably in a specific document type | `doc_type=` (FAT → `fat,reception`, client requirement → `cahier_des_charges`, open issues → `open_points,suivi`, commissioning → `mise_en_service,sat`) |
-| question about projects themselves (which, how many, when) | `list_projects` (by name or collection), then search per project |
+| question about projects themselves (which, how many, when, for whom) | `project_card` for one project; `list_projects` (by name, collection, machine, client, country, year) for several, then search per project |
 | "which projects ..." (aggregation) | search results are never exhaustive: get the COMPLETE candidate list with `list_projects` (e.g. `machine="Paloma"`), run the broad searches with the same filter (`search ... machine="Paloma"`), then check the remaining candidates one by one (`project=`); say how many projects were checked out of how many candidates |
 | contradiction between sources | find the most recent version, look for modification notes or later reports |
 

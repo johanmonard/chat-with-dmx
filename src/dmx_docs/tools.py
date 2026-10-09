@@ -12,7 +12,7 @@ import sys
 import urllib.request
 from datetime import datetime
 
-from . import facets, machines, sources, store
+from . import facets, machines, register, sources, store
 from .config import Config
 from .extract import extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
@@ -204,6 +204,7 @@ class DocTools:
         # Root/excluded folders may have changed on the configuration page.
         sources.refresh(self.cfg, con)
         facets.refresh(con, self.cfg.roots)  # no-op when every document has its facets
+        register.refresh(con, self.cfg.register_path)  # no-op when neither the file nor the documents changed
         return con
 
     def _resolve(self, path: str) -> tuple[str, str]:
@@ -218,12 +219,13 @@ class DocTools:
     def search(self, query: str, folder: str | None = None, file_type: str | None = None,
                modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
                project: str | None = None, doc_type: str | None = None, section: str | None = None,
-               collection: str | None = None, machine: str | None = None, expand: bool | None = None) -> str:
+               collection: str | None = None, machine: str | None = None, expand: bool | None = None,
+               client: str | None = None, country: str | None = None) -> str:
         if mode not in ("hybrid", "keyword", "semantic"):
             raise ValueError("mode must be 'hybrid', 'keyword' or 'semantic'")
         limit = max(1, min(int(limit), 30))
         facet_filter = {"project": project, "doc_type": doc_type, "section": section, "collection": collection,
-                        "machine": machine}
+                        "machine": machine, "client": client, "country": country}
         con = self._con()
         try:
             if folder:
@@ -281,8 +283,13 @@ class DocTools:
             project = r["project"] and (r["project"] + (f" / {r['subproject']}" if r["subproject"] else ""))
             if r["project"] and r["project"] not in machine_cache:
                 machine_cache[r["project"]] = machines.describe(con, r["project"], limit=2)
+                client = con.execute("SELECT client FROM register_machines WHERE project = ? AND client != '' "
+                                     "GROUP BY client ORDER BY count(*) DESC LIMIT 1", (r["project"],)).fetchone()
+                machine_cache["client:" + r["project"]] = client[0] if client else ""
             if r["project"] and machine_cache[r["project"]]:
                 project += f" [{machine_cache[r['project']]}]"
+            if r["project"] and machine_cache["client:" + r["project"]]:
+                project += f" for {machine_cache['client:' + r['project']]}"
             parts = [f"project {project}" if project else None,
                      f"({r['collection']})" if r["collection"] else None,
                      f"section {r['section']}" if r["section"] else None,
@@ -361,7 +368,8 @@ class DocTools:
 
     # ------------------------------------------------------- list_projects
     def list_projects(self, name: str | None = None, collection: str | None = None,
-                      machine: str | None = None, limit: int = 300) -> str:
+                      machine: str | None = None, limit: int = 300, client: str | None = None,
+                      country: str | None = None, year_from: int | None = None, year_to: int | None = None) -> str:
         limit = max(1, min(int(limit), 1000))
         con = self._con()
         try:
@@ -372,10 +380,16 @@ class DocTools:
             if machine:  # a family ("Paloma") or a model ("Paloma 4R"), comma-separated
                 values = [v.strip() for v in machine.split(",") if v.strip()]
                 marks = ",".join("?" * len(values))
-                where += (f" AND f.project IN (SELECT project FROM project_machines pm WHERE "
+                where += (f" AND (f.project IN (SELECT project FROM project_machines pm WHERE "
                           f"{machines.confirmed_sql()} AND (family COLLATE NOCASE IN ({marks}) "
+                          f"OR model COLLATE NOCASE IN ({marks}))) OR f.project IN (SELECT project FROM "
+                          f"register_machines WHERE family COLLATE NOCASE IN ({marks}) "
                           f"OR model COLLATE NOCASE IN ({marks})))")
-                params += values + values
+                params += values * 4
+            reg_cond, reg_params = self._register_filter(client, country, year_from, year_to)
+            if reg_cond:
+                where += f" AND f.project IN (SELECT rm.project FROM register_machines rm WHERE {reg_cond})"
+                params += reg_params
             if name:  # match the project or any of its sub-projects, but list the whole project
                 having = " HAVING f.project LIKE ? OR coalesce(group_concat(f.subproject), '') LIKE ?"
                 params += [f"%{name}%", f"%{name}%"]
@@ -388,19 +402,176 @@ class DocTools:
                       ORDER BY f.collection IS NOT NULL, f.project LIMIT ?"""
             rows = con.execute(sql, params + [limit]).fetchall()
             machine_text = {r["project"]: machines.describe(con, r["project"]) for r in rows}
+            client_text = {r["project"]: register.summary(con, r["project"]) for r in rows}
+            unindexed = []
+            if reg_cond or (machine and not collection):  # delivered machines whose documents are not indexed
+                cond, args = reg_cond or "1", list(reg_params)
+                if machine:
+                    values = [v.strip() for v in machine.split(",") if v.strip()]
+                    marks = ",".join("?" * len(values))
+                    cond += f" AND (rm.family COLLATE NOCASE IN ({marks}) OR rm.model COLLATE NOCASE IN ({marks}))"
+                    args += values + values
+                if name:
+                    cond += " AND rm.name LIKE ?"
+                    args.append(f"%{name}%")
+                unindexed = con.execute(
+                    f"""SELECT coalesce(nullif(rm.name, ''), '(no name)') name, group_concat(DISTINCT rm.model) models,
+                               max(rm.client) client, max(rm.country) country, min(rm.year) y0, max(rm.year) y1,
+                               count(*) n FROM register_machines rm WHERE rm.project IS NULL AND {cond}
+                        GROUP BY 1 ORDER BY 1 LIMIT ?""", args + [limit]).fetchall()
         finally:
             con.close()
-        if not rows:
-            return "No matching project in the index."
-        lines = [f"{len(rows)} projects (project | collection | indexed documents | last modified | "
-                 "machines found in the documents | sections):"]
+        if not rows and not unindexed:
+            return "No matching project in the index or in the machine register."
+        lines = [f"{len(rows)} indexed projects (project | collection | indexed documents | last modified | "
+                 "machines found in the documents | client, machines delivered and year from the register | "
+                 "sections):"]
         for r in rows:
             subs = f" | sub-projects: {', '.join(sorted(r['subprojects'].split(',')))}" if r["subprojects"] else ""
             lines.append(f"- {r['project']} | {r['collection'] or 'current'} | {r['n']} docs | {_date(r['last'])} | "
-                         f"{machine_text[r['project']] or 'machine unknown'} | {r['sections'] or '-'}{subs}")
+                         f"{machine_text[r['project']] or 'machine unknown'} | "
+                         f"{client_text[r['project']] or 'not in the register'} | {r['sections'] or '-'}{subs}")
+        if unindexed:
+            lines.append(f"\n{len(unindexed)} more in the machine register, without indexed documents "
+                         "(name | models | client | country | year | machines):")
+            for u in unindexed:
+                years = "?" if not u["y0"] else str(u["y0"]) if u["y0"] == u["y1"] else f"{u['y0']}-{u['y1']}"
+                lines.append(f"- {u['name']} | {u['models'] or 'model ?'} | {u['client'] or 'client ?'} | "
+                             f"{u['country'] or '?'} | {years} | {u['n']}")
         if machine:
-            lines.append("(machine types come from file names and from offers, specifications, FAT/SAT... "
-                         "a project whose documents never name its machine is not listed)")
+            lines.append("(machine types come from the machine register and from file names, offers, "
+                         "specifications, FAT/SAT...)")
+        if reg_cond:
+            lines.append("(client, country and year come from the machine register: projects missing from it "
+                         "are not listed - check with search if needed)")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _register_filter(client, country, year_from, year_to) -> tuple[str, list]:
+        conds, params = [], []
+        if client:
+            c, p = register.client_clause(client)
+            conds.append(c)
+            params += p
+        if country:
+            c, p = register.country_clause(country)
+            conds.append(c)
+            params += p
+        if year_from:
+            conds.append("rm.year >= ?")
+            params.append(int(year_from))
+        if year_to:
+            conds.append("rm.year <= ?")
+            params.append(int(year_to))
+        return " AND ".join(conds), params
+
+    # -------------------------------------------------------- project_card
+    def project_card(self, project: str) -> str:
+        """Everything known about one project: client, delivered machines, order numbers, documents."""
+        con = self._con()
+        try:
+            hit = con.execute("SELECT project FROM doc_facets WHERE project = ? COLLATE NOCASE "
+                              "OR subproject = ? COLLATE NOCASE LIMIT 1", (project, project)).fetchone()
+            name = hit[0] if hit else None
+            reg = con.execute(
+                "SELECT * FROM register_machines WHERE project = ? ORDER BY order_no, serial" if name else
+                "SELECT * FROM register_machines WHERE name = ? COLLATE NOCASE ORDER BY order_no, serial",
+                (name or project,)).fetchall()
+            if not name and not reg:
+                like = con.execute("""SELECT DISTINCT project FROM doc_facets WHERE project LIKE ? UNION
+                                      SELECT DISTINCT name FROM register_machines WHERE name LIKE ? LIMIT 10""",
+                                   (f"%{project}%", f"%{project}%")).fetchall()
+                return (f"No project '{project}' in the index or the machine register."
+                        + (f" Similar names: {', '.join(r[0] for r in like)}" if like else ""))
+            lines = []
+            if name:
+                n, first, last, coll = con.execute(
+                    """SELECT count(*), min(d.mtime), max(d.mtime), max(f.collection) FROM doc_facets f
+                       JOIN docs d ON d.id = f.doc_id WHERE f.project = ?""", (name,)).fetchone()
+                subs = [r[0] for r in con.execute("SELECT DISTINCT subproject FROM doc_facets WHERE project = ? "
+                                                  "AND subproject IS NOT NULL ORDER BY 1", (name,))]
+                lines.append(f"Project {name} ({coll or 'current'}): {n} indexed documents, files dated "
+                             f"{_date(first)} to {_date(last)}" + (f"; sub-projects {', '.join(subs)}" if subs else ""))
+            else:
+                lines.append(f"Project {reg[0]['name']}: in the machine register, no indexed documents.")
+            if reg:
+                clients = {}
+                for r in reg:
+                    if r["client"]:
+                        clients.setdefault(r["client"], r)
+                for c, r in clients.items():
+                    extra = ", ".join(v for v in (f"group {r['grp']}" if r["grp"] and r["grp"].upper() != c.upper()
+                                                  else "", r["industry"], r["city"], r["country"], r["site"]) if v)
+                    lines.append(f"Client: {c}" + (f" ({extra})" if extra else ""))
+                if not clients:
+                    lines.append("Client: unknown in the register")
+                agents = {r["agent"] for r in reg if r["agent"]}
+                if agents:
+                    lines.append(f"Through agent/integrator: {', '.join(sorted(agents))}")
+                lines.append(f"\nMachines delivered (machine register, {len(reg)}):")
+                for r in reg:
+                    bits = [r["serial"] or r["order_no"] or "no serial", r["model"] or "model ?"]
+                    if r["year"]:
+                        bits.append(str(r["year"]))
+                    if r["robots"]:
+                        bits.append(f"{r['robots']} robots")
+                    if r["controller"]:
+                        bits.append(f"controller {r['controller']}")
+                    if r["camera"]:
+                        bits.append(f"camera {r['camera']}")
+                    if r["maintenance"]:
+                        bits.append(f"maintenance contract {r['maintenance']}")
+                    if r["order_date"]:
+                        bits.append(f"ordered {r['order_date']}")
+                    if r["status"]:
+                        bits.append(r["status"])
+                    if r["notes"]:
+                        bits.append(r["notes"])
+                    lines.append("- " + " · ".join(bits))
+            if name:
+                found = machines.describe(con, name, limit=6)
+                if found:
+                    lines.append(f"\nMachines named in the documents: {found}")
+                evidence = {}
+                for (path,) in con.execute("SELECT d.path FROM docs d JOIN doc_facets f ON f.doc_id = d.id "
+                                           "WHERE f.project = ?", (name,)):
+                    for num in register.numbers(path):
+                        evidence[num] = evidence.get(num, 0) + 1
+                known = {n for r in reg for n in register.numbers(r["order_no"], r["serial"])}
+                if evidence or known:
+                    nums = sorted(set(evidence) | known, key=lambda k: -evidence.get(k, 0))[:8]
+                    lines.append("Order / serial numbers: " + ", ".join(
+                        f"{k} ({evidence[k]} file names)" if k in evidence else f"{k} (register)" for k in nums))
+                lines.append("\nDocuments by type:")
+                for dt, cnt, newest in con.execute(
+                        """SELECT coalesce(f.doc_type, 'unknown'), count(*), max(d.mtime) FROM doc_facets f
+                           JOIN docs d ON d.id = f.doc_id WHERE f.project = ? GROUP BY 1 ORDER BY 2 DESC""", (name,)):
+                    lines.append(f"- {dt}: {cnt} (newest {_date(newest)})")
+                lines.append("\nKey documents (newest of each kind):")
+                for dt in ("offre", "commande", "cahier_des_charges", "fat", "sat", "mise_en_service",
+                           "reception", "cloture"):
+                    r = con.execute("""SELECT d.path, d.mtime FROM doc_facets f JOIN docs d ON d.id = f.doc_id
+                                       WHERE f.project = ? AND f.doc_type = ? ORDER BY d.mtime DESC LIMIT 1""",
+                                    (name, dt)).fetchone()
+                    if r:
+                        lines.append(f"- {dt}: {r['path']} ({_date(r['mtime'])})")
+            clients = sorted({r["client"] for r in reg if r["client"]})
+            groups = sorted({r["grp"] for r in reg if r["grp"]})
+            if clients:
+                others = con.execute(
+                    f"""SELECT coalesce(project, name) p, group_concat(DISTINCT model), min(year), max(project IS NOT NULL)
+                        FROM register_machines WHERE (client IN ({','.join('?' * len(clients))})
+                        OR grp IN ({','.join('?' * len(groups)) or "''"}))
+                        AND coalesce(project, name) != ? GROUP BY 1 ORDER BY 3 DESC LIMIT 25""",
+                    clients + groups + [name or reg[0]["name"]]).fetchall()
+                if others:
+                    lines.append("\nOther projects for the same client or group: " + "; ".join(
+                        f"{p} ({m or 'model ?'}, {y or '?'}{'' if idx else ', not indexed'})"
+                        for p, m, y, idx in others))
+        finally:
+            con.close()
+        lines.append("\n(client, machines delivered and years come from the company's machine register; "
+                     "the rest from the indexed documents)")
         return "\n".join(lines)
 
     # --------------------------------------------------------- find_files

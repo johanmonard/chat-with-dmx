@@ -301,8 +301,16 @@ class Searcher:
                     clauses.append(
                         "d.id IN (SELECT doc_id FROM doc_facets WHERE project IN (SELECT project FROM "
                         f"project_machines pm WHERE {confirmed_sql()} AND (family COLLATE NOCASE IN ({marks}) "
-                        f"OR model COLLATE NOCASE IN ({marks}))))")
-                    params += values + values
+                        f"OR model COLLATE NOCASE IN ({marks}))) OR project IN (SELECT project FROM "
+                        f"register_machines WHERE family COLLATE NOCASE IN ({marks}) "
+                        f"OR model COLLATE NOCASE IN ({marks})))")
+                    params += values * 4
+                elif col in ("client", "country"):  # projects of that client / installed in that country
+                    from . import register
+                    cond, args = (register.client_clause if col == "client" else register.country_clause)(str(value))
+                    clauses.append("d.id IN (SELECT doc_id FROM doc_facets WHERE project IN "
+                                   f"(SELECT rm.project FROM register_machines rm WHERE {cond}))")
+                    params += args
                 elif col == "project":  # a project name or one of its sub-projects (machines)
                     clauses.append(f"d.id IN (SELECT doc_id FROM doc_facets WHERE project COLLATE NOCASE "
                                    f"IN ({marks}) OR subproject COLLATE NOCASE IN ({marks}))")

@@ -44,6 +44,7 @@ class Config:
     max_read_chars: int = 40000
     thesaurus_path: str | None = None   # thesaurus.toml next to config.toml by default
     expand_synonyms: bool = False       # expand keyword searches with the thesaurus
+    register_path: str | None = None    # register.csv (installed machines) next to config.toml by default
     export_dir: str | None = None  # where export_image saves files (default: ~\Claude\dmx-images)
     config_path: Path | None = None
 
@@ -145,6 +146,10 @@ def load_config(path: str | os.PathLike) -> Config:
         tp = Path(os.path.expandvars(str(thesaurus)))
         kwargs["thesaurus_path"] = str(tp if tp.is_absolute() else (path.parent / tp))
     kwargs["expand_synonyms"] = bool(srch.get("expand", False))
+    register = srch.get("register", "register.csv")
+    if register:
+        rp = Path(os.path.expandvars(str(register)))
+        kwargs["register_path"] = str(rp if rp.is_absolute() else (path.parent / rp))
     if srv.get("export_dir"):
         kwargs["export_dir"] = os.path.expandvars(os.path.expanduser(str(srv["export_dir"])))
     return Config(**kwargs)

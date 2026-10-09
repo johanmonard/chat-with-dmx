@@ -269,6 +269,8 @@ try {
             Copy-Item $SharedConfig $LocalConfig -Force
             $th = Join-Path $Shared 'thesaurus.toml'
             if (Test-Path $th) { Copy-Item $th (Join-Path $Local 'thesaurus.toml') -Force }  # search synonyms
+            $reg = Join-Path $Shared 'register.csv'
+            if (Test-Path $reg) { Copy-Item $reg (Join-Path $Local 'register.csv') -Force }  # machine register
             # Build the vector cache and facets now, so Claude's first question is fast.
             Say 'Preparing the search cache (about 30-60 s) ...'
             Invoke-Native $Py @('-c', "from dmx_docs.config import load_config; from dmx_docs.tools import DocTools; DocTools(load_config(r'$LocalConfig')).search('warm-up', limit=1)") -AllowFail
