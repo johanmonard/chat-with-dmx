@@ -1,5 +1,6 @@
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -11,8 +12,8 @@ SCRIPT = Path(__file__).parents[1] / "scripts" / "dmx.ps1"
 CONFIG = "[index]\ndata_dir = 'x'\n\n[worlds.projects]\nprofile = 'projects'\n\n[worlds.marketing]\nprofile = 'marketing'\n"
 
 
-def run(shared, local, *args):
-    env = dict(os.environ, DMX_RAG_LOCAL=str(local))
+def run(shared, local, *args, env=None):
+    env = dict(os.environ, DMX_RAG_LOCAL=str(local), **(env or {}))
     return subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                            str(shared / "app" / "scripts" / "dmx.ps1"), *args],
                           capture_output=True, text=True, env=env, timeout=180)
@@ -187,3 +188,80 @@ def test_unlock_launcher_takes_the_world(layout, args):
     r = subprocess.run(" ".join([f'"{launcher}"', *args]), shell=True, input="n\n",
                        capture_output=True, text=True, env=env, timeout=120)
     assert "Not locked (marketing)" in r.stdout, r.stdout + r.stderr
+
+
+# ---- commands that need the Python environment: a real venv with no packages, and a stub
+# ---- dmx_docs.cli, so that no uv, no packages and no real index are involved.
+
+STUB_CLI = """import os, sys
+# Stands in for dmx_docs.cli: the index step ends with FAKE_DMX_EXIT, every other step succeeds.
+sys.exit(int(os.environ.get("FAKE_DMX_EXIT", "0")) if "index" in sys.argv else 0)
+"""
+STAMP_NS = 1_700_000_000_000_000_000  # a multiple of 100 ns (the NTFS resolution)
+
+
+@pytest.fixture
+def ready(layout, tmp_path):
+    """The migrated layout with an installed environment that Assert-Env accepts (dmx.ps1 would
+    otherwise try to install one with uv.exe, which this fake share does not have)."""
+    shared, local = layout
+    assert run(shared, local, "migrate").returncode == 0
+    master = shared / "worlds" / "projects" / "index.sqlite3"
+    master.unlink()
+    con = sqlite3.connect(master)  # the copy back runs an integrity check on a real database
+    con.execute("CREATE TABLE t (x)")
+    con.commit()
+    con.close()
+    app = shared / "app"
+    (app / "src").mkdir()
+    (app / "pyproject.toml").write_text("[project]\n", encoding="ascii")
+    (app / "src" / "placeholder.txt").write_text("x", encoding="ascii")
+    for stamped in (app / "pyproject.toml", app / "src" / "placeholder.txt", app / "scripts" / "dmx.ps1"):
+        os.utime(stamped, ns=(STAMP_NS, STAMP_NS))
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(local / "venv")], check=True, capture_output=True)
+    ticks = STAMP_NS // 100 + 621355968000000000  # .NET ticks of the newest file (Get-CodeStamp)
+    gpu = "True" if shutil.which("nvidia-smi") else "False"
+    (local / "installed.txt").write_text(f"{ticks}|gpu={gpu}", encoding="ascii")
+    stub = tmp_path / "stub" / "dmx_docs"
+    stub.mkdir(parents=True)
+    (stub / "__init__.py").write_text("", encoding="ascii")
+    (stub / "cli.py").write_text(STUB_CLI, encoding="ascii")
+    return shared, local, {"PYTHONPATH": str(stub.parent)}
+
+
+def test_update_that_succeeds_says_done_and_exits_zero(ready):
+    shared, local, env = ready
+    r = run(shared, local, "update", "-World", "projects", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Running: dmx-docs --world projects embed" in r.stdout
+    assert "Done. The 'projects' index in the shared folder is up to date and unlocked." in r.stdout
+    assert "Stopped" not in r.stdout
+    assert not (shared / "worlds" / "projects" / "LOCK").exists()
+
+
+def test_update_stopped_by_a_failing_step_does_not_report_success(ready):
+    shared, local, env = ready
+    r = run(shared, local, "update", "-World", "projects", env=dict(env, FAKE_DMX_EXIT="3"))
+    assert r.returncode == 3, r.stdout + r.stderr          # the unattended run is judged by this
+    assert "Done." not in r.stdout and "is up to date" not in r.stdout
+    assert "Stopped early" in r.stdout and "exit code 3" in r.stdout and "'projects'" in r.stdout
+    assert "Running: dmx-docs --world projects embed" not in r.stdout   # the next step was skipped
+    # What was done so far is still saved and unlocked.
+    w = shared / "worlds" / "projects"
+    assert not (w / "LOCK").exists() and (w / "index.prev.sqlite3").exists()
+    assert "saved" in r.stdout and "unlocked" in r.stdout
+
+
+def test_pull_warns_about_a_register_left_in_the_shared_folder(ready):
+    shared, local, env = ready
+    first = run(shared, local, "pull", "-World", "projects", env=env)
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert "is not used" not in first.stdout
+    stale = shared / "register.csv"   # written later by the old register import, after the migration
+    stale.write_text("project,model\nNEWER,x\n", encoding="utf-8")
+    kept = (shared / "worlds" / "projects" / "register.csv").read_bytes()
+    r = run(shared, local, "pull", "-World", "projects", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"{stale} is not used" in r.stdout
+    assert r"worlds\projects\register.csv" in r.stdout and "move it" in r.stdout
+    assert stale.exists() and (shared / "worlds" / "projects" / "register.csv").read_bytes() == kept  # nothing was touched

@@ -24,7 +24,8 @@ first argument; otherwise the script asks (Enter = projects).
   web            configuration page (folders, exclusions, scans), checked in when closed
   index          scan for new/changed/deleted files
   embed [args]   compute embeddings, e.g. embed --max-minutes 300
-  update         index, then embed: unattended run, e.g. on the GPU machine
+  update         index, then embed: unattended run, e.g. on the GPU machine (a failing step stops
+                 the run, is named in the last message and becomes the exit code)
   pull           refresh this machine's read-only copy for Claude Desktop (no lock)
   status         index statistics of the local copy
   search "..."   test a search on the local copy
@@ -62,6 +63,7 @@ $Rest = @($Rest | Where-Object { $_ })
 # Set by Set-World: the world's folders on the share and on this machine.
 $SharedWorld = $Master = $Lock = $LocalWorld = $LocalDb = $null
 $WorldArgs = @()
+$ExitCode = 0   # set by Invoke-Locked when a step failed: the unattended run is judged by it
 
 # Keep uv's Python and cache on the local disk, not in a roaming profile.
 $env:UV_PYTHON_INSTALL_DIR = Join-Path $Local 'python'
@@ -389,16 +391,24 @@ function Invoke-Locked([string]$what, [object[]]$steps) {
     $resumed = Enter-Lock $what
     $working = $resumed   # true once the local copy holds this run's (or an unsaved run's) work
     $ok = $false
+    $failedStep = $null   # the step that stopped the run, and its exit code
+    $failedCode = 0
     try {
         Assert-Env
         Sync-Models
         if (-not $resumed -or -not (Test-Path $LocalDb)) { Copy-MasterToLocal }
         $working = $true
         foreach ($dmxArgs in $steps) {
-            Say "Running: dmx-docs $(($WorldArgs + $dmxArgs) -join ' ')"
+            $step = "dmx-docs $(($WorldArgs + $dmxArgs) -join ' ')"
+            Say "Running: $step"
             Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $WorldArgs + $dmxArgs) -AllowFail
             Say "dmx-docs finished (exit code $LASTEXITCODE)."
-            if ($LASTEXITCODE -ne 0) { Say 'Stopped: the next steps are skipped.'; break }
+            if ($LASTEXITCODE -ne 0) {
+                $failedStep = $step
+                $failedCode = $LASTEXITCODE
+                Say 'Stopped: the next steps are skipped.'
+                break
+            }
         }
         $ok = $true
     } finally {
@@ -406,8 +416,15 @@ function Invoke-Locked([string]$what, [object[]]$steps) {
         if (-not $working) {
             Exit-Lock; Say 'Nothing was changed; lock released.'   # failed before touching the index
         } elseif ((Test-Path $Py) -and (Save-LocalToMaster)) {
-            Exit-Lock; Say "Done. The '$World' index in the shared folder is up to date and unlocked."
+            Exit-Lock
+            if ($failedStep) {
+                # Not "Done": an unattended run is judged by this last message and by the exit code.
+                Say "Stopped early: '$failedStep' ended with exit code $failedCode. What was done so far is saved; the '$World' index in the shared folder is unlocked."
+            } else {
+                Say "Done. The '$World' index in the shared folder is up to date and unlocked."
+            }
         }
+        if ($failedStep) { $script:ExitCode = $failedCode }
         if ($ok -and $what -in 'embed', 'update') { Publish-Models }
     }
 }
@@ -443,6 +460,11 @@ try {
             $th = Join-Path $Shared 'thesaurus.toml'
             if (Test-Path $th) { Copy-Item $th (Join-Path $Local 'thesaurus.toml') -Force }  # search synonyms
             $reg = Join-Path $SharedWorld 'register.csv'
+            $stale = Join-Path $Shared 'register.csv'   # where the register was before worlds
+            if ($World -eq 'projects' -and (Test-Path $stale)) {
+                # The move to worlds\projects leaves a file alone when the new place already has one.
+                Say "WARNING: $stale is not used. The machine register now lives in $reg. If it is the newer one (written later by the old register import), move it there, over the other, and run this again."
+            }
             if (Test-Path $reg) { Copy-Item $reg (Join-Path $LocalWorld 'register.csv') -Force }  # machine register
             # Build the vector cache and facets now, so Claude's first question is fast.
             Say 'Preparing the search cache (about 30-60 s) ...'
@@ -476,3 +498,4 @@ try {
 } finally {
     Stop-Transcript | Out-Null
 }
+exit $ExitCode
