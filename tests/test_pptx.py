@@ -50,3 +50,25 @@ def test_pptx_is_searched_and_read_by_slide(deck_tools):
     assert "Deck.pptx — slide 2/3 (PowerPoint" in t.search("Hygienic", mode="keyword")
     text = t.read_document(str(deck))
     assert "3 slides" in text and "--- slide 2 ---" in text and "[no text on this page]" in text
+
+
+def test_pptx_table_keeps_repeated_values_and_merged_cells(tmp_path):
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    deck = tmp_path / "Table.pptx"
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # Blank
+    table = slide.shapes.add_table(2, 3, Inches(1), Inches(1), Inches(6), Inches(2)).table
+    table.cell(0, 0).merge(table.cell(0, 1))  # header: the first two cells are merged
+    table.cell(0, 0).text = "A B"
+    table.cell(0, 2).text = "C"
+    for c, text in enumerate(["Robots", "4", "4"]):  # equal adjacent values are data, not repeats
+        table.cell(1, c).text = text
+    prs.save(str(deck))
+    r = extract_file(str(deck))
+    assert r.status == "ok"
+    text = dict(r.pages)[1]
+    assert "A B | C" in text.splitlines()
+    assert "Robots | 4 | 4" in text.splitlines()
+    assert "|  |" not in text  # no empty cell where the merged cell was

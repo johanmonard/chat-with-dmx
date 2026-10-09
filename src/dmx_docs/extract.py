@@ -410,11 +410,9 @@ def pptx_shapes(shapes):
 def _pptx_table_text(table) -> str:
     lines = []
     for row in table.rows:
-        cells: list[str] = []
-        for cell in row.cells:
-            t = " ".join(cell.text.split())
-            if not cells or cells[-1] != t:  # merged cells repeat their text
-                cells.append(t)
+        # A cell covered by a merge has no text of its own: skip it, keep every other cell
+        # (equal neighbouring values are data, not repeats).
+        cells = [" ".join(cell.text.split()) for cell in row.cells if not cell.is_spanned]
         if any(cells):
             lines.append(" | ".join(cells))
     return "\n".join(lines)
