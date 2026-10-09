@@ -218,7 +218,7 @@ class DocTools:
     def search(self, query: str, folder: str | None = None, file_type: str | None = None,
                modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
                project: str | None = None, doc_type: str | None = None, section: str | None = None,
-               collection: str | None = None, machine: str | None = None) -> str:
+               collection: str | None = None, machine: str | None = None, expand: bool | None = None) -> str:
         if mode not in ("hybrid", "keyword", "semantic"):
             raise ValueError("mode must be 'hybrid', 'keyword' or 'semantic'")
         limit = max(1, min(int(limit), 30))
@@ -230,11 +230,14 @@ class DocTools:
                 folder, _ = self._resolve(folder)
             hits = self.searcher.search(con, query, limit=limit, folder=folder, file_type=file_type,
                                         modified_after=modified_after, mode=mode,
-                                        allowed=self.cfg.allows, facets=facet_filter)
+                                        allowed=self.cfg.allows, facets=facet_filter, expand=expand)
             doc_facets = self._facets(con, {h.doc_id for h in hits})
         finally:
             con.close()
         notes = []
+        if self.searcher.last_expanded:
+            notes.append("(keyword search widened with the thesaurus: " + "; ".join(
+                f"{term} → {', '.join(eq[:6])}" for term, eq in self.searcher.last_expanded) + ")")
         if any(facet_filter.values()):
             notes.append("(filtered by " + ", ".join(f"{k}={v}" for k, v in facet_filter.items() if v)
                          + ": documents whose facet is unknown are not included - search again without "

@@ -42,6 +42,8 @@ class Config:
     embed_device: str = "auto"  # 'auto' (GPU if available), 'cpu' or 'cuda'
 
     max_read_chars: int = 40000
+    thesaurus_path: str | None = None   # thesaurus.toml next to config.toml by default
+    expand_synonyms: bool = False       # expand keyword searches with the thesaurus
     export_dir: str | None = None  # where export_image saves files (default: ~\Claude\dmx-images)
     config_path: Path | None = None
 
@@ -137,6 +139,12 @@ def load_config(path: str | os.PathLike) -> Config:
             kwargs[attr] = emb[key]
     if "max_read_chars" in srv:
         kwargs["max_read_chars"] = srv["max_read_chars"]
+    srch = raw.get("search", {})
+    thesaurus = srch.get("thesaurus", "thesaurus.toml")
+    if thesaurus:
+        tp = Path(os.path.expandvars(str(thesaurus)))
+        kwargs["thesaurus_path"] = str(tp if tp.is_absolute() else (path.parent / tp))
+    kwargs["expand_synonyms"] = bool(srch.get("expand", False))
     if srv.get("export_dir"):
         kwargs["export_dir"] = os.path.expandvars(os.path.expanduser(str(srv["export_dir"])))
     return Config(**kwargs)

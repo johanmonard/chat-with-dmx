@@ -77,7 +77,8 @@ def build_server(cfg: Config) -> MCPServer:
     def search(query: str, folder: str | None = None, file_type: str | None = None,
                modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
                project: str | None = None, doc_type: str | None = None, section: str | None = None,
-               collection: str | None = None, machine: str | None = None) -> str:
+               collection: str | None = None, machine: str | None = None,
+               expand: bool | None = None) -> str:
         """Search the documentation by meaning and keywords. Returns excerpts with file path and page,
         how each one matched (keyword, semantic or both) and its meaning similarity to the query
         (strong >= 0.86, medium 0.83-0.86, weak < 0.83 = often off topic). These are hints: judge by reading.
@@ -101,12 +102,14 @@ def build_server(cfg: Config) -> MCPServer:
             machine: Optional machine family or model of the project, comma-separated: "Paloma",
                 "Presto", "Hector", "Delfi", "Astor", "Nestor", "FeedPlacer", or a model like
                 "Paloma 4R", "Presto 2R", "Paloma 8R SQ".
+            expand: Widen the keyword part with the company thesaurus (synonyms, translations,
+                abbreviations). Default: as configured.
             Facet filters leave out documents whose facet is unknown (mostly old projects):
             search again without them when results are thin.
         """
         return tools.search(query, folder=folder, file_type=file_type, modified_after=modified_after,
                             limit=limit, mode=mode, project=project, doc_type=doc_type,
-                            section=section, collection=collection, machine=machine)
+                            section=section, collection=collection, machine=machine, expand=expand)
 
     @mcp.tool(**kw)
     def list_projects(name: str | None = None, collection: str | None = None, machine: str | None = None,

@@ -41,19 +41,44 @@ _PHRASE = re.compile(r'"([^"]+)"')
 _COMPOUND = re.compile(r"\w+(?:[-./_]\w+)+\*?|\w+\*?", re.UNICODE)
 
 
-def build_fts_query(query: str, mode: str = "OR") -> str | None:
+def _quote(text: str) -> str | None:
+    words = re.findall(r"\w+", text)
+    return '"' + " ".join(words) + '"' if words else None
+
+
+def build_fts_query(query: str, mode: str = "OR", thesaurus=None, expanded: list | None = None) -> str | None:
     """Turn free text into a safe FTS5 query.
 
     "quoted text" stays a phrase, codes like MN-114 or 12.345.6 become phrases,
     a trailing * means prefix search; other words are OR-ed (ranked by BM25).
+    With a thesaurus, a word or phrase of a known concept becomes (term OR equivalents);
+    the expansions are appended to `expanded` as (term, [equivalents]).
     """
     terms: list[str] = []
     for phrase in _PHRASE.findall(query):
-        words = re.findall(r"\w+", phrase)
-        if words:
-            terms.append('"' + " ".join(words) + '"')
+        q = _quote(phrase)
+        if q:
+            terms.append(q)
     rest = _PHRASE.sub(" ", query)
-    for tok in _COMPOUND.findall(rest):
+    tokens = _COMPOUND.findall(rest)
+    plain = [t for t in tokens if not t.endswith("*")]
+    units = dict(thesaurus.expand(plain)) if thesaurus is not None and plain else {}
+    used: set[str] = set()
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        # A thesaurus phrase may span several tokens: find the unit starting here.
+        match = next((u for u in units if units[u] and u not in used
+                      and " ".join(tokens[i:i + len(u.split())]) == u), None)
+        if match:
+            used.add(match)
+            group = [g for g in (_quote(t) for t in [match] + units[match]) if g]
+            terms.append("(" + " OR ".join(dict.fromkeys(group)) + ")")
+            if expanded is not None:
+                expanded.append((match, units[match]))
+            i += len(match.split())
+            continue
+        i += 1
         prefix = tok.endswith("*")
         tok = tok.rstrip("*")
         words = re.findall(r"\w+", tok)
@@ -228,6 +253,26 @@ class Searcher:
         self._embedder = None
         self._embedder_lock = threading.Lock()
         self.embedder_error: str | None = None
+        self._thesaurus = None
+        self._thesaurus_mtime = None
+        self.last_expanded: list = []  # expansions used by the last keyword query
+
+    def thesaurus(self):
+        """The thesaurus file, reloaded when it changes (it is edited by hand)."""
+        path = self.cfg.thesaurus_path
+        try:
+            mtime = os.path.getmtime(path) if path else None
+        except OSError:
+            mtime = None
+        if mtime != self._thesaurus_mtime:
+            from .thesaurus import Thesaurus
+            try:
+                self._thesaurus = Thesaurus.load(path) if mtime else None
+            except Exception as e:  # noqa: BLE001 - a typo in the file must not break search
+                log.warning("thesaurus not loaded: %s", e)
+                self._thesaurus = None
+            self._thesaurus_mtime = mtime
+        return self._thesaurus
 
     def embedder(self):
         with self._embedder_lock:
@@ -279,8 +324,10 @@ class Searcher:
             params.append(ts)
         return clauses, params
 
-    def keyword(self, con, query: str, limit: int, clauses, params) -> list[int]:
-        fts = build_fts_query(query)
+    def keyword(self, con, query: str, limit: int, clauses, params, expand: bool = False) -> list[int]:
+        self.last_expanded = []
+        fts = build_fts_query(query, thesaurus=self.thesaurus() if expand else None,
+                              expanded=self.last_expanded)
         if not fts:
             return []
         where = " AND ".join(["chunks_fts MATCH ?"] + clauses)
@@ -304,13 +351,16 @@ class Searcher:
 
     def search(self, con, query: str, limit: int = 10, folder: str | None = None,
                file_type: str | None = None, modified_after: str | None = None,
-               mode: str = "hybrid", allowed=None, facets: dict | None = None) -> list[Hit]:
+               mode: str = "hybrid", allowed=None, facets: dict | None = None,
+               expand: bool | None = None) -> list[Hit]:
         clauses, params = self._filters(folder, file_type, modified_after, facets)
         filtered = bool(clauses)
         ranked: dict[str, list[int]] = {}
         qvec = None
+        self.last_expanded = []
         if mode in ("hybrid", "keyword"):
-            ranked["keyword"] = self.keyword(con, query, 100, clauses, params)
+            use = self.cfg.expand_synonyms if expand is None else expand
+            ranked["keyword"] = self.keyword(con, query, 100, clauses, params, expand=use)
         if mode in ("hybrid", "semantic"):
             ranked["semantic"], qvec = self.semantic(con, query, 2000 if filtered else 100)
 

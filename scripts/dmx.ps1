@@ -243,6 +243,8 @@ try {
             if ($held) { Say "Note: $($held.Split('|')[0]) is working on the index right now; you get the last saved version." }
             Copy-MasterToLocal
             Copy-Item $SharedConfig $LocalConfig -Force
+            $th = Join-Path $Shared 'thesaurus.toml'
+            if (Test-Path $th) { Copy-Item $th (Join-Path $Local 'thesaurus.toml') -Force }  # search synonyms
             # Build the vector cache and facets now, so Claude's first question is fast.
             Say 'Preparing the search cache (about 30-60 s) ...'
             Invoke-Native $Py @('-c', "from dmx_docs.config import load_config; from dmx_docs.tools import DocTools; DocTools(load_config(r'$LocalConfig')).search('warm-up', limit=1)") -AllowFail
