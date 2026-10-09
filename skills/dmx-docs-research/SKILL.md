@@ -19,7 +19,7 @@ Never answer from the raw top results of a single search. Run this loop:
   before concluding anything from an absence of results. If a project or collection is not
   listed, say "not in the index" - never invent another reason.
 - Every document carries **facets**, shown under each search hit and usable as filters:
-  `project`, `collection`, `section` (Vente, Finances, Electrique, Mecanique, Soft, Gestion,
+  `project` (with its `sub-project` when a project groups several machines, e.g. "MOUSQUETAIRES / 1_Athos"), `collection`, `section` (Vente, Finances, Electrique, Mecanique, Soft, Gestion,
   Rapports_Tests, Photos_Videos, Documentation, SAV, Cloture) and `doc_type` (offre, commande,
   cahier_des_charges, facture, modification, schema_electrique, layout, plan, nomenclature,
   pieces_detachees, manuel, doc_fournisseur, fat, sat, reception, mise_en_service, open_points,
@@ -58,7 +58,7 @@ Turn the question into **2-4 search queries** before the first search:
   - documents: offre, cahier des charges (CDC), spécification, note de modification, rapport d'intervention, compte rendu, manuel, schéma électrique, nomenclature/BOM, pièces détachées
 - **Exact identifiers in "double quotes"**: order numbers (`"120006116"`), part numbers (`"R911347583"`), codes (`"MN-114"`). Use `mode="keyword"` for these.
 - **Decompose** multi-part or multi-project questions: one query per part ("cadence THOR" and "cadence YAKUMA", not "cadence THOR et YAKUMA").
-- **Name a project?** Check its exact name with `list_projects name="..."`, then filter with
+- **Name a project?** Check its exact name with `list_projects name="..."` (it also lists sub-projects), then filter with
   `project="THOR"` (several: `project="THOR,YAKUMA"`). Many project names are ordinary words
   (ANGE, BOULE, LEON, VENUS, SPACE): without the filter, a keyword search mixes the project with the word.
   For a client or machine, use `find_files` (names often contain them) or a search without filter.

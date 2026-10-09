@@ -354,9 +354,17 @@ def _convert_with_word(path: str, out_dir: str) -> str:
             watchdog.start()
         try:
             # A dummy password makes protected files fail instead of prompting.
-            doc = word.Documents.Open(os.path.abspath(path), ConfirmConversions=False, ReadOnly=True,
-                                      AddToRecentFiles=False, PasswordDocument="dmx-no-password",
-                                      Visible=False, NoEncodingDialog=True)
+            try:
+                doc = word.Documents.Open(os.path.abspath(path), ConfirmConversions=False, ReadOnly=True,
+                                          AddToRecentFiles=False, PasswordDocument="dmx-no-password",
+                                          Visible=False, NoEncodingDialog=True)
+            except Exception as e:
+                if "File Block" in str(e):  # Word 6.0/95 files refused by Word's Trust Center settings
+                    raise ValueError("very old Word format (Word 6/95) blocked by Word's File Block "
+                                     "settings") from None
+                raise
+            if doc is None:
+                raise ValueError("Word could not open the file (protected or unreadable)")
             try:
                 doc.SaveAs2(out, FileFormat=16)  # wdFormatDocumentDefault (.docx)
             finally:

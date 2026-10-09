@@ -26,7 +26,12 @@ def f(rel, root=R):
     (r"2_Hors_Garantie\DAHU\Gestion\SAT\130311_Dahu review on site.doc", "DAHU", "2_Hors_Garantie", "Gestion", "sat", "folder"),
     (r"2_Hors_Garantie\ACTE\Cahier des charges\Exigences.docx", "ACTE", "2_Hors_Garantie", "Vente", "cahier_des_charges", "folder"),
     (r"2_Hors_Garantie\IRIS 6\Gestion\Shipping Doc\Documents.pdf", "IRIS 6", "2_Hors_Garantie", "Gestion", "transport", "folder"),
-    (r"2_Hors_Garantie\BEV_2\Clôture\Bilan.pdf", "BEV_2", "2_Hors_Garantie", "Cloture", None, None),
+    (r"2_Hors_Garantie\BEV_2\Clôture\Bilan.pdf", "BEV_2", "2_Hors_Garantie", "Cloture", "cloture", "section"),
+    (r"2_Hors_Garantie\KING\Gestion\Libération interne\Check.pdf", "KING", "2_Hors_Garantie", "Gestion", "liberation", "folder"),
+    (r"2_Hors_Garantie\KING\Rapports\IQ OQ\Protocole.doc", "KING", "2_Hors_Garantie", "Rapports_Tests", "qualification", "folder"),
+    # multi-machine project: the machine level is a sub-project
+    (r"2_Hors_Garantie\MOUSQUETAIRES\2_Porthos\Rapports\RI PORTHOS.docx", "MOUSQUETAIRES", "2_Hors_Garantie",
+     "Rapports_Tests", "rapport", "section"),
     # ad hoc project inside a collection: project still found, type from the file name
     (r"2_Hors_Garantie\AUTONOX\Dox import Mars 2020\Offre AUTONOX.pdf", "AUTONOX", "2_Hors_Garantie", None, "offre", "name"),
 ])
@@ -34,6 +39,25 @@ def test_compute(rel, project, collection, section, doc_type, source):
     got = f(rel)
     assert (got["project"], got["collection"], got["section"], got["doc_type"], got["facet_source"]) == \
         (project, collection, section, doc_type, source)
+
+
+def test_subproject_and_filter_by_it(tmp_path, make_cfg):
+    got = f(r"2_Hors_Garantie\MOUSQUETAIRES\1_Athos\SAV\Offre formation.pdf")
+    assert (got["project"], got["subproject"], got["collection"]) == ("MOUSQUETAIRES", "1_Athos", "2_Hors_Garantie")
+    root = tmp_path / "RMA"
+    for machine in ("1_Athos", "2_Porthos"):
+        d = root / "2_Hors_Garantie" / "MOUSQUETAIRES" / machine / "Rapports"
+        d.mkdir(parents=True)
+        make_pdf(str(d / f"Rapport {machine}.pdf"), [f"Rapport d'intervention sur la machine {machine}."])
+    cfg = make_cfg(root)
+    run_index(cfg, progress=quiet)
+    tools = DocTools(cfg)
+    one = tools.search("rapport intervention", project="1_Athos", mode="keyword")
+    assert "Rapport 1_Athos" in one and "Porthos" not in one
+    assert "project MOUSQUETAIRES / 1_Athos" in one
+    both = tools.search("rapport intervention", project="MOUSQUETAIRES", mode="keyword")
+    assert "1_Athos" in both and "2_Porthos" in both
+    assert "sub-projects: 1_Athos, 2_Porthos" in tools.list_projects(name="athos")
 
 
 def test_root_that_is_a_project_folder():
@@ -68,14 +92,14 @@ def test_facet_filters_and_project_list(tmp_path, make_cfg):
 
 def test_facets_follow_rule_changes(tmp_path, make_cfg, monkeypatch):
     root = tmp_path / "RMA"
-    (root / "THOR" / "9_SAV").mkdir(parents=True)
-    make_pdf(str(root / "THOR" / "9_SAV" / "Intervention.pdf"), ["Remplacement du moteur."])
+    (root / "THOR" / "8_Documentation").mkdir(parents=True)
+    make_pdf(str(root / "THOR" / "8_Documentation" / "Intervention.pdf"), ["Remplacement du moteur."])
     cfg = make_cfg(root)
     run_index(cfg, progress=quiet)
     con = store.connect(cfg.db_path)
-    assert con.execute("SELECT doc_type FROM doc_facets").fetchone()[0] == "sav"
+    assert con.execute("SELECT doc_type FROM doc_facets").fetchone()[0] == "manuel"
     monkeypatch.setattr(facets, "FACETS_VERSION", facets.FACETS_VERSION + 1)
-    monkeypatch.setitem(facets.SECTION_DEFAULT, "SAV", "service")
+    monkeypatch.setitem(facets.SECTION_DEFAULT, "Documentation", "service")
     assert facets.refresh(con, cfg.roots) == 1
     assert con.execute("SELECT doc_type FROM doc_facets").fetchone()[0] == "service"
     con.close()

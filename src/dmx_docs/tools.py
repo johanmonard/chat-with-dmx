@@ -273,7 +273,8 @@ class DocTools:
         ids = list(doc_ids)
         out = {}
         for r in con.execute(f"SELECT * FROM doc_facets WHERE doc_id IN ({','.join('?' * len(ids))})", ids):
-            parts = [f"project {r['project']}" if r["project"] else None,
+            project = r["project"] and (r["project"] + (f" / {r['subproject']}" if r["subproject"] else ""))
+            parts = [f"project {project}" if project else None,
                      f"({r['collection']})" if r["collection"] else None,
                      f"section {r['section']}" if r["section"] else None,
                      f"type {r['doc_type']}" + ("" if r["facet_source"] == "folder" else f" (from {r['facet_source']})")
@@ -354,18 +355,20 @@ class DocTools:
         limit = max(1, min(int(limit), 1000))
         con = self._con()
         try:
-            where, params = [], []
-            if name:
-                where.append("f.project LIKE ?")
-                params.append(f"%{name}%")
+            where, having, params = "", "", []
             if collection:
-                where.append("coalesce(f.collection, '') LIKE ?")
+                where = " AND coalesce(f.collection, '') LIKE ?"
                 params.append(f"%{collection}%")
+            if name:  # match the project or any of its sub-projects, but list the whole project
+                having = " HAVING f.project LIKE ? OR coalesce(group_concat(f.subproject), '') LIKE ?"
+                params += [f"%{name}%", f"%{name}%"]
             sql = f"""SELECT f.project, f.collection, count(*) n, max(d.mtime) last,
-                             group_concat(DISTINCT f.section) sections
+                             group_concat(DISTINCT f.section) sections,
+                             group_concat(DISTINCT f.subproject) subprojects
                       FROM doc_facets f JOIN docs d ON d.id = f.doc_id
-                      WHERE f.project IS NOT NULL {''.join(' AND ' + w for w in where)}
-                      GROUP BY f.project, f.collection ORDER BY f.collection IS NOT NULL, f.project LIMIT ?"""
+                      WHERE f.project IS NOT NULL{where}
+                      GROUP BY f.project, f.collection{having}
+                      ORDER BY f.collection IS NOT NULL, f.project LIMIT ?"""
             rows = con.execute(sql, params + [limit]).fetchall()
         finally:
             con.close()
@@ -373,8 +376,9 @@ class DocTools:
             return "No matching project in the index."
         lines = [f"{len(rows)} projects (project | collection | indexed documents | last modified | sections):"]
         for r in rows:
+            subs = f" | sub-projects: {', '.join(sorted(r['subprojects'].split(',')))}" if r["subprojects"] else ""
             lines.append(f"- {r['project']} | {r['collection'] or 'current'} | {r['n']} docs | {_date(r['last'])} | "
-                         f"{r['sections'] or '-'}")
+                         f"{r['sections'] or '-'}{subs}")
         return "\n".join(lines)
 
     # --------------------------------------------------------- find_files

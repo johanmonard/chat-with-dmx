@@ -15,7 +15,7 @@ import re
 import unicodedata
 
 # Bump when the rules change: every document's facets are recomputed (from its path only).
-FACETS_VERSION = 1
+FACETS_VERSION = 2
 
 
 def _norm(s: str) -> str:
@@ -47,25 +47,36 @@ DOC_TYPES = [
     # type,               folder names,                                   file-name words/phrases
     ("fat",               ["fat", "reception usine"],                                             ["fat", "factory acceptance", "reception usine"]),
     ("sat",               ["sat", "reception site"],                                             ["sat", "site acceptance", "reception site"]),
-    ("reception",         ["acceptation machine", "reception"],           ["pv de reception", "proces verbal", "protocole de reception"]),
-    ("mise_en_service",   ["mes", "mise en service", "rapports interventions"],
+    ("reception",         ["acceptation machine", "reception", "acceptation", "acceptation fat handover sat", "handover"],
+                                                                          ["pv de reception", "proces verbal", "protocole de reception", "handover"]),
+    ("liberation",        ["liberation interne", "liberation avant livraison", "liberation"],
+                                                                          ["liberation interne", "liberation avant livraison"]),
+    ("qualification",     ["iq oq", "iq oq pq", "qualification"],         ["iq oq", "iq oq pq", "qualification"]),
+    ("securite",          ["analyse securite", "analyse de securite", "securite", "analyse de risques", "marquage ce"],
+                                                                          ["analyse de risque", "analyse de risques", "analyse securite", "declaration ce", "marquage ce", "risk assessment"]),
+    ("mise_en_service",   ["mes", "mise en service", "rapports interventions", "documents mes"],
                                                                           ["mise en service", "commissioning", "rapport d intervention", "inbetriebnahme"]),
     ("open_points",       ["open points lists", "opl"],                   ["opl", "open points", "points ouverts", "punch list"]),
-    ("tests",             ["tests internes", "tests preliminaires", "protocole de tests", "tests", "essais"],
-                                                                          ["test", "tests", "essai", "essais"]),
+    ("tests",             ["tests internes", "tests preliminaires", "protocole de tests", "tests", "essais",
+                           "mesure de bruit", "mesures de bruit"],
+                                                                          ["test", "tests", "essai", "essais", "mesure de bruit", "mesures de bruit"]),
+    ("checklist",         ["check lists", "checklists", "check list", "checklist"], ["check list", "checklist"]),
+    ("qualite",           ["qg", "qg process", "qg processus", "qa", "quality gates", "qualite"],
+                                                                          ["quality gate", "qg"]),
     ("offre",             ["offres", "offre", "prix final"],                       ["offre", "offer", "quotation", "devis", "angebot", "price summary"]),
     ("commande",          ["commandes", "commande", "commandes complementaires"],     ["commande", "bon de commande", "purchase order", "bestellung", "order confirmation"]),
-    ("cahier_des_charges", ["cahier des charges", "formulaire validation"],
+    ("cahier_des_charges", ["cahier des charges", "formulaire validation", "specifications", "specification"],
                                                                           ["cahier des charges", "cdc", "specification", "specifications", "urs", "lastenheft", "pflichtenheft"]),
     ("facture",           ["facturation", "garanties bancaires"],         ["facture", "invoice", "rechnung"]),
     ("modification",      ["modifications"],                              ["modification", "modifications", "note de modification"]),
     ("schema_electrique", ["schemas", "schemas electriques", "schema", "eplan"],                           ["schema electrique", "schemas electriques", "wiring", "electrical diagram"]),
-    ("layout",            ["layouts", "implantation"],                    ["layout", "implantation"]),
-    ("plan",              ["dessins", "plans"],                           ["plan", "drawing", "zeichnung"]),
+    ("layout",            ["layouts", "layout", "implantation"],          ["layout", "implantation"]),
+    ("plan",              ["dessins", "plans", "mechanical drawings", "drawings"], ["plan", "drawing", "zeichnung"]),
     ("pieces_detachees",  ["pieces detachees", "spare parts"],            ["pieces detachees", "spare parts", "ersatzteil", "ersatzteile"]),
     ("manuel",            ["documentation indesign", "usb stick doc project", "markdown"],
                                                                           ["manuel", "manual", "notice", "betriebsanleitung", "bedienungsanleitung", "user manual"]),
-    ("doc_fournisseur",   ["materiel tiers", "received doc", "third party", "oem doc"],
+    ("sav",               ["sav", "service apres vente"],                 ["sav"]),
+    ("doc_fournisseur",   ["materiel tiers", "received doc", "third party", "oem doc", "suppliers", "fournisseurs"],
                                                                           ["datasheet", "data sheet", "fiche technique"]),
     ("suivi",             ["suivi", "correspondance e mails"],            ["compte rendu", "cr", "minutes", "reunion", "meeting", "pv"]),
     ("planning",          ["planning"],                                   ["planning", "gantt"]),
@@ -75,13 +86,19 @@ DOC_TYPES = [
 
 # Default type when only the section is known.
 SECTION_DEFAULT = {"Electrique": "doc_electrique", "Mecanique": "doc_mecanique", "Documentation": "manuel",
-                   "SAV": "sav", "Finances": "facture", "Soft": "soft"}
+                   "SAV": "sav", "Finances": "facture", "Soft": "soft", "Rapports_Tests": "rapport",
+                   "Cloture": "cloture"}
 
 _CONTAINER = re.compile(r"^\d{1,2}_")  # 2_Hors_Garantie, 3_Archives, 9_Projets_Internes...
 
 
 def section_of(folder: str) -> str | None:
     return SECTIONS.get(_SECTION_PREFIX.sub("", _norm(folder)).strip())
+
+
+def _is_container(folder: str) -> bool:
+    """A numbered folder grouping projects (not a numbered template section like 5_Gestion)."""
+    return bool(_CONTAINER.match(folder)) and not section_of(folder)
 
 
 def _words(s: str) -> str:
@@ -97,27 +114,28 @@ def compute(path: str, root: str) -> dict:
     rel = os.path.relpath(path, root) if root else path
     parts = [p for p in rel.replace("/", "\\").split("\\") if p and p != "."]
     folders, name = parts[:-1], parts[-1] if parts else ""
-    out = {"project": None, "collection": None, "section": None, "doc_type": None, "facet_source": None}
+    out = {"project": None, "subproject": None, "collection": None, "section": None,
+           "doc_type": None, "facet_source": None}
 
-    # Project = the folder right above the first template section; else the first folder
-    # (the second one under a numbered container such as 2_Hors_Garantie).
-    idx = next((i for i, f in enumerate(folders) if section_of(f)), None)
-    if idx is not None:
-        proj_i = idx - 1
-    elif folders and _CONTAINER.match(folders[0]) and len(folders) > 1:
-        proj_i = 1
-    else:
-        proj_i = 0 if folders else -1
-    if proj_i >= 0:
-        out["project"] = folders[proj_i]
-        out["collection"] = folders[proj_i - 1] if proj_i >= 1 else None
+    # Collection = numbered container folders (2_Hors_Garantie...); project = the first folder
+    # below them; sub-project = a level between the project and its template sections
+    # (multi-machine projects: MOUSQUETAIRES\1_Athos\Rapports, PACIFIC\08_03_02\Documentation).
+    i = 0
+    while i < len(folders) - 1 and _is_container(folders[i]):
+        i += 1
+    idx = next((k for k in range(i, len(folders)) if section_of(folders[k])), None)
+    if i < len(folders) and not section_of(folders[i]):
+        out["project"] = folders[i]
+        out["collection"] = folders[i - 1] if i >= 1 else None
+        if idx is not None and idx - 1 > i:
+            out["subproject"] = folders[idx - 1]
     elif root:
         out["project"] = os.path.basename(root.rstrip("\\/"))  # the root itself is a project folder
     if idx is not None:
         out["section"] = section_of(folders[idx])
 
-    below = folders[idx + 1:] if idx is not None else folders[proj_i + 1:]
-    keys = [_folder_key(f) for f in below] + ([_folder_key(folders[idx])] if idx is not None else [])
+    start = i + 1 if out["project"] == (folders[i] if i < len(folders) else None) else i
+    keys = [_folder_key(f) for f in folders[start:]]
     words = _words(os.path.splitext(name)[0])
     for doc_type, folder_names, name_words in DOC_TYPES:  # specific file-name evidence first
         if doc_type in ("fat", "sat") and any(f" {w} " in words for w in name_words):
@@ -144,10 +162,12 @@ CREATE TABLE IF NOT EXISTS doc_facets (
     collection    TEXT,
     section       TEXT,
     doc_type      TEXT,
-    facet_source  TEXT
+    facet_source  TEXT,
+    subproject    TEXT
 );
 CREATE INDEX IF NOT EXISTS doc_facets_project ON doc_facets(project COLLATE NOCASE);
 """
+COLUMNS = ("doc_id", "project", "collection", "section", "doc_type", "facet_source", "subproject")
 
 
 def refresh(con, roots: list[str]) -> int:
@@ -156,6 +176,8 @@ def refresh(con, roots: list[str]) -> int:
     from . import store
 
     con.executescript(TABLE)
+    if "subproject" not in {r[1] for r in con.execute("PRAGMA table_info(doc_facets)")}:
+        con.execute("ALTER TABLE doc_facets ADD COLUMN subproject TEXT")  # tables from version 1
     if store.get_meta(con, "facets_version") != str(FACETS_VERSION):
         con.execute("DELETE FROM doc_facets")
         store.set_meta(con, "facets_version", FACETS_VERSION)
@@ -166,11 +188,12 @@ def refresh(con, roots: list[str]) -> int:
     rows = []
     for doc_id, path, key in todo:
         f = compute(path, root_of(key, root_keys) or "")
-        rows.append((doc_id, f["project"], f["collection"], f["section"], f["doc_type"], f["facet_source"]))
+        rows.append((doc_id,) + tuple(f[c] for c in COLUMNS[1:]))
     autocommit = con.isolation_level is None
     if autocommit:
         con.execute("BEGIN")  # one transaction, not one per row
-    con.executemany("INSERT OR REPLACE INTO doc_facets VALUES (?,?,?,?,?,?)", rows)
+    con.executemany(f"INSERT OR REPLACE INTO doc_facets ({','.join(COLUMNS)}) "
+                    f"VALUES ({','.join('?' * len(COLUMNS))})", rows)
     con.execute("COMMIT") if autocommit else con.commit()
     return len(rows)
 

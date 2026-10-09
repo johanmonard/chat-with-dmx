@@ -250,8 +250,13 @@ class Searcher:
             values = [v.strip() for v in str(value).split(",") if v.strip()] if value else []
             if values:
                 marks = ",".join("?" * len(values))
-                clauses.append(f"d.id IN (SELECT doc_id FROM doc_facets WHERE {col} COLLATE NOCASE IN ({marks}))")
-                params += values
+                if col == "project":  # a project name or one of its sub-projects (machines)
+                    clauses.append(f"d.id IN (SELECT doc_id FROM doc_facets WHERE project COLLATE NOCASE "
+                                   f"IN ({marks}) OR subproject COLLATE NOCASE IN ({marks}))")
+                    params += values + values
+                else:
+                    clauses.append(f"d.id IN (SELECT doc_id FROM doc_facets WHERE {col} COLLATE NOCASE IN ({marks}))")
+                    params += values
         if folder:
             key = store.path_key(folder)
             clauses.append("(d.path_key = ? OR substr(d.path_key, 1, ?) = ?)")
