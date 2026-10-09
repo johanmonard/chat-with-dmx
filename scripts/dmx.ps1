@@ -1,33 +1,41 @@
 <#
 dmx-docs on several machines that share one network folder (e.g. U:\DMX-RAG).
 
-The shared folder holds the code, the settings and the master copy of the index.
-SQLite must not run on a network share, so every command that changes the index
-works on a local copy:  lock -> copy master to C:\dmx-rag -> run -> copy back -> unlock.
-Only one machine can hold the lock, so runs are sequential.
+A world is one family of documents with its own index and its own audience (projects,
+marketing...). The shared folder holds the code, the settings and the master copy of each
+world's index. SQLite must not run on a network share, so every command that changes an index
+works on a local copy:  lock the world -> copy its master to C:\dmx-rag\data\<world> -> run ->
+copy back -> unlock. One machine at a time per world; different worlds can run at the same time.
 
 Shared folder layout (this script lives in <shared>\app\scripts):
-  <shared>\app\           git clone of chat-with-dmx
-  <shared>\config.toml    settings used by every machine (data_dir = 'C:\dmx-rag\data')
-  <shared>\data\          index.sqlite3 (master), index.prev.sqlite3 (previous), LOCK
-  <shared>\models\        embedding model, copied to each machine once
-  <shared>\tools\uv.exe   builds the local Python environment (no admin rights needed)
-  <shared>\logs\          one log per run
+  <shared>\app\               git clone of chat-with-dmx
+  <shared>\config.toml        settings used by every machine (data_dir = 'C:\dmx-rag\data'),
+                              with one [worlds.<name>] table per world
+  <shared>\thesaurus.toml     search vocabulary shared by every world
+  <shared>\worlds\<world>\    index.sqlite3 (master), index.prev.sqlite3 (previous), LOCK,
+                              register.csv (projects: machine register)
+  <shared>\models\            embedding model, copied to each machine once
+  <shared>\tools\uv.exe       builds the local Python environment (no admin rights needed)
+  <shared>\logs\              one log per run
 
-Commands:
+Commands. All but setup and migrate work on one world: -World <name>, or the world's name as
+first argument; otherwise the script asks (Enter = projects).
   setup          build/update C:\dmx-rag\venv (GPU packages on NVIDIA machines)
   web            configuration page (folders, exclusions, scans), checked in when closed
   index          scan for new/changed/deleted files
   embed [args]   compute embeddings, e.g. embed --max-minutes 300
+  update         index, then embed: unattended run, e.g. on the GPU machine
   pull           refresh this machine's read-only copy for Claude Desktop (no lock)
   status         index statistics of the local copy
   search "..."   test a search on the local copy
   unlock -Force  remove a stale lock left by a machine that crashed
+  migrate        one-time move from the single-index layout (every command does it first)
 #>
 param(
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet('setup', 'web', 'index', 'embed', 'pull', 'status', 'search', 'unlock')]
+    [ValidateSet('setup', 'web', 'index', 'embed', 'update', 'pull', 'status', 'search', 'unlock', 'migrate')]
     [string]$Command,
+    [string]$World,
     [switch]$Force,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
@@ -37,21 +45,23 @@ $ErrorActionPreference = 'Stop'
 $App = Split-Path $PSScriptRoot -Parent
 $Shared = Split-Path $App -Parent
 $SharedConfig = Join-Path $Shared 'config.toml'
-$SharedData = Join-Path $Shared 'data'
 $SharedModels = Join-Path $Shared 'models'
 $Logs = Join-Path $Shared 'logs'
 $Uv = Join-Path $Shared 'tools\uv.exe'
-$Master = Join-Path $SharedData 'index.sqlite3'
-$Lock = Join-Path $SharedData 'LOCK'
 
-$Local = 'C:\dmx-rag'
+# DMX_RAG_LOCAL: the tests run this script against a temporary folder instead of C:\dmx-rag.
+$Local = if ($env:DMX_RAG_LOCAL) { $env:DMX_RAG_LOCAL } else { 'C:\dmx-rag' }
 $LocalData = Join-Path $Local 'data'
-$LocalDb = Join-Path $LocalData 'index.sqlite3'
 $LocalModels = Join-Path $LocalData 'models'
 $LocalConfig = Join-Path $Local 'config.toml'
 $Venv = Join-Path $Local 'venv'
 $Py = Join-Path $Venv 'Scripts\python.exe'
 $Stamp = Join-Path $Local 'installed.txt'
+$Rest = @($Rest | Where-Object { $_ })
+
+# Set by Set-World: the world's folders on the share and on this machine.
+$SharedWorld = $Master = $Lock = $LocalWorld = $LocalDb = $null
+$WorldArgs = @()
 
 # Keep uv's Python and cache on the local disk, not in a roaming profile.
 $env:UV_PYTHON_INSTALL_DIR = Join-Path $Local 'python'
@@ -113,8 +123,10 @@ function Install-Env {
     }
     Get-CodeStamp | Set-Content -Encoding ascii $Stamp
     $hasWord = Test-Path 'Registry::HKEY_CLASSES_ROOT\Word.Application\CurVer'
+    $hasPpt = Test-Path 'Registry::HKEY_CLASSES_ROOT\PowerPoint.Application\CurVer'
     $hasLo = (Test-Path 'C:\Program Files\LibreOffice\program\soffice.exe') -or (Test-Path 'C:\Program Files (x86)\LibreOffice\program\soffice.exe')
     if (-not ($hasWord -or $hasLo)) { Say 'Note: neither Word nor LibreOffice is installed here, so .doc files are skipped if you index from this machine.' }
+    if (-not ($hasPpt -or $hasLo)) { Say 'Note: neither PowerPoint nor LibreOffice is installed here, so .ppt files are skipped if you index from this machine.' }
     Say 'Environment ready.'
 }
 
@@ -137,10 +149,104 @@ function Publish-Models {
     }
 }
 
+# ------------------------------------------------------------------ worlds
+
+function Get-Worlds {
+    # World names, in the order of the [worlds.<name>] tables of the shared config.
+    $text = Get-Content $SharedConfig -Raw
+    @([regex]::Matches($text, '(?m)^\s*\[worlds\.([a-z0-9_-]+)\]') | ForEach-Object { $_.Groups[1].Value })
+}
+
+function Resolve-World {
+    $known = @(Get-Worlds)
+    if (-not $known) { throw "No [worlds.<name>] table in $SharedConfig" }
+    if (-not $script:World -and $script:Rest.Count -gt 0 -and $known -contains $script:Rest[0]) {
+        $script:World = $script:Rest[0]   # e.g. "7 - Update a world.cmd" marketing
+        $script:Rest = @($script:Rest | Select-Object -Skip 1)
+    }
+    if (-not $script:World) {
+        $answer = Read-Host "World ($($known -join ', ')) [projects]"
+        $script:World = if ($answer.Trim()) { $answer.Trim().ToLower() } else { 'projects' }
+    }
+    if ($known -notcontains $script:World) { throw "Unknown world '$($script:World)'. Configured worlds: $($known -join ', ')" }
+}
+
+function Set-World {
+    $script:SharedWorld = Join-Path $Shared "worlds\$World"
+    $script:Master = Join-Path $SharedWorld 'index.sqlite3'
+    $script:Lock = Join-Path $SharedWorld 'LOCK'
+    $script:LocalWorld = Join-Path $LocalData $World
+    $script:LocalDb = Join-Path $LocalWorld 'index.sqlite3'
+    $script:WorldArgs = @('--world', $World)
+}
+
+function Get-ServedWorld([string]$commandLine) {
+    if ($commandLine -match '--world\s+"?([a-z0-9_-]+)') { $Matches[1] } else { 'projects' }  # no --world: the default
+}
+
+function Stop-LocalServers([string]$world) {
+    # Claude Desktop's server of that world keeps its local index open; Claude Desktop restarts it by itself.
+    Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+        Where-Object { $_.CommandLine -match 'dmx_docs\.cli' -and $_.CommandLine -match ' serve' -and
+                       $_.CommandLine -match [regex]::Escape($LocalConfig) -and
+                       (Get-ServedWorld $_.CommandLine) -eq $world } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
+
+function Move-LegacyLayout {
+    # Before worlds there was one index (<shared>\data, C:\dmx-rag\data): it becomes the
+    # "projects" world. Renames only, never copies; does nothing once done.
+    $oldData = Join-Path $Shared 'data'
+    $oldMaster = Join-Path $oldData 'index.sqlite3'
+    $projects = Join-Path $Shared 'worlds\projects'
+    if ((Test-Path $oldMaster) -and -not (Test-Path (Join-Path $projects 'index.sqlite3'))) {
+        $oldLock = Join-Path $oldData 'LOCK'
+        if (Test-Path $oldLock) {
+            throw "The index is being worked on with the old layout ($((Get-Content $oldLock -Raw).Trim())). Let that run finish (or unlock it), then run this again."
+        }
+        Say 'One-time move of the shared index to worlds\projects ...'
+        New-Item -ItemType Directory -Force $projects | Out-Null
+        Move-Item $oldMaster $projects
+        $prev = Join-Path $oldData 'index.prev.sqlite3'
+        if (Test-Path $prev) { Move-Item $prev $projects }
+        $reg = Join-Path $Shared 'register.csv'
+        if (Test-Path $reg) { Move-Item $reg $projects }
+        if (-not (Get-ChildItem $oldData -Force)) { Remove-Item $oldData }
+    }
+    $oldLocal = Join-Path $LocalData 'index.sqlite3'
+    $localProjects = Join-Path $LocalData 'projects'
+    if ((Test-Path $oldLocal) -and -not (Test-Path (Join-Path $localProjects 'index.sqlite3'))) {
+        Say 'One-time move of the local index to data\projects ...'
+        Copy-Item $SharedConfig $LocalConfig -Force   # a restarted server must find the new layout
+        New-Item -ItemType Directory -Force $localProjects | Out-Null
+        $moved = $false
+        for ($try = 1; $try -le 5 -and -not $moved; $try++) {
+            Stop-LocalServers 'projects'
+            Start-Sleep -Milliseconds 500
+            try { Move-Item $oldLocal $localProjects -ErrorAction Stop; $moved = $true } catch { }
+        }
+        if (-not $moved) {
+            throw 'The local index is in use (Claude Desktop?). Quit Claude Desktop completely and run this again. Nothing was moved on this machine.'
+        }
+        foreach ($name in 'index.sqlite3-wal', 'index.sqlite3-shm') {
+            $p = Join-Path $LocalData $name
+            if (Test-Path $p) { Move-Item $p $localProjects -Force -ErrorAction SilentlyContinue }
+        }
+        # Search caches are rebuilt if one cannot be moved.
+        Get-ChildItem $LocalData -Filter 'vec_*' -File | ForEach-Object { Move-Item $_.FullName $localProjects -Force -ErrorAction SilentlyContinue }
+        $oldLogs = Join-Path $LocalData 'logs'
+        if (Test-Path $oldLogs) { Move-Item $oldLogs $localProjects -ErrorAction SilentlyContinue }
+        $oldReg = Join-Path $Local 'register.csv'
+        if (Test-Path $oldReg) { Move-Item $oldReg $localProjects -Force }
+    }
+}
+
+# --------------------------------------------------------- lock and copies
+
 function Get-LockInfo { if (Test-Path $Lock) { (Get-Content $Lock -Raw).Trim() } }
 
 function Enter-Lock([string]$what) {
-    New-Item -ItemType Directory -Force $SharedData | Out-Null
+    New-Item -ItemType Directory -Force $SharedWorld | Out-Null
     $info = "$env:COMPUTERNAME|$env:USERNAME|$(Get-Date -Format 'yyyy-MM-dd HH:mm')|$what|$PID"
     try {
         $fs = [IO.File]::Open($Lock, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
@@ -152,31 +258,24 @@ function Enter-Lock([string]$what) {
         $fields = if ($held) { $held.Split('|') } else { @() }
         if ($fields.Count -ge 5 -and $fields[0] -eq $env:COMPUTERNAME -and
             (Get-Process -Id ([int]$fields[4]) -ErrorAction SilentlyContinue | Where-Object ProcessName -match 'powershell')) {
-            throw "'$($fields[3])' is still running on this machine (started $($fields[2])). Wait for it to finish, or stop it first."
+            throw "'$($fields[3])' is still running on this machine for '$World' (started $($fields[2])). Wait for it to finish, or stop it first."
         }
         if ($held -and $fields[0] -eq $env:COMPUTERNAME) {
-            Say "This machine already holds the lock ($held): continuing with its local copy, which has unsaved work."
+            Say "This machine already holds the lock of '$World' ($held): continuing with its local copy, which has unsaved work."
             [IO.File]::WriteAllText($Lock, $info)   # this process owns it now
             return $true
         }
-        throw "The index is in use by another machine: $held`nWait for it to finish. If that machine crashed, run: dmx.ps1 unlock -Force"
+        throw "The '$World' index is in use by another machine: $held`nWait for it to finish. If that machine crashed, run: dmx.ps1 unlock -World $World -Force"
     }
 }
 
 function Exit-Lock { Remove-Item $Lock -Force -ErrorAction SilentlyContinue }
 
-function Stop-LocalServers {
-    # Claude Desktop's dmx-docs server keeps the local index open; it restarts it by itself.
-    Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-        Where-Object { $_.CommandLine -match 'dmx_docs\.cli' -and $_.CommandLine -match ' serve' } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-}
-
 function Remove-LocalDb {
     # Returns $false if the file stays in use (the old copy is then left untouched).
     for ($try = 1; $try -le 5; $try++) {
         if (-not (Test-Path $LocalDb)) { break }
-        Stop-LocalServers
+        Stop-LocalServers $World
         Start-Sleep -Milliseconds 500
         try { [IO.File]::Delete($LocalDb) } catch { }
     }
@@ -187,18 +286,18 @@ function Remove-LocalDb {
 
 function Copy-MasterToLocal {
     # Never copy over the local index in place: a copy interrupted by a reader corrupts it.
-    New-Item -ItemType Directory -Force $LocalData | Out-Null
+    New-Item -ItemType Directory -Force $LocalWorld | Out-Null
     $new = "$LocalDb.new"
     if (Test-Path $Master) {
-        Say 'Copying the index from the shared folder ...'
+        Say "Copying the '$World' index from the shared folder ..."
         Copy-Item $Master $new -Force
     }
     if (-not (Remove-LocalDb)) {
         Remove-Item $new -Force -ErrorAction SilentlyContinue
-        throw "The local index is in use (Claude Desktop?). Quit Claude Desktop completely and run this again. The current local copy was left as it was."
+        throw "The local '$World' index is in use (Claude Desktop?). Quit Claude Desktop completely and run this again. The current local copy was left as it was."
     }
     if (Test-Path $new) { [IO.File]::Move($new, $LocalDb) }
-    else { Say 'No index in the shared folder yet: starting a new one.' }
+    else { Say "No '$World' index in the shared folder yet: starting a new one." }
 }
 
 function Save-LocalToMaster {
@@ -215,16 +314,17 @@ con.close()
         Say "The local index failed its integrity check ($check). It was NOT copied to the shared folder; the lock is kept."
         return $false
     }
-    Say 'Copying the index back to the shared folder ...'
+    Say "Copying the '$World' index back to the shared folder ..."
     $tmp = "$Master.tmp"
     Copy-Item $LocalDb $tmp -Force
-    if (Test-Path $Master) { Move-Item $Master (Join-Path $SharedData 'index.prev.sqlite3') -Force }
+    if (Test-Path $Master) { Move-Item $Master (Join-Path $SharedWorld 'index.prev.sqlite3') -Force }
     Move-Item $tmp $Master -Force
     Copy-Item $SharedConfig $LocalConfig -Force
     return $true
 }
 
-function Invoke-Locked([string]$what, [string[]]$dmxArgs) {
+function Invoke-Locked([string]$what, [object[]]$steps) {
+    # $steps: one argument list per dmx-docs command, run in order on the same local copy.
     # Lock first: never reinstall packages under a run that is still going on this machine.
     $resumed = Enter-Lock $what
     $working = $resumed   # true once the local copy holds this run's (or an unsaved run's) work
@@ -234,57 +334,71 @@ function Invoke-Locked([string]$what, [string[]]$dmxArgs) {
         Sync-Models
         if (-not $resumed -or -not (Test-Path $LocalDb)) { Copy-MasterToLocal }
         $working = $true
-        Say "Running: dmx-docs $($dmxArgs -join ' ')"
-        Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $dmxArgs) -AllowFail
-        Say "dmx-docs finished (exit code $LASTEXITCODE)."
+        foreach ($dmxArgs in $steps) {
+            Say "Running: dmx-docs $(($WorldArgs + $dmxArgs) -join ' ')"
+            Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $WorldArgs + $dmxArgs) -AllowFail
+            Say "dmx-docs finished (exit code $LASTEXITCODE)."
+            if ($LASTEXITCODE -ne 0) { Say 'Stopped: the next steps are skipped.'; break }
+        }
         $ok = $true
     } finally {
         # Also runs after Ctrl+C: what was done so far is kept (the index is resumable).
         if (-not $working) {
             Exit-Lock; Say 'Nothing was changed; lock released.'   # failed before touching the index
         } elseif ((Test-Path $Py) -and (Save-LocalToMaster)) {
-            Exit-Lock; Say 'Done. The index in the shared folder is up to date and unlocked.'
+            Exit-Lock; Say "Done. The '$World' index in the shared folder is up to date and unlocked."
         }
-        if ($ok -and $what -eq 'embed') { Publish-Models }
+        if ($ok -and $what -in 'embed', 'update') { Publish-Models }
     }
 }
 
+# -------------------------------------------------------------------- main
+
+if (-not (Test-Path $SharedConfig)) { throw "Settings not found: $SharedConfig" }
+$needsWorld = $Command -notin 'setup', 'migrate'
+if ($needsWorld) { Resolve-World; Set-World }
 New-Item -ItemType Directory -Force $Logs | Out-Null
-$log = Join-Path $Logs ("{0}_{1}_{2}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $env:COMPUTERNAME, $Command)
+$tag = if ($needsWorld) { "$($World)_$Command" } else { $Command }
+$log = Join-Path $Logs ("{0}_{1}_{2}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $env:COMPUTERNAME, $tag)
 Start-Transcript -Path $log -Append | Out-Null
 try {
-    if (-not (Test-Path $SharedConfig)) { throw "Settings not found: $SharedConfig" }
+    Move-LegacyLayout
     switch ($Command) {
         'setup' { Install-Env; Sync-Models }
-        'web' { Invoke-Locked 'web' (@('web') + $Rest) }
-        'index' { Invoke-Locked 'index' (@('index') + $Rest) }
-        'embed' { Invoke-Locked 'embed' (@('embed') + $Rest) }
+        'migrate' { Say 'The layout is up to date.' }
+        'web' { Invoke-Locked 'web' @(, (@('web') + $Rest)) }
+        'index' { Invoke-Locked 'index' @(, (@('index') + $Rest)) }
+        'embed' { Invoke-Locked 'embed' @(, (@('embed') + $Rest)) }
+        'update' { Invoke-Locked 'update' @(@('index'), @('embed')) }
         'pull' {
             Assert-Env
             Sync-Models
             $held = Get-LockInfo
-            if ($held -and $held.Split('|')[0] -eq $env:COMPUTERNAME) { throw "This machine holds the lock with unsaved work ($held): run the interrupted command again first." }
-            if ($held) { Say "Note: $($held.Split('|')[0]) is working on the index right now; you get the last saved version." }
+            if ($held -and $held.Split('|')[0] -eq $env:COMPUTERNAME) { throw "This machine holds the lock of '$World' with unsaved work ($held): run the interrupted command again first." }
+            if ($held) { Say "Note: $($held.Split('|')[0]) is working on '$World' right now; you get the last saved version." }
+            if (-not (Test-Path $Master)) { throw "World '$World' has no index in the shared folder yet: index it first (launcher 3 or 7)." }
             Copy-MasterToLocal
             Copy-Item $SharedConfig $LocalConfig -Force
             $th = Join-Path $Shared 'thesaurus.toml'
             if (Test-Path $th) { Copy-Item $th (Join-Path $Local 'thesaurus.toml') -Force }  # search synonyms
-            $reg = Join-Path $Shared 'register.csv'
-            if (Test-Path $reg) { Copy-Item $reg (Join-Path $Local 'register.csv') -Force }  # machine register
+            $reg = Join-Path $SharedWorld 'register.csv'
+            if (Test-Path $reg) { Copy-Item $reg (Join-Path $LocalWorld 'register.csv') -Force }  # machine register
             # Build the vector cache and facets now, so Claude's first question is fast.
             Say 'Preparing the search cache (about 30-60 s) ...'
-            Invoke-Native $Py @('-c', "from dmx_docs.config import load_config; from dmx_docs.tools import DocTools; DocTools(load_config(r'$LocalConfig')).search('warm-up', limit=1)") -AllowFail
-            Invoke-Native $Py @('-m', 'dmx_docs.cli', '--config', $LocalConfig, 'status') -AllowFail
-            $snippet = @{ mcpServers = @{ 'dmx-docs' = @{ command = $Py; args = @('-m', 'dmx_docs.cli', '--config', $LocalConfig, 'serve') } } } | ConvertTo-Json -Depth 5
+            Invoke-Native $Py @('-c', "from dmx_docs.config import load_config; from dmx_docs.tools import DocTools; DocTools(load_config(r'$LocalConfig', world='$World')).search('warm-up', limit=1)") -AllowFail
+            Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $LocalConfig) + $WorldArgs + @('status')) -AllowFail
+            $name = if ($World -eq 'projects') { 'dmx-docs' } else { "dmx-$World" }
+            $serverArgs = @('-m', 'dmx_docs.cli', '--config', $LocalConfig) + $WorldArgs + @('serve')
+            $snippet = @{ mcpServers = @{ $name = @{ command = $Py; args = $serverArgs } } } | ConvertTo-Json -Depth 5
             Say "Claude Desktop configuration for this machine:`n$snippet"
         }
-        'status' { Assert-Env; Invoke-Native $Py @('-m', 'dmx_docs.cli', '--config', $SharedConfig, 'status') -AllowFail }
-        'search' { Assert-Env; Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig, 'search') + $Rest) -AllowFail }
+        'status' { Assert-Env; Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $WorldArgs + @('status')) -AllowFail }
+        'search' { Assert-Env; Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $WorldArgs + @('search') + $Rest) -AllowFail }
         'unlock' {
             $held = Get-LockInfo
-            if (-not $held) { Say 'Not locked.' }
+            if (-not $held) { Say "Not locked ($World)." }
             elseif (-not $Force) { Say "Locked by: $held`nRun again with -Force to remove the lock (only if that machine is no longer working on it)." }
-            else { Exit-Lock; Say "Lock removed (was: $held)." }
+            else { Exit-Lock; Say "Lock of '$World' removed (was: $held)." }
         }
     }
 } finally {
