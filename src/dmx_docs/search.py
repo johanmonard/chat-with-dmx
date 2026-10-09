@@ -18,6 +18,7 @@ from .config import Config
 log = logging.getLogger("dmx_docs.search")
 
 RRF_K = 60
+THESAURUS_WEIGHT = 0.5  # weight of the thesaurus-expanded keyword list in the fusion
 MAX_PER_DOC = 3
 BLOCK_ROWS = 131072
 # Vectors are stored as float16; below this size they are kept in RAM as
@@ -359,16 +360,22 @@ class Searcher:
         qvec = None
         self.last_expanded = []
         if mode in ("hybrid", "keyword"):
-            use = self.cfg.expand_synonyms if expand is None else expand
-            ranked["keyword"] = self.keyword(con, query, 100, clauses, params, expand=use)
+            ranked["keyword"] = self.keyword(con, query, 100, clauses, params)
+            if self.cfg.expand_synonyms if expand is None else expand:
+                # The user's own words keep their ranking; the thesaurus only adds a second,
+                # lower-weighted list (equal-weight synonyms diluted the query in tests).
+                expanded = self.keyword(con, query, 100, clauses, params, expand=True)
+                if self.last_expanded:
+                    ranked["thesaurus"] = expanded
         if mode in ("hybrid", "semantic"):
             ranked["semantic"], qvec = self.semantic(con, query, 2000 if filtered else 100)
 
         fused: dict[int, float] = {}
         sources: dict[int, list[str]] = {}
         for name, ids in ranked.items():
+            weight = THESAURUS_WEIGHT if name == "thesaurus" else 1.0
             for rank, cid in enumerate(ids):
-                fused[cid] = fused.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
+                fused[cid] = fused.get(cid, 0.0) + weight / (RRF_K + rank + 1)
                 sources.setdefault(cid, []).append(name)
         if not fused:
             return []
