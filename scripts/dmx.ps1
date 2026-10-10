@@ -16,6 +16,7 @@ Shared folder layout (this script lives in <shared>\app\scripts):
                               register.csv (projects: machine register)
   <shared>\models\            embedding model, copied to each machine once
   <shared>\tools\uv.exe       builds the local Python environment (no admin rights needed)
+  <shared>\tools\tessdata\    OCR language files (copied to each machine)
   <shared>\logs\              one log per run
 
 Commands. All but setup and migrate work on one world: -World <name>, or the world's name as
@@ -157,7 +158,11 @@ function Publish-Models {
 function Sync-Tessdata {
     # OCR language files (a few MB each): mirrored from the shared folder when they change.
     if (Test-Path (Join-Path $SharedTessdata '*.traineddata')) {
-        robocopy $SharedTessdata $LocalTessdata *.traineddata /MIR /NFL /NDL /NJH /NP | Out-Null
+        robocopy $SharedTessdata $LocalTessdata *.traineddata /MIR /R:2 /W:5 /NFL /NDL /NJH /NP | Out-Null
+        $copied = $LASTEXITCODE   # robocopy: 0 = up to date, bit 1 = files copied, 2-7 = extras/mismatches, 8+ = failures
+        if ($copied -ge 8) { Say "WARNING: could not copy the OCR language files (robocopy exit code $copied); OCR may be unavailable." }
+        elseif ($copied -band 1) { Say 'OCR language files updated from the shared folder.' }
+        $global:LASTEXITCODE = 0   # a robocopy code is not a step's exit code: nothing later may mistake it for one
     }
 }
 

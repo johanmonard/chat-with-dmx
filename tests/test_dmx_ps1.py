@@ -277,6 +277,28 @@ def test_language_files_are_copied_to_the_machine(ready):
     r = run(shared, local, "update", "-World", "projects", env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     assert (local / "tessdata" / "fra.traineddata").read_bytes() == b"model"
+    assert "OCR language files updated from the shared folder." in r.stdout   # said on the first copy ...
+    again = run(shared, local, "update", "-World", "projects", env=env)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert "OCR language files" not in again.stdout                           # ... and not when nothing changed
+    (td / "fra.traineddata").write_bytes(b"newer model")
+    changed = run(shared, local, "update", "-World", "projects", env=env)
+    assert "OCR language files updated from the shared folder." in changed.stdout
+    assert (local / "tessdata" / "fra.traineddata").read_bytes() == b"newer model"
+
+
+def test_language_files_that_cannot_be_copied_are_a_warning_not_a_failed_step(ready):
+    shared, local, env = ready
+    td = shared / "tools" / "tessdata"
+    td.mkdir(parents=True)
+    (td / "fra.traineddata").write_bytes(b"model")
+    (local / "tessdata").write_bytes(b"a file where the folder should be")   # robocopy cannot copy into it
+    r = run(shared, local, "update", "-World", "projects", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr               # robocopy's code is not the step's exit code
+    assert "WARNING: could not copy the OCR language files (robocopy exit code " in r.stdout
+    assert "OCR may be unavailable." in r.stdout
+    assert "Done. The 'projects' index in the shared folder is up to date and unlocked." in r.stdout
+    assert "Stopped" not in r.stdout
 
 
 def test_ocr_command_runs_locked_for_one_world(ready):
