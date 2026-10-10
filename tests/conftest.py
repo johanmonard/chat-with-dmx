@@ -115,3 +115,11 @@ def corpus_copy(corpus, tmp_path):
     dst = tmp_path / "corpus"
     shutil.copytree(corpus, dst)
     return dst
+
+
+@pytest.fixture
+def fake_ollama():
+    from fake_ollama import FakeOllama
+
+    with FakeOllama() as server:
+        yield server
