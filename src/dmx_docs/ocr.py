@@ -176,6 +176,37 @@ class OcrStats:
                 f"(photos, drawings), {self.failed} failed")
 
 
+def _failed(job: Job, status: str, message: str) -> list[tuple[int, str, str]]:
+    return [(p, status, message) for p in job.pages]
+
+
+def _read_alone(job: Job, options: dict) -> list[tuple[int, str, str]]:
+    """Read a job in a process of its own, giving up after STALL_S. A job that was in flight when a
+    worker crashed is recorded as an error only if it crashes (or hangs) alone too."""
+    from .indexer import _MP, _terminate_pool
+
+    solo = ProcessPoolExecutor(max_workers=1, mp_context=_MP)
+    try:
+        try:
+            fut = solo.submit(read_pages, job.path, job.pages, options)
+        except BrokenProcessPool:
+            return _failed(job, "error", "OCR worker crashed")
+        deadline = time.perf_counter() + STALL_S
+        while True:
+            done, _ = wait([fut], timeout=1)  # short steps: Ctrl+C stays responsive
+            if done:
+                try:
+                    return fut.result()
+                except BrokenProcessPool:
+                    return _failed(job, "error", "OCR worker crashed")
+                except Exception as e:  # noqa: BLE001
+                    return _failed(job, "error", f"{type(e).__name__}: {e}"[:300])
+            if time.perf_counter() > deadline:
+                return _failed(job, "timeout", f"no result within {STALL_S // 60} min")
+    finally:
+        _terminate_pool(solo)
+
+
 def run_ocr(cfg, max_minutes: float | None = None, retry: bool = False, progress=print) -> OcrStats:
     from .indexer import _MP, _terminate_pool
 
@@ -227,41 +258,56 @@ def run_ocr(cfg, max_minutes: float | None = None, retry: bool = False, progress
 
     executor = new_pool()
     pending: dict = {}
+    suspects: list[Job] = []  # in flight when a worker crashed: any of them may be the culprit
     started = last_progress = last_done = time.perf_counter()
+
+    def collect(fut) -> None:
+        job = pending.pop(fut)
+        try:
+            results = fut.result()
+        except BrokenProcessPool:
+            suspects.append(job)  # the culprit and its healthy neighbours fail alike: read each alone later
+            return
+        except Exception as e:  # noqa: BLE001
+            results = _failed(job, "error", f"{type(e).__name__}: {e}"[:300])
+        save(job, results)
+
+    def replace_broken_pool() -> None:
+        nonlocal executor
+        done, left = wait(list(pending), timeout=30)  # the other jobs of a broken pool fail the same way
+        for fut in done:
+            collect(fut)
+        for fut in left:
+            suspects.append(pending.pop(fut))
+        _terminate_pool(executor)
+        executor = new_pool()
+
     try:
         while queue or pending:
-            while queue and len(pending) < workers * 2 and not (deadline and time.perf_counter() > deadline):
-                if getattr(executor, "_broken", False):
-                    _terminate_pool(executor)
-                    executor = new_pool()
+            if getattr(executor, "_broken", False):
+                replace_broken_pool()
+            # At most one job per worker: every pending job is really running, none waits behind another.
+            while queue and len(pending) < workers and not (deadline and time.perf_counter() > deadline):
                 job = queue.pop(0)
-                pending[executor.submit(read_pages, job.path, job.pages, options)] = job
+                try:
+                    fut = executor.submit(read_pages, job.path, job.pages, options)
+                except BrokenProcessPool:  # a worker died just now
+                    replace_broken_pool()
+                    fut = executor.submit(read_pages, job.path, job.pages, options)
+                pending[fut] = job
             if not pending:
                 break  # time limit reached
             done, _ = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
             for fut in done:
-                job = pending.pop(fut)
-                try:
-                    results = fut.result()
-                except BrokenProcessPool:
-                    results = [(p, "error", "OCR worker crashed") for p in job.pages]
-                except Exception as e:  # noqa: BLE001
-                    results = [(p, "error", f"{type(e).__name__}: {e}"[:300]) for p in job.pages]
-                save(job, results)
+                collect(fut)
+            if done:
                 last_done = time.perf_counter()
-            if not done and time.perf_counter() - last_done > STALL_S:
-                # The jobs a worker has taken are stuck; the ones still waiting for a worker never started.
-                taken = [f for f in pending if f.running()] or list(pending)
+            elif time.perf_counter() - last_done > STALL_S:
                 progress(f"WARNING: no OCR job finished for {STALL_S // 60} min; restarting the workers. "
-                         "Probably stuck: " + "; ".join(pending[f].path for f in taken))
-                waiting = []
-                for fut in list(pending):
-                    job = pending.pop(fut)
-                    if fut in taken:
-                        save(job, [(p, "timeout", f"no result within {STALL_S // 60} min") for p in job.pages])
-                    else:
-                        waiting.append(job)
-                queue[:0] = waiting
+                         "Probably stuck: " + "; ".join(j.path for j in pending.values()))
+                for job in pending.values():
+                    save(job, _failed(job, "timeout", f"no result within {STALL_S // 60} min"))
+                pending.clear()
                 _terminate_pool(executor)
                 executor = new_pool()
                 last_done = time.perf_counter()
@@ -271,6 +317,14 @@ def run_ocr(cfg, max_minutes: float | None = None, retry: bool = False, progress
                 progress(f"  {stats.pages}/{total} pages ({rate:.1f}/s, "
                          f"~{(total - stats.pages) / max(rate, 1e-6) / 3600:.1f} h remaining)")
                 last_progress = now
+        if suspects:
+            progress(f"A worker crashed: the {len(suspects)} jobs it may have been reading are read again "
+                     f"one by one ({STALL_S // 60} min max each).")
+            log.warning("worker crash, read again alone: %s", "; ".join(j.path for j in suspects))
+        while suspects and not (deadline and time.perf_counter() > deadline):
+            job = suspects.pop(0)
+            progress(f"  reading alone: {job.path}")
+            save(job, _read_alone(job, options))
     except KeyboardInterrupt:
         progress("Interrupted - the pages read so far are saved.")
         raise
@@ -281,7 +335,8 @@ def run_ocr(cfg, max_minutes: float | None = None, retry: bool = False, progress
             os.environ.pop("OMP_THREAD_LIMIT", None)
         else:
             os.environ["OMP_THREAD_LIMIT"] = omp_before
-    if queue:
-        progress(f"Time limit reached: {sum(len(j.pages) for j in queue)} pages left for the next run.")
+    left = queue + suspects
+    if left:
+        progress(f"Time limit reached: {sum(len(j.pages) for j in left)} pages left for the next run.")
     progress(f"OCR done in {(time.perf_counter() - started) / 60:.1f} min: {stats.summary()}")
     return stats

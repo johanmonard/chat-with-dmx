@@ -1,6 +1,8 @@
 import os
-import threading
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from pathlib import Path
 
 import pytest
 
@@ -298,33 +300,161 @@ def test_replaced_ocr_chunks_lose_their_vectors_and_the_vector_cache_is_dropped(
     con.close()
 
 
-@needs_tesseract
-def test_stalled_jobs_are_timed_out_and_the_ones_still_waiting_are_read_again(scans, monkeypatch):
-    cfg, _ = scans
-    cfg.workers = 1                                  # scan.pdf takes the only worker, mixed.pdf waits
-    release = threading.Event()
+REAL_READ_PAGES = ocr.read_pages
 
-    def fake_read(path, pages, options):
-        if path.endswith("scan.pdf"):
-            release.wait(60)                         # stuck in its worker
-            return []
-        return [(p, "empty", "") for p in pages]
 
-    monkeypatch.setattr(ocr, "read_pages", fake_read)
-    monkeypatch.setattr(ocr, "ProcessPoolExecutor", lambda max_workers, mp_context: ThreadPoolExecutor(max_workers))
-    monkeypatch.setattr(ocr, "STALL_S", 0.5)
-    said = []
-    try:
-        stats = ocr.run_ocr(cfg, progress=said.append)
-    finally:
-        release.set()
-    assert any("WARNING" in s for s in said)
-    assert (stats.pages, stats.empty, stats.failed) == (3, 1, 2)
+def crashing_read(path, pages, options):
+    """Simulates a scan that makes the OCR library crash the whole worker process. The two jobs
+    shake hands through flag files, so the healthy neighbour is always in flight when the worker
+    dies, however long the processes take to start."""
+    base = os.environ["DMX_TEST_CRASH_FLAGS"]
+    started, crashing = Path(base + ".started"), Path(base + ".crashing")
+
+    def wait_for(flag):
+        for _ in range(600):
+            if flag.exists():
+                return
+            time.sleep(0.05)
+
+    if path.endswith("scan.pdf"):
+        wait_for(started)                      # the neighbour has its job
+        crashing.write_text("crash")
+        os._exit(1)
+    started.write_text("started")
+    wait_for(crashing)                         # the other worker is about to die
+    time.sleep(1)
+    return REAL_READ_PAGES(path, pages, options)
+
+
+def ocr_rows(cfg):
     con = store.connect(cfg.db_path)
     rows = {(r[0], r[1]): r[2] for r in con.execute(
         "SELECT d.name, o.page_no, o.status FROM ocr_pages o JOIN docs d ON d.id = o.doc_id")}
     con.close()
-    assert rows == {("scan.pdf", 1): "timeout", ("scan.pdf", 2): "timeout", ("mixed.pdf", 2): "empty"}
+    return rows
+
+
+def hanging_read(path, pages, options):
+    """A scan that makes its worker hang for good; every other document is answered at once."""
+    if path.endswith("scan.pdf"):
+        time.sleep(600)
+    return [(p, "empty", "") for p in pages]
+
+
+@needs_tesseract
+def test_stall_records_the_stuck_job_as_timeout_restarts_the_pool_and_goes_on(scans, monkeypatch):
+    """Through the real spawn pool: a job queued behind a stuck one already reports running() there,
+    so the run keeps at most one job per worker in flight and a stall only ever hits jobs that run."""
+    cfg, _ = scans
+    cfg.workers = 1                                  # scan.pdf takes the only worker
+    monkeypatch.setattr(ocr, "read_pages", hanging_read)
+    monkeypatch.setattr(ocr, "STALL_S", 5)           # mixed.pdf, read by the new pool, answers well within
+    said = []
+    stats = ocr.run_ocr(cfg, progress=said.append)
+    assert len([s for s in said if "WARNING" in s]) == 1
+    assert (stats.pages, stats.empty, stats.failed) == (3, 1, 2)
+    assert ocr_rows(cfg) == {("scan.pdf", 1): "timeout", ("scan.pdf", 2): "timeout", ("mixed.pdf", 2): "empty"}
+
+
+@needs_tesseract
+def test_worker_crash_only_marks_the_culprit(scans, monkeypatch, tmp_path):
+    cfg, _ = scans
+    monkeypatch.setenv("DMX_TEST_CRASH_FLAGS", str(tmp_path / "flag"))
+    monkeypatch.setattr(ocr, "read_pages", crashing_read)
+    said = []
+    stats = ocr.run_ocr(cfg, progress=said.append)
+    assert (stats.pages, stats.text, stats.failed) == (3, 1, 2)
+    assert ocr_rows(cfg) == {("scan.pdf", 1): "error", ("scan.pdf", 2): "error", ("mixed.pdf", 2): "text"}
+    assert any("alone" in s and "scan.pdf" in s for s in said)
+    assert "OCR done" in said[-1]
+    con = store.connect(cfg.db_path)
+    assert "crashed" in con.execute("SELECT error FROM ocr_pages WHERE page_no = 1").fetchone()[0]
+    con.close()
+    # --retry reads the culprit again, alone, and the run still ends
+    assert ocr.run_ocr(cfg, retry=True, progress=quiet).failed == 2
+
+
+@needs_tesseract
+@pytest.mark.parametrize("workers", [1, 2])
+def test_jobs_in_flight_when_a_worker_dies_are_read_again_one_by_one(scans, monkeypatch, workers):
+    """When a worker dies every job in flight fails alike: the healthy ones are not errors."""
+    cfg, _ = scans
+    cfg.workers = workers
+    pools = []
+
+    class Pool(ThreadPoolExecutor):                  # stands in for the process pool
+        def __init__(self, max_workers, dying):
+            super().__init__(max_workers)
+            self.dying = dying
+
+        def submit(self, fn, *args, **kwargs):
+            if not self.dying:
+                return super().submit(fn, *args, **kwargs)
+            fut = Future()                           # the first pool: a worker died, its jobs fail
+            fut.set_exception(BrokenProcessPool("A child process terminated abruptly"))
+            self._broken = "a worker died"
+            return fut
+
+    def new_pool(max_workers, mp_context):
+        pools.append(Pool(max_workers, dying=not pools))
+        return pools[-1]
+
+    def fake_read(path, pages, options):
+        if path.endswith("scan.pdf"):
+            raise BrokenProcessPool("crashes alone too")
+        return [(p, "text", "Texte lu sans incident") for p in pages]
+
+    monkeypatch.setattr(ocr, "read_pages", fake_read)
+    monkeypatch.setattr(ocr, "ProcessPoolExecutor", new_pool)
+    said = []
+    stats = ocr.run_ocr(cfg, progress=said.append)
+    assert (stats.pages, stats.text, stats.failed) == (3, 1, 2)
+    assert ocr_rows(cfg) == {("scan.pdf", 1): "error", ("scan.pdf", 2): "error", ("mixed.pdf", 2): "text"}
+    alone = [s for s in said if "alone" in s]
+    assert any("scan.pdf" in s for s in alone)
+    assert any("mixed.pdf" in s for s in alone) == (workers == 2)    # in flight with the culprit, or not
+
+
+@needs_tesseract
+def test_a_worker_dying_while_jobs_are_submitted_does_not_abort_the_run(scans, monkeypatch):
+    cfg, _ = scans
+    pools = []
+
+    class Pool(ThreadPoolExecutor):                  # the first pool is broken from its first submit on
+        def submit(self, fn, *args, **kwargs):
+            if len(pools) == 1:
+                raise BrokenProcessPool("a worker died")
+            return super().submit(fn, *args, **kwargs)
+
+    def new_pool(max_workers, mp_context):
+        pools.append(Pool(max_workers))
+        return pools[-1]
+
+    monkeypatch.setattr(ocr, "read_pages", lambda path, pages, options: [(p, "empty", "") for p in pages])
+    monkeypatch.setattr(ocr, "ProcessPoolExecutor", new_pool)
+    stats = ocr.run_ocr(cfg, progress=quiet)
+    assert (stats.pages, stats.empty) == (3, 3) and len(pools) == 2
+
+
+@needs_tesseract
+def test_ctrl_c_during_a_solo_read_stops_promptly(scans, monkeypatch, tmp_path):
+    cfg, _ = scans
+    monkeypatch.setenv("DMX_TEST_CRASH_FLAGS", str(tmp_path / "flag"))
+    real_wait = ocr.wait
+
+    def interrupt_solo_wait(fs, timeout=None, **kwargs):
+        if timeout == 1 and "return_when" not in kwargs:     # the 1 s steps of a solo read
+            raise KeyboardInterrupt
+        return real_wait(fs, timeout=timeout, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(ocr, "read_pages", crashing_read)
+        m.setattr(ocr, "wait", interrupt_solo_wait)
+        with pytest.raises(KeyboardInterrupt):
+            ocr.run_ocr(cfg, progress=quiet)
+    rows = ocr_rows(cfg)
+    assert not [k for k in rows if k[0] == "scan.pdf"]       # a suspect is not recorded before it is read
+    assert ocr.run_ocr(cfg, progress=quiet).pages == 3 - len(rows)
 
 
 @needs_tesseract
