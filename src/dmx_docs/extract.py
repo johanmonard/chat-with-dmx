@@ -86,6 +86,8 @@ def extract_file(path: str, options: dict | None = None) -> Extracted:
             return extract_pptx(fs)
         if ext == ".ppt":
             return extract_ppt(path, options.get("doc_converter", "auto"), options.get("libreoffice_path"))
+        if ext == ".md":
+            return extract_md(fs)
         return Extracted(status="skipped", error=f"unsupported extension {ext}")
     except Exception as e:  # corrupt or unreadable files must not stop the run
         return Extracted(status="error", error=f"{type(e).__name__}: {e}"[:500])
@@ -654,3 +656,49 @@ def pptx_pictures(path: str) -> list[list[tuple[bytes, str]]]:
                 pictures.append((blob, ext))
         slides.append(pictures)
     return slides
+
+
+# ---------------------------------------------------------------- Markdown
+
+_MD_IMAGE = re.compile(r"!\[([^\]]*)\]\(([^)]*)\)")
+_MD_TITLE = re.compile(r'^(.*?)\s+"[^"]*"$')   # ![alt](path "title")
+
+
+def _md_caption(alt: str) -> str:
+    return alt.strip().lstrip("\U0001F5BC").strip()  # the manual prefixes captions with a picture emoji
+
+
+def md_pictures(text: str) -> list[tuple[str, str]]:
+    """Pictures of a Markdown text in document order: [(caption, link target)]."""
+    out = []
+    for alt, target in _MD_IMAGE.findall(text):
+        target = target.strip()
+        m = _MD_TITLE.match(target)
+        out.append((_md_caption(alt), m.group(1) if m else target))
+    return out
+
+
+def md_text(text: str) -> str:
+    """Markdown as indexed text: each picture link becomes a numbered marker with its caption
+    ('[Image 3: Dessus de la Paloma]'), so the link targets are not indexed and Claude can ask
+    view_page for picture N."""
+    count = 0
+
+    def marker(m: re.Match) -> str:
+        nonlocal count
+        count += 1
+        caption = _md_caption(m.group(1))
+        return f"[Image {count}: {caption}]" if caption else f"[Image {count}]"
+
+    return _MD_IMAGE.sub(marker, text)
+
+
+def extract_md(path: str) -> Extracted:
+    with open(path, "rb") as f:
+        text = f.read().decode("utf-8-sig", errors="replace")
+    title = next((line.lstrip("#").strip() for line in text.splitlines()
+                  if line.startswith("#") and any(c.isalpha() for c in line)), None)
+    body = clean_text(md_text(text))
+    if not body:
+        return Extracted(status="empty", n_pages=1, title=title)
+    return Extracted(status="ok", pages=[(1, body)], n_pages=1, title=title)

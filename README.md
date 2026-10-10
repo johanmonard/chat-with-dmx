@@ -288,6 +288,10 @@ folder, or the `DMX_DOCS_CONFIG` environment variable).
   pages follow Word's last saved page breaks when available), `.doc` converted to `.docx`.
   Extraction runs in several processes. A file that crashes a worker is retried alone and
   marked as an error.
+* Markdown (`.md`, the machine manual): one file = one page; picture links become numbered
+  markers (`[Image 3: caption]`) and `view_page`/`export_image` with `image=3` show or save that
+  picture (absolute `O:/...` links are resolved through the PC's drive mapping or rebuilt from the
+  indexed root folder).
 * PowerPoint: python-pptx, one slide = one page (titles, text, tables, speaker notes); .ppt converted to .pptx first.
   PowerPoint files are indexed only when `.pptx` and/or `.ppt` are in `extensions`
   (see `[worlds.marketing]` in config.example.toml).

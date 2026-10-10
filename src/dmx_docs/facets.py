@@ -171,14 +171,28 @@ def compute_marketing(path: str, root: str) -> dict:
     return {}
 
 
-RULES = {"projects": compute, "marketing": compute_marketing}
+_LANGUAGE = re.compile(r"_(FR|DE|EN|ES|IT)(?=_|$)")
+
+
+def compute_documentation(path: str, root: str) -> dict:
+    """Machine manual: the category is the chapter folder (1000_Introduction, 6000_Entretien...)
+    and the language comes from the file name (..._FR_V00.md)."""
+    out = compute_marketing(path, root)
+    m = _LANGUAGE.search(os.path.splitext(os.path.basename(path))[0])
+    if m:
+        out["language"] = m.group(1)
+    return out
+
+
+RULES = {"projects": compute, "marketing": compute_marketing, "documentation": compute_documentation}
+PROFILE_VERSIONS = {"marketing": MARKETING_FACETS_VERSION, "documentation": 1}
 
 
 def _version(profile: str) -> str:
     # Projects keeps the plain number stored before worlds existed: nothing is recomputed.
     if profile == "projects":
         return str(FACETS_VERSION)
-    return f"{profile}:{MARKETING_FACETS_VERSION if profile == 'marketing' else 1}"
+    return f"{profile}:{PROFILE_VERSIONS.get(profile, 1)}"
 
 
 TABLE = """
@@ -190,11 +204,13 @@ CREATE TABLE IF NOT EXISTS doc_facets (
     doc_type      TEXT,
     facet_source  TEXT,
     subproject    TEXT,
-    category      TEXT
+    category      TEXT,
+    language      TEXT
 );
 CREATE INDEX IF NOT EXISTS doc_facets_project ON doc_facets(project COLLATE NOCASE);
 """
-COLUMNS = ("doc_id", "project", "collection", "section", "doc_type", "facet_source", "subproject", "category")
+COLUMNS = ("doc_id", "project", "collection", "section", "doc_type", "facet_source", "subproject", "category",
+           "language")
 
 
 def refresh(con, roots: list[str], profile: str = "projects") -> int:
@@ -208,6 +224,8 @@ def refresh(con, roots: list[str], profile: str = "projects") -> int:
         con.execute("ALTER TABLE doc_facets ADD COLUMN subproject TEXT")  # tables from version 1
     if "category" not in cols:
         con.execute("ALTER TABLE doc_facets ADD COLUMN category TEXT")  # tables from before worlds
+    if "language" not in cols:
+        con.execute("ALTER TABLE doc_facets ADD COLUMN language TEXT")  # tables from before documentation
     if store.get_meta(con, "facets_version") != _version(profile):
         con.execute("DELETE FROM doc_facets")
         store.set_meta(con, "facets_version", _version(profile))

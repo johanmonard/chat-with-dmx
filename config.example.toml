@@ -83,7 +83,8 @@ max_read_chars = 40000
 # (default: projects). Without [worlds] tables there is a single index directly in data_dir
 # (the shared-folder launchers, dmx.ps1, still need at least a [worlds.projects] table).
 # profile: 'projects' (project folders, machine register), 'marketing' (category = first
-# folder) or 'none'. A world may set its own extensions, exclude and roots (first-run seed).
+# folder), 'documentation' (category = chapter folder, language from _FR/_DE/_EN in the file
+# name) or 'none'. A world may set its own extensions, exclude and roots (first-run seed).
 # [worlds.projects]
 # title = "Projects"
 # profile = "projects"
@@ -93,6 +94,13 @@ max_read_chars = 40000
 # profile = "marketing"
 # extensions = ['.pdf', '.docx', '.doc', '.pptx', '.ppt']
 # roots = ['\\server\share\Marketing']
+#
+# [worlds.documentation]
+# title = "Documentation"
+# profile = "documentation"
+# extensions = ['.md', '.pdf', '.docx', '.doc']
+# exclude = ['~$*', '.*', 'OldVersions', 'VersionPrécédente*', 'PourDémonstrationMarkdown']
+# roots = ['\\server\share\DOC_Machines\Source']
 
 # OCR of scanned PDF pages (`dmx-docs ocr`, part of launcher 7). Uses the Tesseract engine built
 # into PyMuPDF; only the language files are needed (tessdata_best from

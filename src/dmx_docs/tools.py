@@ -18,7 +18,7 @@ from .extract import extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
 
 TYPE_LABEL = {".pdf": "PDF", ".docx": "Word", ".doc": "Word 97-2003",
-              ".pptx": "PowerPoint", ".ppt": "PowerPoint 97-2003"}
+              ".pptx": "PowerPoint", ".ppt": "PowerPoint 97-2003", ".md": "Markdown"}
 SLIDE_EXTS = (".pptx", ".ppt")
 
 # Query/passage cosine similarity with multilingual-e5-large, calibrated on the indexed
@@ -212,6 +212,57 @@ def _slide_picture_raw(fs: str, path: str, slide: int, image: int | None,
     return data, ext, k, len(pictures), n
 
 
+def resolve_md_link(target: str, md_path: str, roots: list[str]) -> str | None:
+    """File a Markdown picture link points to, or None. The machine manual uses absolute drive
+    paths (O:/ASA/.../Source/...): tried through this PC's drive mapping, then rebuilt from an
+    indexed root folder whose last folder names appear in the link (drives differ between PCs)."""
+    import urllib.parse
+
+    t = urllib.parse.unquote(target.strip()).replace("/", "\\")
+    candidates: list[str] = []
+    if re.match(r"^[A-Za-z]:\\", t):
+        candidates.append(sources.to_unc(t))
+        low = t.lower()
+        for root in roots:
+            parts = [p for p in root.rstrip("\\").split("\\") if p]
+            for n in range(min(3, len(parts)), 0, -1):
+                tail = "\\" + "\\".join(parts[-n:]).lower() + "\\"
+                i = low.find(tail)
+                if i >= 0:
+                    candidates.append(root.rstrip("\\") + "\\" + t[i + len(tail):])
+                    break
+    elif t.startswith("\\\\"):
+        candidates.append(t)
+    else:
+        candidates.append(os.path.normpath(os.path.join(os.path.dirname(md_path), t)))
+    return next((c for c in candidates if os.path.isfile(store.fs_path(c))), None)
+
+
+def _md_picture_raw(fs: str, path: str, image: int | None, cfg: Config) -> tuple[bytes, str, int, int, str]:
+    """Original bytes of the image-th picture linked from a Markdown file:
+    (data, extension, number, pictures in the file, caption)."""
+    from .extract import PICTURE_EXTS, md_pictures
+
+    with open(fs, "rb") as f:
+        pictures = md_pictures(f.read().decode("utf-8-sig", errors="replace"))
+    if not pictures:
+        raise ValueError("No picture in this Markdown file")
+    k = 1 if image is None else int(image)
+    if not 1 <= k <= len(pictures):
+        raise ValueError(f"image must be between 1 and {len(pictures)}")
+    caption, target = pictures[k - 1]
+    found = resolve_md_link(target, path, cfg.roots)
+    if found is None:
+        raise FileNotFoundError(f"Picture {k} of {path} not found: {target}")
+    if not cfg.allows(store.path_key(found)):
+        raise ValueError(f"Picture {k} is outside the indexed folders: {found}")
+    ext = os.path.splitext(found)[1].lower()
+    if ext not in PICTURE_EXTS:
+        raise ValueError(f"Picture {k} cannot be shown ({ext or 'no extension'}): {found}")
+    with open(store.fs_path(found), "rb") as f:
+        return f.read(), ext, k, len(pictures), caption
+
+
 def _date(ts: float | None) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else "?"
 
@@ -229,7 +280,7 @@ def _size(n: int | None) -> str:
 def _page_label(ext: str) -> str:
     if ext in SLIDE_EXTS:
         return "slide"
-    return "page" if ext == ".pdf" else "page (approx.)"
+    return "page" if ext in (".pdf", ".md") else "page (approx.)"
 
 
 def _units(ext: str) -> str:
@@ -306,12 +357,14 @@ class DocTools:
                modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
                project: str | None = None, doc_type: str | None = None, section: str | None = None,
                collection: str | None = None, machine: str | None = None, expand: bool | None = None,
-               client: str | None = None, country: str | None = None, category: str | None = None) -> str:
+               client: str | None = None, country: str | None = None, category: str | None = None,
+               language: str | None = None) -> str:
         if mode not in ("hybrid", "keyword", "semantic"):
             raise ValueError("mode must be 'hybrid', 'keyword' or 'semantic'")
         limit = max(1, min(int(limit), 30))
         facet_filter = {"project": project, "doc_type": doc_type, "section": section, "collection": collection,
-                        "machine": machine, "client": client, "country": country, "category": category}
+                        "machine": machine, "client": client, "country": country, "category": category,
+                        "language": language}
         con = self._con()
         try:
             if folder:
@@ -360,13 +413,19 @@ class DocTools:
         return "\n".join(lines).rstrip()
 
     def _facets(self, con, doc_ids: set[int]) -> dict[int, str]:
-        """One line per document: project / collection / section / type (projects) or category."""
+        """One line per document: project / collection / section / type (projects), category
+        (marketing), category and language (documentation)."""
         if not doc_ids or self.cfg.profile == "none":
             return {}
         ids = list(doc_ids)
-        if self.cfg.profile == "marketing":
-            return {r["doc_id"]: f"category {r['category'] or 'unknown'}" for r in con.execute(
-                f"SELECT doc_id, category FROM doc_facets WHERE doc_id IN ({','.join('?' * len(ids))})", ids)}
+        if self.cfg.profile in ("marketing", "documentation"):
+            out = {}
+            for r in con.execute(f"SELECT * FROM doc_facets WHERE doc_id IN ({','.join('?' * len(ids))})", ids):
+                line = f"category {r['category'] or 'unknown'}"
+                if self.cfg.profile == "documentation":
+                    line += f" · language {r['language'] or 'unknown'}"
+                out[r["doc_id"]] = line
+            return out
         out = {}
         machine_cache: dict[str, str] = {}
         for r in con.execute(f"SELECT * FROM doc_facets WHERE doc_id IN ({','.join('?' * len(ids))})", ids):
@@ -409,8 +468,14 @@ class DocTools:
             data, fmt, w, h = _scaled_picture(raw, pic_ext)
             return (f"{path} — picture {k} of {total} on slide {page}/{n}, {w}x{h} px. Use image=N for "
                     "the others (whole slides cannot be shown, only their pictures)."), data, fmt
+        if ext == ".md":
+            raw, pic_ext, k, total, caption = _md_picture_raw(fs, path, image, self.cfg)
+            data, fmt, w, h = _scaled_picture(raw, pic_ext)
+            label = f' "{caption}"' if caption else ""
+            return (f"{path} — picture {k} of {total}{label} (the [Image {k}] marker in the text), "
+                    f"{w}x{h} px. Use image=N for the others."), data, fmt
         raise ValueError(f"Pictures of {TYPE_LABEL.get(ext, ext)} files cannot be shown "
-                         "(only PDF pages and pictures in .docx and PowerPoint files).")
+                         "(only PDF pages and pictures in .docx, PowerPoint and Markdown files).")
 
     # -------------------------------------------------------- export_image
     def export_image(self, path: str, page: int = 1, region: str | None = None,
@@ -435,9 +500,12 @@ class DocTools:
         elif ext in SLIDE_EXTS:
             data, out_ext, k, total, _ = _slide_picture_raw(fs, path, int(page), image, self.cfg.extract_options())
             default, what = f"{stem}_s{int(page)}_img{k}", f"picture {k} of {total} on slide {page}"
+        elif ext == ".md":
+            data, out_ext, k, total, _ = _md_picture_raw(fs, path, image, self.cfg)  # original file
+            default, what = f"{stem}_img{k}", f"picture {k} of {total}"
         else:
-            raise ValueError(f"Images can only be exported from PDF pages and pictures in .docx and "
-                             f"PowerPoint files, not {ext}")
+            raise ValueError(f"Images can only be exported from PDF pages and pictures in .docx, "
+                             f"PowerPoint and Markdown files, not {ext}")
         folder = self.cfg.export_dir or default_export_dir(self.cfg)
         os.makedirs(folder, exist_ok=True)
         base = _safe_name(name) if name else default

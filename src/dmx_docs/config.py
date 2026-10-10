@@ -12,7 +12,7 @@ from pathlib import Path
 DEFAULT_EXCLUDES = ["~$*", ".*", "$RECYCLE.BIN", "System Volume Information"]
 WORLD_NAME = re.compile(r"[a-z0-9_-]+")
 # Facet rules, MCP tools and server instructions of a world (see facets.py and server.py).
-PROFILES = ("projects", "marketing", "none")
+PROFILES = ("projects", "marketing", "documentation", "none")
 
 
 def _default_workers() -> int:

@@ -114,11 +114,39 @@ check codes, numbers and names with view_page before quoting them.
 """
 
 
+DOCUMENTATION_INSTRUCTIONS = """\
+Read-only access to the STANDARD machine manual of Demaurex (robotic packaging lines: Paloma,
+Presto, Hector, Delfi, Astor, Nestor, conveyors, vision, Gemini HMI), in French, German and
+English. Each search hit shows its category = the manual chapter (0000_Page de garde,
+1000_Introduction, 2000_Sécurité, 3000_Instruction de commande, 4000_Interface opérateur,
+5000_Descriptions fonctionnelles, 6000_Entretien, 7000_Appendice) and its language (FR, DE, EN).
+Most sections exist in several languages: search with language= set to the user's language (fr by
+default; de or en when the user writes German or English), and repeat without the filter if a
+section is missing in that language. Each project's own, customised manual is in the project
+documentation (the projects' 8_Documentation folders, another world): this manual is the
+generic reference.
+
+Never answer from the first search alone:
+1. REFORMULATE the question into 2-4 queries (precise terms, synonyms, module names); filter with
+   category= when the chapter is obvious (maintenance -> 6000_Entretien, safety -> 2000_Sécurité).
+2. RETRIEVE with `search`; read the best sections in full with `read_document`.
+3. Sections contain picture markers like [Image 3: Dessus de la Paloma]: show or check a picture
+   with `view_page` (image=3), save it for a presentation with `export_image` (image=3).
+4. RETRY with other words or another language if coverage is thin, at most 3 rounds.
+5. SYNTHESIZE in the user's language, only from what you read, citing full path (and image
+   numbers when you rely on a picture). State clearly what was not found.
+Hits marked (OCR) come from scanned pages read by OCR: the text can contain recognition errors -
+check codes, numbers and names with view_page before quoting them.
+"""
+
+
 def instructions_for(cfg: Config) -> str:
     if cfg.profile == "projects":
         return INSTRUCTIONS
     if cfg.profile == "marketing":
         return MARKETING_INSTRUCTIONS
+    if cfg.profile == "documentation":
+        return DOCUMENTATION_INSTRUCTIONS
     return GENERIC_INSTRUCTIONS.format(title=cfg.world_title or cfg.world)
 
 
@@ -355,6 +383,30 @@ def build_server(cfg: Config) -> MCPServer:
         return tools.search(query, folder=folder, file_type=file_type, modified_after=modified_after,
                             limit=limit, mode=mode, expand=expand)
 
+    def documentation_search(query: str, folder: str | None = None, file_type: str | None = None,
+                             modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
+                             category: str | None = None, language: str | None = None,
+                             expand: bool | None = None) -> str:
+        """Search the standard machine manual by meaning and keywords. Returns excerpts with file
+        path, how each one matched and its meaning similarity to the query (strong >= 0.86, medium
+        0.83-0.86, weak < 0.83 = often off topic), and each section's chapter and language.
+
+        Args:
+            query: What to look for (any language). "double quotes" for exact phrases, word* for prefixes.
+            folder: Optional folder path to restrict the search to (includes subfolders).
+            file_type: Optional 'md' (manual sections), 'pdf' or 'docx' (procedures).
+            modified_after: Optional date (YYYY, YYYY-MM or YYYY-MM-DD).
+            limit: Number of results (1-30, default 10). At most 3 excerpts per document.
+            mode: 'hybrid' (default), 'keyword' or 'semantic'.
+            category: Optional manual chapter(s), comma-separated, e.g. "6000_Entretien",
+                "1000_Introduction", "2000_Sécurité", "5000_Descriptions fonctionnelles".
+            language: Optional language(s), comma-separated: fr, de, en. Use the user's language;
+                repeat without it if a section is missing in that language.
+            expand: Widen the keyword part with the company thesaurus. Default: as configured.
+        """
+        return tools.search(query, folder=folder, file_type=file_type, modified_after=modified_after,
+                            limit=limit, mode=mode, category=category, language=language, expand=expand)
+
     # Tools that depend on the world's profile.
     if cfg.profile == "projects":
         mcp.tool(**kw)(search)
@@ -362,6 +414,8 @@ def build_server(cfg: Config) -> MCPServer:
         mcp.tool(**kw)(project_card)
     elif cfg.profile == "marketing":
         mcp.tool(name="search", **kw)(marketing_search)
+    elif cfg.profile == "documentation":
+        mcp.tool(name="search", **kw)(documentation_search)
     else:
         mcp.tool(name="search", **kw)(plain_search)
 
