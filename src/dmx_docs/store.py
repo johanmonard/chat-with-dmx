@@ -79,6 +79,38 @@ CREATE TABLE IF NOT EXISTS ocr_pages (
     error        TEXT,
     PRIMARY KEY (doc_id, page_no)
 );
+CREATE TABLE IF NOT EXISTS picture_cache (
+    sha1          TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    version       INTEGER NOT NULL,
+    type          TEXT,
+    description   TEXT,
+    visible_text  TEXT,
+    keywords      TEXT,
+    seconds       REAL,
+    created_at    REAL,
+    PRIMARY KEY (sha1, model, version)
+);
+CREATE TABLE IF NOT EXISTS picture_docs (
+    doc_id    INTEGER PRIMARY KEY,
+    model     TEXT NOT NULL,
+    version   INTEGER NOT NULL,
+    pictures  INTEGER,
+    done_at   REAL
+);
+CREATE TABLE IF NOT EXISTS picture_uses (
+    doc_id    INTEGER NOT NULL,
+    page_no   INTEGER NOT NULL,
+    image_no  INTEGER NOT NULL,
+    sha1      TEXT,
+    status    TEXT NOT NULL,
+    type      TEXT,
+    chunk_id  INTEGER,
+    error     TEXT,
+    done_at   REAL,
+    PRIMARY KEY (doc_id, page_no, image_no)
+);
+CREATE INDEX IF NOT EXISTS picture_uses_chunk ON picture_uses(chunk_id);
 """
 
 
@@ -127,6 +159,24 @@ def set_meta(con: sqlite3.Connection, key: str, value) -> None:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
 
 
+def has_table(con: sqlite3.Connection, name: str) -> bool:
+    """True if the index has this table (copies made by older versions may not)."""
+    return con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)).fetchone() is not None
+
+
+def delete_chunks(con: sqlite3.Connection, ids: list[int]) -> bool:
+    """Remove chunks (with their FTS entries and vectors). True if vectors were removed."""
+    if not ids:
+        return False
+    marks = ",".join("?" * len(ids))
+    rows = con.execute(f"SELECT id, text FROM chunks WHERE id IN ({marks})", ids).fetchall()
+    con.executemany("INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', ?, ?)",
+                    [(r[0], r[1]) for r in rows])
+    cur = con.execute(f"DELETE FROM vectors WHERE chunk_id IN ({marks})", ids)
+    con.execute(f"DELETE FROM chunks WHERE id IN ({marks})", ids)
+    return cur.rowcount > 0
+
+
 def bump_vector_version(con: sqlite3.Connection) -> None:
     # A random token, not a counter: index copies moved between machines must never
     # match a stale vector cache that happens to have the same counter value.
@@ -136,6 +186,8 @@ def bump_vector_version(con: sqlite3.Connection) -> None:
 def delete_doc_content(con: sqlite3.Connection, doc_id: int) -> bool:
     """Remove a document's chunks, FTS entries and vectors. Returns True if vectors were removed."""
     con.execute("DELETE FROM ocr_pages WHERE doc_id=?", (doc_id,))  # read again after re-extraction
+    con.execute("DELETE FROM picture_uses WHERE doc_id=?", (doc_id,))  # described again after re-extraction
+    con.execute("DELETE FROM picture_docs WHERE doc_id=?", (doc_id,))  # (from the cache: no model call)
     rows = con.execute("SELECT id, text FROM chunks WHERE doc_id=?", (doc_id,)).fetchall()
     if not rows:
         return False

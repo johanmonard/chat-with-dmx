@@ -61,6 +61,14 @@ class Config:
     ocr_languages: str = "fra"
     ocr_dpi: int = 300
     ocr_tessdata: str | None = None
+    # Picture descriptions by a local vision model (describe.py, vision.py).
+    vision_enabled: bool = True
+    vision_url: str = "http://127.0.0.1:11434"   # the Ollama on this machine: pictures are sent only there
+    vision_model: str = "gemma4:12b"
+    vision_timeout_s: float = 180
+    vision_min_side: int = 150                   # smaller pictures (icons, bullets) are not described
+    vision_pdf_picture_share: float = 0.15       # a PDF page with text is described when pictures cover this share
+    vision_parallel_requests: int = 1
 
     def __post_init__(self) -> None:
         self.extensions = [e.lower() if e.startswith(".") else "." + e.lower() for e in self.extensions]
@@ -139,7 +147,7 @@ class Config:
 def load_config(path: str | os.PathLike, world: str | None = None) -> Config:
     """Read config.toml. When it has [worlds.<name>] tables, one world is used: `world`, else
     $DMX_DOCS_WORLD, else 'projects'. A world table may set title, profile, extensions, exclude,
-    roots (first-run seed) and register; all other settings are shared by every world."""
+    roots (first-run seed), register, ocr and vision; all other settings are shared by every world."""
     path = Path(path)
     with open(path, "rb") as f:
         raw = tomllib.load(f)
@@ -217,4 +225,13 @@ def load_config(path: str | os.PathLike, world: str | None = None) -> Config:
             kwargs[attr] = ocr[key]
     if name and "ocr" in w:  # a world can switch OCR off
         kwargs["ocr_enabled"] = bool(w["ocr"])
+    vis = raw.get("vision", {})
+    for key, attr in (("enabled", "vision_enabled"), ("url", "vision_url"), ("model", "vision_model"),
+                      ("timeout_s", "vision_timeout_s"), ("min_side", "vision_min_side"),
+                      ("pdf_picture_share", "vision_pdf_picture_share"),
+                      ("parallel_requests", "vision_parallel_requests")):
+        if key in vis:
+            kwargs[attr] = vis[key]
+    if name and "vision" in w:  # a world can switch picture descriptions off
+        kwargs["vision_enabled"] = bool(w["vision"])
     return Config(**kwargs)

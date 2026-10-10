@@ -129,25 +129,12 @@ def read_pages(path: str, pages: list[int], options: dict) -> list[tuple[int, st
     return out
 
 
-def _delete_chunks(con, ids: list[int]) -> bool:
-    """Remove chunks (with their FTS entries and vectors). True if vectors were removed."""
-    if not ids:
-        return False
-    marks = ",".join("?" * len(ids))
-    rows = con.execute(f"SELECT id, text FROM chunks WHERE id IN ({marks})", ids).fetchall()
-    con.executemany("INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', ?, ?)",
-                    [(r[0], r[1]) for r in rows])
-    cur = con.execute(f"DELETE FROM vectors WHERE chunk_id IN ({marks})", ids)
-    con.execute(f"DELETE FROM chunks WHERE id IN ({marks})", ids)
-    return cur.rowcount > 0
-
-
 def save_page(con, doc_id: int, page_no: int, status: str, text: str) -> bool:
     """Record one page read by OCR and append its text as chunks. Replaces only the chunks a
     previous OCR of this page added. Returns True if vectors were removed."""
     old = con.execute("SELECT chunk_ids FROM ocr_pages WHERE doc_id = ? AND page_no = ?",
                       (doc_id, page_no)).fetchone()
-    removed = _delete_chunks(con, [int(i) for i in (old[0] or "").split(",") if i]) if old else False
+    removed = store.delete_chunks(con, [int(i) for i in (old[0] or "").split(",") if i]) if old else False
     ids: list[int] = []
     if status == "text":
         count, last_seq = con.execute("SELECT count(*), max(seq) FROM chunks WHERE doc_id = ? AND page_no = ?",
