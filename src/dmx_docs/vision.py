@@ -7,11 +7,16 @@ answers with a fixed JSON structure (Ollama structured output), checked and capp
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+
+# No proxy, ever: a proxy configured in Windows or the environment must neither receive the pictures
+# nor make the local Ollama look unreachable.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 DESCRIBE_VERSION = 1   # bump when the prompt or the passage format changes: every picture is described again
 TYPES = ("photo", "schéma", "capture d'écran", "dessin technique", "graphique", "tableau",
@@ -73,14 +78,14 @@ class Description:
 def _post(url: str, body: dict, timeout: float) -> dict:
     req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with _OPENER.open(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
 def unavailable(url: str, model: str) -> str | None:
     """Why the model cannot be used now (Ollama not answering, model not installed), or None."""
     try:
-        with urllib.request.urlopen(url.rstrip("/") + "/api/tags", timeout=10) as r:
+        with _OPENER.open(url.rstrip("/") + "/api/tags", timeout=10) as r:
             names = {m.get("name") for m in json.loads(r.read().decode("utf-8")).get("models", [])}
     except Exception as e:  # noqa: BLE001 - not running, refused, wrong address
         return (f"Ollama does not answer at {url} ({type(e).__name__}: {e}). Start Ollama on this "
@@ -145,9 +150,12 @@ def describe_image(url: str, model: str, image: bytes, context: str, timeout: fl
         if isinstance(e.reason, TimeoutError):
             raise VisionError(f"no answer within {timeout:.0f} s", timeout=True) from None
         raise VisionError(f"Ollama not reachable at {url}: {e.reason}") from None
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, http.client.HTTPException) as e:  # e.g. IncompleteRead, invalid JSON body
         raise VisionError(f"{type(e).__name__}: {e}"[:200]) from None
-    desc = parse(((out or {}).get("message") or {}).get("content") or "")
+    message = out.get("message") if isinstance(out, dict) else None
+    if not isinstance(message, dict):
+        raise VisionError("unexpected answer from Ollama: " + json.dumps(out)[:200])
+    desc = parse(message.get("content") or "")
     desc.seconds = time.perf_counter() - started
     return desc
 
@@ -160,9 +168,13 @@ def unload(url: str, model: str) -> None:
         pass
 
 
-def passage_text(desc: Description, marker: str, file_name: str | None = None) -> str:
-    """The searchable passage of one picture occurrence ('[Image 3 — photo] ...')."""
-    first = f"[{marker} — {desc.type}] " + (f"Fichier : {file_name}. " if file_name else "") + desc.description
+def passage_text(desc: Description, marker: str, file_name: str | None = None, folders: str | None = None) -> str:
+    """The searchable passage of one picture occurrence ('[Image 3 — photo] ...'). A picture file's
+    passage starts with its name and its two parent folders, which are searchable too."""
+    where = ""
+    if file_name:
+        where = f"Fichier : {file_name}" + (f" (dossiers : {folders})" if folders else "") + ". "
+    first = f"[{marker} — {desc.type}] " + where + desc.description
     lines = [first, "Texte visible : " + (desc.visible_text or "—")]
     if desc.keywords:
         lines.append("Mots-clés : " + ", ".join(desc.keywords))

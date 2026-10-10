@@ -15,6 +15,7 @@ import hashlib
 import os
 import re
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,18 +43,16 @@ class Prepared:
 
 
 def scale_picture(raw: bytes, max_px: int) -> tuple[bytes, int, int]:
-    """A picture as JPEG (PNG when it has transparency), at most max_px on its longer side, and its
-    original width and height. CMYK and other colour spaces are converted to RGB."""
+    """A picture as a JPEG of at most max_px on its longer side, as a viewer shows it (turned by its
+    EXIF orientation, transparency on white, CMYK in RGB, as view_page does), and its original width
+    and height in pixels."""
     pix = pymupdf.Pixmap(raw)
     w, h = pix.width, pix.height
-    if pix.colorspace is None or pix.colorspace.n not in (1, 3):
-        pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
-    if max(w, h) > max_px:
-        zoom = max_px / max(w, h)
-        pix = pymupdf.Pixmap(pix, max(1, round(w * zoom)), max(1, round(h * zoom)), None)
-    if pix.alpha:
-        return pix.tobytes("png"), w, h
-    return pix.tobytes("jpg", jpg_quality=90), w, h
+    with pymupdf.open(stream=raw) as doc:
+        page = doc[0]
+        zoom = min(max_px, max(w, h)) / max(page.rect.width, page.rect.height)
+        shown = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+    return shown.tobytes("jpg", jpg_quality=90), w, h
 
 
 def _clip(text: str, limit: int = CONTEXT_CHARS) -> str:
@@ -152,9 +151,12 @@ def picture_share(page, min_side: int) -> float:
 def is_picture_page(page, native_chars: int, ocr_chars: int | None, options: dict) -> bool:
     """With a text layer: pictures cover at least pdf_picture_share of the page (brochure photos,
     diagrams). Without: OCR found less than TEXT_PAGE_CHARS (posters, photos, drawings; a scanned
-    letter or form is left to OCR); OCR not run or off counts as no OCR text."""
+    letter or form is left to OCR). A page OCR has not read yet waits for it when OCR is on (OCR
+    then makes describe look at the document again); with OCR off it counts as no OCR text."""
     if native_chars >= MIN_PAGE_CHARS:
         return picture_share(page, options["min_side"]) >= options["pdf_picture_share"]
+    if ocr_chars is None and options.get("ocr_on"):
+        return False
     return (ocr_chars or 0) < TEXT_PAGE_CHARS
 
 
@@ -190,6 +192,12 @@ def _picture_file(job: dict, options: dict) -> list[Prepared]:
 def prepare_document(job: dict, options: dict) -> list[Prepared]:
     """All picture occurrences of one document. A document that cannot be opened gives one
     Prepared(0, 0, 'error')."""
+    crash = os.environ.get("DMX_DOCS_TEST_CRASH_SUFFIX")  # tests: a document that kills its worker process
+    if crash and job["path"].endswith(crash):
+        os._exit(3)
+    hang = os.environ.get("DMX_DOCS_TEST_HANG_SUFFIX")    # tests: a document that never finishes
+    if hang and job["path"].endswith(hang):
+        time.sleep(3600)
     ext = job["ext"]
     try:
         if ext == ".md":

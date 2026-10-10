@@ -34,6 +34,8 @@ DOC_EXTS = (".md", ".docx", ".pptx", ".ppt", ".pdf") + PICTURE_EXTS
 PROGRESS_EVERY_S = 15
 STALL_S = 600                 # a document whose pictures are not ready after this long is stuck
 MAX_FAILED_CALLS_IN_A_ROW = 20
+MAX_FAILED_DOCS_IN_A_ROW = 20  # documents that cannot be read at all, in a row: the file share is probably gone
+EMPTY_WITH_PICTURES = (".md", ".docx", ".pptx", ".ppt")  # without text they are 'empty', but may hold pictures
 MAX_PREP_WORKERS = 4          # preparing pictures is light; the GPU is the bottleneck
 PAGE_TEXT_CHARS = 2000        # indexed text per page passed to the workers (context uses 800)
 
@@ -46,19 +48,25 @@ def unavailable(cfg) -> str | None:
 
 
 def prep_options(cfg) -> dict:
+    from . import ocr
+
     return {"roots": list(cfg.roots), "excluded_dirs": list(cfg.excluded_dirs), "min_side": cfg.vision_min_side,
             "pdf_picture_share": cfg.vision_pdf_picture_share, "max_pdf_pages": cfg.max_pdf_pages,
-            "doc_converter": cfg.doc_converter, "libreoffice_path": cfg.libreoffice_path}
+            "doc_converter": cfg.doc_converter, "libreoffice_path": cfg.libreoffice_path,
+            "ocr_on": ocr.unavailable(cfg) is None}
 
 
 def candidates(con, cfg, retry: bool = False) -> list[int]:
     """Documents to handle: never handled with this model and DESCRIBE_VERSION, or (retry) with
-    occurrences that failed or timed out."""
+    occurrences that failed or timed out. Word, PowerPoint and Markdown files without text
+    ('empty') are included: a cover page or a diagram is all pictures."""
     marks = ",".join("?" * len(DOC_EXTS))
+    empty = ",".join("?" * len(EMPTY_WITH_PICTURES))
     ids = [r[0] for r in con.execute(
-        f"""SELECT d.id FROM docs d WHERE d.ext IN ({marks}) AND d.status IN ('ok', 'no_text')
+        f"""SELECT d.id FROM docs d WHERE d.ext IN ({marks})
+            AND (d.status IN ('ok', 'no_text') OR (d.status = 'empty' AND d.ext IN ({empty}) AND d.size > 0))
             AND NOT EXISTS (SELECT 1 FROM picture_docs p WHERE p.doc_id = d.id AND p.model = ? AND p.version = ?)
-            ORDER BY d.id""", (*DOC_EXTS, cfg.vision_model, vision.DESCRIBE_VERSION))]
+            ORDER BY d.id""", (*DOC_EXTS, *EMPTY_WITH_PICTURES, cfg.vision_model, vision.DESCRIBE_VERSION))]
     if retry:
         seen = set(ids)
         ids += [r[0] for r in con.execute(
@@ -118,6 +126,14 @@ def _cached(con, cfg, sha1s) -> dict[str, vision.Description]:
     return out
 
 
+def cache_description(con, cfg, sha1: str, d: vision.Description) -> None:
+    """Keep a new description (the caller owns the transaction)."""
+    con.execute("""INSERT OR REPLACE INTO picture_cache(sha1, model, version, type, description, visible_text,
+                   keywords, seconds, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (sha1, cfg.vision_model, vision.DESCRIBE_VERSION, d.type, d.description, d.visible_text,
+                 json.dumps(d.keywords, ensure_ascii=False), d.seconds, time.time()))
+
+
 def save_document(con, cfg, job: dict, prepared: list[Prepared], described: dict) -> bool:
     """Record one document: new cache rows, its occurrences and their passages (replacing the
     passages of an earlier run), and its picture_docs row. `described` maps sha1 to a Description
@@ -126,15 +142,15 @@ def save_document(con, cfg, job: dict, prepared: list[Prepared], described: dict
     now = time.time()
     for sha1, d in described.items():
         if isinstance(d, vision.Description) and d.seconds:  # new from the model (cached ones have 0 s)
-            con.execute("""INSERT OR REPLACE INTO picture_cache(sha1, model, version, type, description, visible_text,
-                           keywords, seconds, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (sha1, cfg.vision_model, vision.DESCRIBE_VERSION, d.type, d.description, d.visible_text,
-                         json.dumps(d.keywords, ensure_ascii=False), d.seconds, now))
+            cache_description(con, cfg, sha1, d)
     old = [r[0] for r in con.execute("SELECT chunk_id FROM picture_uses WHERE doc_id = ? AND chunk_id IS NOT NULL",
                                      (doc_id,))]
     removed = store.delete_chunks(con, old)
     con.execute("DELETE FROM picture_uses WHERE doc_id = ?", (doc_id,))
-    file_name = os.path.basename(job["path"]) if job["ext"] in PICTURE_EXTS else None
+    file_name = folders = None
+    if job["ext"] in PICTURE_EXTS:
+        parts = os.path.normpath(job["path"]).split(os.sep)
+        file_name, folders = parts[-1], " / ".join(parts[-3:-1])
     added = False
     for p in prepared:
         status, kind, chunk_id, error = p.status, None, None, p.error
@@ -148,7 +164,7 @@ def save_document(con, cfg, job: dict, prepared: list[Prepared], described: dict
                     status = "described"
                     count, last_seq = con.execute("SELECT count(*), max(seq) FROM chunks WHERE doc_id = ? AND page_no = ?",
                                                   (doc_id, p.page_no)).fetchone()
-                    text = ("\n\n" if count else "") + vision.passage_text(d, marker(p.image_no), file_name)
+                    text = ("\n\n" if count else "") + vision.passage_text(d, marker(p.image_no), file_name, folders)
                     cur = con.execute("INSERT INTO chunks(doc_id, page_no, seq, text) VALUES(?, ?, ?, ?)",
                                       (doc_id, p.page_no, (last_seq + 1) if count else 0, text))
                     con.execute("INSERT INTO chunks_fts(rowid, text) VALUES(?, ?)", (cur.lastrowid, text))
@@ -161,7 +177,8 @@ def save_document(con, cfg, job: dict, prepared: list[Prepared], described: dict
                        error, done_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (doc_id, p.page_no, p.image_no, p.sha1, status, kind, chunk_id, error, now))
     if added:
-        con.execute("UPDATE docs SET status = 'ok', error = NULL WHERE id = ? AND status = 'no_text'", (doc_id,))
+        con.execute("UPDATE docs SET status = 'ok', error = NULL WHERE id = ? AND status IN ('no_text', 'empty')",
+                    (doc_id,))
     con.execute("INSERT OR REPLACE INTO picture_docs(doc_id, model, version, pictures, done_at) VALUES(?, ?, ?, ?, ?)",
                 (doc_id, cfg.vision_model, vision.DESCRIBE_VERSION, len(prepared), now))
     return removed
@@ -182,11 +199,45 @@ class DescribeStats:
 
 
 def _call(cfg, image: bytes, context: str) -> vision.Description:
-    """One description, tried twice (a timeout or an invalid answer is often a one-off)."""
+    """One description, tried twice (a timeout or an invalid answer is often a one-off). Any error,
+    also an unexpected one, comes back as a VisionError: one picture must never stop the run."""
+    for attempt in (1, 2):
+        try:
+            return vision.describe_image(cfg.vision_url, cfg.vision_model, image, context, cfg.vision_timeout_s)
+        except vision.VisionError:
+            if attempt == 2:
+                raise
+        except Exception as e:  # noqa: BLE001
+            if attempt == 2:
+                raise vision.VisionError(f"{type(e).__name__}: {e}"[:200]) from None
+    raise AssertionError("unreachable")
+
+
+def _prepare_alone(job: dict, options: dict) -> list[Prepared] | str:
+    """Prepare one document in a process of its own, after a worker crashed: its pictures, or
+    'crashed' / 'hung' when it is the culprit (a crash takes every document in flight with it)."""
+    from .indexer import _MP, _terminate_pool
+
+    solo = ProcessPoolExecutor(max_workers=1, mp_context=_MP)
     try:
-        return vision.describe_image(cfg.vision_url, cfg.vision_model, image, context, cfg.vision_timeout_s)
-    except vision.VisionError:
-        return vision.describe_image(cfg.vision_url, cfg.vision_model, image, context, cfg.vision_timeout_s)
+        try:
+            fut = solo.submit(prepare_document, job, options)
+        except BrokenProcessPool:
+            return "crashed"
+        deadline = time.perf_counter() + STALL_S
+        while True:
+            done, _ = wait([fut], timeout=1)  # short steps: Ctrl+C stays responsive
+            if done:
+                try:
+                    return fut.result()
+                except BrokenProcessPool:
+                    return "crashed"
+                except Exception as e:  # noqa: BLE001
+                    return [Prepared(0, 0, "error", error=f"{type(e).__name__}: {e}"[:300])]
+            if time.perf_counter() > deadline:
+                return "hung"
+    finally:
+        _terminate_pool(solo)
 
 
 def run_describe(cfg, max_minutes: float | None = None, retry: bool = False, progress=print) -> DescribeStats:
@@ -199,7 +250,7 @@ def run_describe(cfg, max_minutes: float | None = None, retry: bool = False, pro
         progress("Picture descriptions skipped.")
         return stats
     con = store.connect(cfg.db_path)
-    con.isolation_level = None  # explicit transactions, one per document
+    con.isolation_level = None  # explicit transactions: one per document, one per new description
     queue = candidates(con, cfg, retry)
     if not queue:
         progress("No picture to describe.")
@@ -210,49 +261,96 @@ def run_describe(cfg, max_minutes: float | None = None, retry: bool = False, pro
     progress(f"{total} documents to examine for pictures ({workers} workers, model {cfg.vision_model}).")
     options = prep_options(cfg)
     deadline = time.perf_counter() + max_minutes * 60 if max_minutes else None
-    calls = ThreadPoolExecutor(max_workers=max(1, int(cfg.vision_parallel_requests)))
-    failed_in_a_row = 0
-    last_error = ""
+    width = max(1, int(cfg.vision_parallel_requests))
+    calls = ThreadPoolExecutor(max_workers=width)
+    failed_in_a_row = 0          # model calls
+    failed_docs_in_a_row = 0     # documents that could not be read at all
+    last_error = last_doc_error = ""
+    unfinished = 0               # documents left for the next run in the middle of their pictures
+    suspects: list[dict] = []    # in flight when a worker crashed: prepared again one by one
     # Pictures that failed in this run are not sent again for the next documents that use them (the FR, DE
     # and EN pages of the manual share theirs: a slow picture would cost two timeouts per page); --retry does.
     failed_here: dict[str, vision.VisionError] = {}
 
-    def new_pool() -> ProcessPoolExecutor:
-        return ProcessPoolExecutor(max_workers=workers, mp_context=_MP)
+    def past_deadline() -> bool:
+        return bool(deadline) and time.perf_counter() > deadline
 
-    def save(job: dict, prepared: list[Prepared], described: dict) -> None:
+    def too_many_failures() -> bool:
+        return failed_in_a_row >= MAX_FAILED_CALLS_IN_A_ROW or failed_docs_in_a_row >= MAX_FAILED_DOCS_IN_A_ROW
+
+    def stopped() -> bool:
+        return too_many_failures() or past_deadline()
+
+    def write(fn) -> None:
         con.execute("BEGIN IMMEDIATE")
         try:
-            if save_document(con, cfg, job, prepared, described):
-                store.bump_vector_version(con)
+            fn()
             con.execute("COMMIT")
         except BaseException:
             con.execute("ROLLBACK")
             raise
+
+    def save(job: dict, prepared: list[Prepared], described: dict) -> None:
+        def fn():
+            if save_document(con, cfg, job, prepared, described):
+                store.bump_vector_version(con)
+        write(fn)
         stats.documents += 1
 
+    def doc_failed(job: dict, status: str, message: str) -> None:
+        """The whole document failed (unreadable, crashed, hung). Its passages of an earlier run are kept.
+        An error is tried again by the next run; a hang ('timeout') costs STALL_S, so only with --retry."""
+        nonlocal failed_docs_in_a_row, last_doc_error
+
+        def fn():
+            con.execute("""INSERT OR REPLACE INTO picture_uses(doc_id, page_no, image_no, status, error, done_at)
+                           VALUES(?, 0, 0, ?, ?, ?)""", (job["doc_id"], status, message, time.time()))
+            if status == "timeout":
+                con.execute("""INSERT OR REPLACE INTO picture_docs(doc_id, model, version, pictures, done_at)
+                               VALUES(?, ?, ?, NULL, ?)""",
+                            (job["doc_id"], cfg.vision_model, vision.DESCRIBE_VERSION, time.time()))
+        write(fn)
+        stats.failed += 1
+        failed_docs_in_a_row += 1
+        last_doc_error = message
+        log.info("document %s: %s (%s)", status, job["path"], message)
+
     def handle(job: dict, prepared: list[Prepared]) -> None:
-        nonlocal failed_in_a_row, last_error
+        nonlocal failed_in_a_row, last_error, failed_docs_in_a_row, unfinished
+        whole = [p for p in prepared if p.page_no == 0]
+        if whole:
+            doc_failed(job, "error", whole[0].error or "cannot be read")
+            return
+        failed_docs_in_a_row = 0
         ready = [p for p in prepared if p.status == "ready"]
         described: dict = _cached(con, cfg, {p.sha1 for p in ready})
-        todo = {}
+        todo: dict[str, Prepared] = {}
         for p in ready:
             if p.sha1 in failed_here:
                 described[p.sha1] = failed_here[p.sha1]
             elif p.sha1 not in described and p.sha1 not in todo:
                 todo[p.sha1] = p
-        futures = {sha1: calls.submit(_call, cfg, p.image, p.context) for sha1, p in todo.items()}
-        for sha1, fut in futures.items():
-            try:
-                described[sha1] = fut.result()
+        pending_calls = list(todo.items())
+        while pending_calls:
+            if stopped():  # checked between the pictures of a big document too
+                unfinished += 1
+                return     # not saved: the document stays a candidate; its new descriptions are cached
+            batch, pending_calls = pending_calls[:width], pending_calls[width:]
+            futures = [(sha1, calls.submit(_call, cfg, p.image, p.context)) for sha1, p in batch]
+            for sha1, fut in futures:
+                try:
+                    d = fut.result()
+                except vision.VisionError as e:
+                    described[sha1] = failed_here[sha1] = e
+                    failed_in_a_row += 1
+                    last_error = str(e)
+                    log.info("describe failed: %s (%s)", job["path"], e)
+                    continue
+                described[sha1] = d
                 stats.described += 1
                 failed_in_a_row = 0
-            except vision.VisionError as e:
-                described[sha1] = failed_here[sha1] = e
-                failed_in_a_row += 1
-                last_error = str(e)
-                log.info("describe failed: %s (%s)", job["path"], e)
-        sent: set[str] = set()   # the first occurrence of each picture sent to the model
+                write(lambda: cache_description(con, cfg, sha1, d))  # kept even if the document is not finished
+        first_use: set[str] = set()
         for p in prepared:
             if p.status == "small":
                 stats.small += 1
@@ -265,39 +363,30 @@ def run_describe(cfg, max_minutes: float | None = None, retry: bool = False, pro
                     stats.failed += 1
                 elif d.type == vision.LOGO:
                     stats.logos += 1
-                elif p.sha1 in futures and p.sha1 not in sent:
-                    sent.add(p.sha1)
+                elif p.sha1 in todo and p.sha1 not in first_use:
+                    first_use.add(p.sha1)   # the occurrence sent to the model (counted in `described`)
                 else:
-                    stats.reused += 1   # from the cache, or a second occurrence of a picture of this document
+                    stats.reused += 1       # from the cache, or a second occurrence of a picture of this document
         save(job, prepared, described)
 
-    def too_many_failures() -> bool:
-        return failed_in_a_row >= MAX_FAILED_CALLS_IN_A_ROW
-
-    def doc_failed(job: dict, status: str, message: str) -> None:
-        """The whole document failed (worker crash, hang): one occurrence (0, 0); --retry redoes it."""
-        save(job, [Prepared(0, 0, status, error=message)], {})
-        stats.failed += 1
-
-    executor = new_pool()
+    executor = ProcessPoolExecutor(max_workers=workers, mp_context=_MP)
     pending: dict = {}   # future -> (job, submitted at)
     started = last_progress = time.perf_counter()
     try:
         while queue or pending:
-            while (queue and len(pending) < workers and not too_many_failures()
-                   and not (deadline and time.perf_counter() > deadline)):
+            while queue and len(pending) < workers and not stopped():
                 job = job_for(con, queue.pop(0))
                 if job is None:
                     continue  # deleted since the list was made
                 try:
                     fut = executor.submit(prepare_document, job, options)
-                except BrokenProcessPool:
+                except BrokenProcessPool:  # a worker died just now
                     _terminate_pool(executor)
-                    executor = new_pool()
+                    executor = ProcessPoolExecutor(max_workers=workers, mp_context=_MP)
                     fut = executor.submit(prepare_document, job, options)
                 pending[fut] = (job, time.perf_counter())
             if not pending:
-                break  # time limit reached, or stopped after too many failed calls
+                break  # time limit reached, or stopped after too many failures
             done, _ = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
             broken = False
             for fut in done:
@@ -306,7 +395,7 @@ def run_describe(cfg, max_minutes: float | None = None, retry: bool = False, pro
                     prepared = fut.result()
                 except BrokenProcessPool:
                     broken = True
-                    doc_failed(job, "error", "picture preparation crashed (this document or one prepared at the same time)")
+                    suspects.append(job)  # the culprit or a neighbour: prepared again alone below
                     continue
                 except Exception as e:  # noqa: BLE001
                     prepared = [Prepared(0, 0, "error", error=f"{type(e).__name__}: {e}"[:300])]
@@ -316,19 +405,32 @@ def run_describe(cfg, max_minutes: float | None = None, retry: bool = False, pro
             if broken or stuck:
                 for f in list(pending):
                     job, _ = pending.pop(f)
-                    if f in stuck:
+                    if f in stuck:  # each document runs in its own worker: this one is hanging
                         doc_failed(job, "timeout", f"pictures not ready within {STALL_S // 60} min")
+                    elif broken:
+                        suspects.append(job)
                     else:
-                        doc_failed(job, "error", "picture preparation crashed (this document or one prepared "
-                                                 "at the same time)")
+                        queue.insert(0, job["doc_id"])  # an innocent neighbour of a hanging document
                 _terminate_pool(executor)
-                executor = new_pool()
+                executor = ProcessPoolExecutor(max_workers=workers, mp_context=_MP)
             if now - last_progress >= PROGRESS_EVERY_S:
                 rate = stats.documents / max(now - started, 1e-6)
                 progress(f"  {stats.documents}/{total} documents, {stats.described} pictures described "
                          f"({stats.described / max((now - started) / 60, 1e-6):.0f}/min), "
                          f"~{(total - stats.documents) / max(rate, 1e-6) / 3600:.1f} h remaining")
                 last_progress = now
+        if suspects and not stopped():
+            progress(f"A worker crashed: the {len(suspects)} documents it may have been preparing are prepared "
+                     f"again one by one ({STALL_S // 60} min max each).")
+        while suspects and not stopped():
+            job = suspects.pop(0)
+            result = _prepare_alone(job, options)
+            if result == "crashed":
+                doc_failed(job, "error", "picture preparation crashed")
+            elif result == "hung":
+                doc_failed(job, "timeout", f"pictures not ready within {STALL_S // 60} min")
+            else:
+                handle(job, result)
     except KeyboardInterrupt:
         progress("Interrupted - the documents handled so far are saved.")
         raise
@@ -337,15 +439,19 @@ def run_describe(cfg, max_minutes: float | None = None, retry: bool = False, pro
         calls.shutdown(wait=False, cancel_futures=True)
         con.close()
         vision.unload(cfg.vision_url, cfg.vision_model)
-    if too_many_failures():
+    left = len(queue) + unfinished + len(suspects)
+    if failed_in_a_row >= MAX_FAILED_CALLS_IN_A_ROW:
         progress(f"{MAX_FAILED_CALLS_IN_A_ROW} calls in a row failed (last error: {last_error}). Stopped: check "
                  "Ollama, then run again; the failed pictures can be described again with --retry.")
-    elif queue:
-        progress(f"Time limit reached: {len(queue)} documents left for the next run.")
+    elif failed_docs_in_a_row >= MAX_FAILED_DOCS_IN_A_ROW:
+        progress(f"{MAX_FAILED_DOCS_IN_A_ROW} documents in a row could not be read (last error: {last_doc_error}). "
+                 "Stopped: check the file share, then run again.")
+    elif left:
+        progress(f"Time limit reached: {left} documents left for the next run.")
     progress(f"Pictures done in {(time.perf_counter() - started) / 60:.1f} min: {stats.summary()}")
     if stats.failed:
         launcher = f"dmx.ps1 describe -World {cfg.world} --retry" if cfg.world else "dmx.ps1 describe --retry"
-        progress(f"{stats.failed} pictures failed: describe them again with `dmx-docs describe --retry` "
+        progress(f"{stats.failed} pictures or documents failed: describe them again with `dmx-docs describe --retry` "
                  f"(launcher: {launcher})")
     return stats
 

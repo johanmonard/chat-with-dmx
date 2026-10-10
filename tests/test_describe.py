@@ -74,7 +74,8 @@ def test_describe_adds_one_passage_per_occurrence(world, fake_ollama):
     assert text[0].startswith("\n\n[Image 1 — photo] Photo d'un préhenseur") and text[1] == 0
     assert "Mots-clés : préhenseur, ventouses, gripper, suction cups" in text[0]
     pic = rows(cfg, "SELECT c.text, d.status FROM chunks c JOIN docs d ON d.id = c.doc_id WHERE d.name = 'Paloma_4R.png'")
-    assert pic == [("[Image 1 — photo] Fichier : Paloma_4R.png. Photo d'un préhenseur à ventouses sur un robot Delta.\n"
+    assert pic == [("[Image 1 — photo] Fichier : Paloma_4R.png (dossiers : Source / Pictures). "
+                    "Photo d'un préhenseur à ventouses sur un robot Delta.\n"
                     "Texte visible : —\nMots-clés : préhenseur, ventouses, gripper, suction cups", "ok")]
     assert len(rows(cfg, "SELECT * FROM picture_docs")) == 4
     assert "Paloma_4R.png" in DocTools(cfg).search("ventouses", mode="keyword")
@@ -211,3 +212,154 @@ def test_compare_reports_a_missing_model(world, fake_ollama, tmp_path):
                                 progress=msgs.append)
     assert any("ollama pull missing:7b" in m for m in msgs)
     assert "missing:7b" in open(path, encoding="utf-8").read()
+
+
+# ---------------------------------------------------------------- final review fixes
+
+@pytest.fixture
+def many(tmp_path, make_cfg, fake_ollama):
+    """One manual page with 5 distinct pictures."""
+    root = tmp_path / "Many"
+    (root / "img").mkdir(parents=True)
+    links = []
+    for i in range(5):
+        make_png(root / "img" / f"p{i}.png", (40 * i, 10, 10), size=(300, 200))
+        links.append(f"![P{i}](img/p{i}.png)")
+    (root / "page_FR.md").write_text("# Page\n\n" + "\n\n".join(links) + "\n", encoding="utf-8")
+    cfg = make_cfg(root, extensions=[".md"], exclude=["~$*", ".*", "img"], vision_url=fake_ollama.url,
+                   vision_model="test-vision", vision_timeout_s=5)
+    run_index(cfg, progress=quiet)
+    return cfg
+
+
+def test_stops_inside_a_document_and_keeps_what_was_described(many, fake_ollama, monkeypatch):
+    cfg = many
+    monkeypatch.setattr(describe, "MAX_FAILED_CALLS_IN_A_ROW", 2)
+    n = {"calls": 0}
+
+    def reply(body):
+        n["calls"] += 1
+        return answer() if n["calls"] <= 2 else (500, {"error": "GPU hung"})
+    fake_ollama.reply = reply
+    describe.run_describe(cfg, progress=quiet)
+    # 2 good calls, then 2 failed pictures x 2 tries; the 5th picture is not sent
+    assert len(fake_ollama.calls) == 6
+    assert rows(cfg, "SELECT count(*) FROM picture_docs")[0][0] == 0      # unfinished: still a candidate
+    assert rows(cfg, "SELECT count(*) FROM picture_cache")[0][0] == 2     # what was described is kept
+    fake_ollama.reply = lambda body: answer()
+    describe.run_describe(cfg, progress=quiet)
+    assert len(fake_ollama.calls) == 9                                      # only the 3 missing pictures
+    assert rows(cfg, "SELECT count(*) FROM picture_uses WHERE status = 'described'")[0][0] == 5
+
+
+def test_time_limit_is_checked_between_the_pictures_of_a_document(many, fake_ollama):
+    cfg = many
+    fake_ollama.delay = 1
+    msgs = []
+    describe.run_describe(cfg, max_minutes=0.05, progress=msgs.append)
+    assert len(fake_ollama.calls) < 5 and rows(cfg, "SELECT count(*) FROM picture_docs")[0][0] == 0
+    assert any("Time limit" in m for m in msgs)
+
+
+def test_a_crashing_document_does_not_fail_the_ones_prepared_with_it(world, fake_ollama, monkeypatch):
+    cfg, _ = world
+    monkeypatch.setenv("DMX_DOCS_TEST_CRASH_SUFFIX", "5120_Depileur_DE.md")
+    describe.run_describe(cfg, progress=quiet)
+    assert rows(cfg, "SELECT d.name, u.status FROM picture_uses u JOIN docs d ON d.id = u.doc_id "
+                     "WHERE u.page_no = 0") == [("5120_Depileur_DE.md", "error")]
+    done = {r[0] for r in rows(cfg, "SELECT d.name FROM picture_docs p JOIN docs d ON d.id = p.doc_id")}
+    assert done == {"5120_Depileur_FR.md", "deck.pptx", "Paloma_4R.png"}  # the crashing one is tried again next run
+
+
+def test_a_hanging_document_is_recorded_as_timeout(world, fake_ollama, monkeypatch):
+    cfg, _ = world
+    monkeypatch.setattr(describe, "STALL_S", 6)
+    monkeypatch.setenv("DMX_DOCS_TEST_HANG_SUFFIX", "deck.pptx")
+    describe.run_describe(cfg, progress=quiet)
+    assert rows(cfg, "SELECT d.name, u.status FROM picture_uses u JOIN docs d ON d.id = u.doc_id "
+                     "WHERE u.page_no = 0") == [("deck.pptx", "timeout")]
+    assert len(rows(cfg, "SELECT * FROM picture_docs")) == 4               # a hang waits for --retry
+
+
+def test_an_unreadable_document_keeps_its_passages_and_is_tried_again(world, fake_ollama):
+    cfg, root = world
+    describe.run_describe(cfg, progress=quiet)
+    fr_passages = ("SELECT count(*) FROM picture_uses u JOIN docs d ON d.id = u.doc_id "
+                   "WHERE d.name = '5120_Depileur_FR.md' AND u.chunk_id IS NOT NULL")
+    assert rows(cfg, fr_passages)[0][0] == 1
+    fake_ollama.models.append("other-vision")
+    cfg.vision_model = "other-vision"
+    md = root / "5120_Depileur_FR.md"
+    md.rename(root / "away.tmp")                                            # the share hiccups
+    describe.run_describe(cfg, progress=quiet)
+    assert rows(cfg, fr_passages)[0][0] == 1                                # the old passage is kept
+    (root / "away.tmp").rename(md)
+    describe.run_describe(cfg, progress=quiet)                              # tried again without --retry
+    assert rows(cfg, "SELECT p.model FROM picture_docs p JOIN docs d ON d.id = p.doc_id "
+                     "WHERE d.name = '5120_Depileur_FR.md'") == [("other-vision",)]
+
+
+def test_stops_after_too_many_unreadable_documents(world, fake_ollama, monkeypatch):
+    cfg, root = world
+    monkeypatch.setattr(describe, "MAX_FAILED_DOCS_IN_A_ROW", 1)
+    root.rename(root.parent / "gone")                                       # the share is gone
+    msgs = []
+    try:
+        describe.run_describe(cfg, progress=msgs.append)
+    finally:
+        (root.parent / "gone").rename(root)
+    assert any("could not be read" in m for m in msgs)
+    assert len(rows(cfg, "SELECT * FROM picture_uses WHERE page_no = 0")) <= 2   # only those in flight
+    assert rows(cfg, "SELECT count(*) FROM picture_docs")[0][0] == 0
+
+
+def test_an_unexpected_error_in_a_call_does_not_stop_the_run(world, monkeypatch):
+    cfg, _ = world
+
+    def boom(*a, **k):
+        raise RuntimeError("IncompleteRead")
+    monkeypatch.setattr(vision, "describe_image", boom)
+    stats = describe.run_describe(cfg, progress=quiet)
+    assert stats.failed == 5 and len(rows(cfg, "SELECT * FROM picture_docs")) == 4
+
+
+def test_a_word_file_with_only_pictures_is_described(tmp_path, make_cfg, fake_ollama):
+    from docx import Document
+    from docx.shared import Inches
+
+    root = tmp_path / "W"
+    root.mkdir()
+    make_png(tmp_path / "p.png", (9, 9, 9), size=(300, 200))
+    d = Document()
+    d.add_picture(str(tmp_path / "p.png"), width=Inches(2))
+    d.save(root / "cover.docx")
+    cfg = make_cfg(root, extensions=[".docx"], vision_url=fake_ollama.url, vision_model="test-vision",
+                   vision_timeout_s=5)
+    run_index(cfg, progress=quiet)
+    assert rows(cfg, "SELECT status FROM docs") == [("empty",)]
+    describe.run_describe(cfg, progress=quiet)
+    assert rows(cfg, "SELECT status FROM docs") == [("ok",)] and len(fake_ollama.calls) == 1
+
+
+def test_describe_does_not_hide_scanned_pages_from_ocr(tmp_path, make_cfg, fake_ollama):
+    from dmx_docs import ocr
+    from test_ocr import make_pdf as make_ocr_pdf
+
+    root = tmp_path / "Scans"
+    root.mkdir()
+    make_ocr_pdf(root / "scan.pdf", [("image", "Bordereau de livraison pour quarante colis")])
+    cfg = make_cfg(root, vision_url=fake_ollama.url, vision_model="test-vision", vision_timeout_s=5)
+    run_index(cfg, progress=quiet)
+    describe.run_describe(cfg, progress=quiet)        # no OCR language files in the tests: the page is described
+    con = store.connect(cfg.db_path)
+    con.isolation_level = None
+    try:
+        assert rows(cfg, "SELECT count(*) FROM picture_uses WHERE status = 'described'")[0][0] == 1
+        assert [j.pages for j in ocr.candidates(con, cfg.max_pdf_pages)] == [[1]]   # still an OCR candidate
+        doc_id = con.execute("SELECT id FROM docs").fetchone()[0]
+        con.execute("BEGIN")
+        ocr.save_page(con, doc_id, 1, "text", "Bordereau de livraison pour quarante colis")
+        con.execute("COMMIT")
+    finally:
+        con.close()
+    assert rows(cfg, "SELECT count(*) FROM picture_docs")[0][0] == 0      # examined again with the OCR text

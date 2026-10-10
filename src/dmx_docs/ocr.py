@@ -72,11 +72,14 @@ class Job:
 def candidates(con, max_pages: int, retry: bool = False) -> list[Job]:
     """PDF pages to read: fewer than MIN_PAGE_CHARS of extracted text, or read by an older
     OCR_VERSION, or (retry) failed before. Fully scanned documents first; jobs of at most
-    PAGES_PER_JOB pages of one document."""
+    PAGES_PER_JOB pages of one document. Passages written from pictures (describe.py) are not text
+    of the page: a scan described before OCR stays an OCR candidate."""
     chars: dict[tuple[int, int], int] = {}
     for d, p, n in con.execute(
             """SELECT c.doc_id, c.page_no, sum(length(c.text)) FROM chunks c JOIN docs d ON d.id = c.doc_id
-               WHERE d.ext = '.pdf' AND d.status IN ('ok', 'no_text') GROUP BY c.doc_id, c.page_no"""):
+               WHERE d.ext = '.pdf' AND d.status IN ('ok', 'no_text')
+               AND c.id NOT IN (SELECT chunk_id FROM picture_uses WHERE chunk_id IS NOT NULL)
+               GROUP BY c.doc_id, c.page_no"""):
         chars[(d, p)] = n
     redo = {"timeout", "error"} if retry else set()
     known, done = set(), set()
@@ -150,6 +153,8 @@ def save_page(con, doc_id: int, page_no: int, status: str, text: str) -> bool:
                    chunk_ids, error) VALUES(?, ?, ?, ?, ?, ?, ?, ?)""",
                 (doc_id, page_no, status, len(text) if status == "text" else 0, OCR_VERSION, time.time(),
                  ",".join(map(str, ids)) or None, text if status in ("error", "timeout") else None))
+    if status in ("text", "empty"):  # which pages are picture pages may change: describe looks again
+        con.execute("DELETE FROM picture_docs WHERE doc_id = ?", (doc_id,))
     return removed
 
 

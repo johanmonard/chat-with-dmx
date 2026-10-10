@@ -106,3 +106,12 @@ def test_every_search_tool_has_the_pictures_option_and_the_note(tmp_path, make_c
         assert "pictures" in props, profile
         assert PICTURES_NOTE in instructions_for(cfg)
     assert "pictures=true" in PICTURES_NOTE and "view_page" in PICTURES_NOTE
+
+
+def test_pictures_search_on_an_index_without_descriptions(tmp_path, make_cfg):
+    root = tmp_path / "D"
+    root.mkdir()
+    (root / "a.md").write_text("# A\n\nZorglub texte.\n", encoding="utf-8")
+    cfg = make_cfg(root, extensions=[".md"])
+    run_index(cfg, progress=quiet)            # creates the (empty) picture tables
+    assert "No picture descriptions in this index yet" in DocTools(cfg).search("Zorglub", pictures=True)

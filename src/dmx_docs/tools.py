@@ -319,6 +319,13 @@ def _picture_chunks(con, chunk_ids) -> dict[int, tuple[int, int]]:
         f"SELECT chunk_id, page_no, image_no FROM picture_uses WHERE chunk_id IN ({','.join('?' * len(ids))})", ids)}
 
 
+def _has_descriptions(con) -> bool:
+    """True if the describe step added at least one passage (the tables alone exist in every index
+    opened by this version)."""
+    return store.has_table(con, "picture_uses") and con.execute(
+        "SELECT 1 FROM picture_uses WHERE chunk_id IS NOT NULL LIMIT 1").fetchone() is not None
+
+
 def _picture_label(ext: str, page: int, image: int) -> str:
     if image == 0:
         return f" — whole-page picture (view_page page={page})"
@@ -400,7 +407,7 @@ class DocTools:
                         "language": language}
         con = self._con()
         try:
-            if pictures and not store.has_table(con, "picture_uses"):
+            if pictures and not _has_descriptions(con):
                 return "No picture descriptions in this index yet (the describe step has not run on it)."
             if folder:
                 folder, _ = self._resolve_folder(con, folder)

@@ -89,3 +89,24 @@ def test_unload_is_quiet(fake_ollama):
     vision.unload(fake_ollama.url, "test-vision")
     assert fake_ollama.unloaded == ["test-vision"]
     vision.unload(free_port_url(), "test-vision")   # no exception when Ollama is gone
+
+
+def test_requests_ignore_proxy_settings(fake_ollama, monkeypatch):
+    # A Windows/corporate proxy must never see the pictures, nor hide the local Ollama.
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "_opener", None)   # urlopen caches its opener (and the proxies) on first use
+    assert vision.unavailable(fake_ollama.url, "test-vision") is None
+    assert vision.describe_image(fake_ollama.url, "test-vision", b"x", "c", timeout=10).type == "photo"
+
+
+def test_an_answer_that_is_not_an_object_is_a_vision_error(fake_ollama):
+    fake_ollama.reply = lambda body: (200, "[1, 2]")
+    with pytest.raises(vision.VisionError):
+        vision.describe_image(fake_ollama.url, "test-vision", b"x", "c", timeout=10)
+    fake_ollama.reply = lambda body: (200, {"message": {"content": "[1, 2]"}})
+    with pytest.raises(vision.VisionError):
+        vision.describe_image(fake_ollama.url, "test-vision", b"x", "c", timeout=10)

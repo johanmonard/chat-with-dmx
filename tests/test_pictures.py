@@ -137,4 +137,33 @@ def test_scale_picture_handles_cmyk_and_transparency(tmp_path):
     assert scale_picture(cmyk.tobytes("jpg"), 1024)[1:] == (200, 200)
     alpha = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 200, 100), True)
     data, _, _ = scale_picture(alpha.tobytes("png"), 1024)
-    assert data[:4] == b"\x89PNG"
+    assert data[:2] == b"\xff\xd8" and not pymupdf.Pixmap(data).alpha       # flattened to a JPEG
+
+
+def jpeg_with_orientation(width, height, orientation):
+    """A JPEG whose EXIF says how to turn it (6 = rotate 90° clockwise to display), like phone photos."""
+    import struct
+
+    raw = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False).tobytes("jpg")
+    ifd = b"II*\x00" + struct.pack("<I", 8) + struct.pack("<H", 1) + struct.pack("<HHIHH", 0x0112, 3, 1, orientation, 0) \
+        + struct.pack("<I", 0)
+    app1 = b"Exif\x00\x00" + ifd
+    return raw[:2] + b"\xff\xe1" + struct.pack(">H", len(app1) + 2) + app1 + raw[2:]
+
+
+def test_scale_picture_follows_exif_orientation_and_flattens_transparency():
+    data, w, h = scale_picture(jpeg_with_orientation(300, 200, 6), 1024)
+    shown = pymupdf.Pixmap(data)
+    assert (w, h) == (300, 200) and (shown.width, shown.height) == (200, 300)   # turned as a viewer shows it
+    clear = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 200, 100), True)
+    clear.set_rect(clear.irect, (0, 0, 0, 0))                                 # fully transparent (black + alpha 0)
+    data, _, _ = scale_picture(clear.tobytes("png"), 1024)
+    flat = pymupdf.Pixmap(data)
+    assert not flat.alpha and min(flat.pixel(10, 10)) > 240                  # on white, as view_page shows it
+
+
+def test_pdf_page_not_yet_read_by_ocr_is_left_for_ocr(tmp_path):
+    make_picture_pdf(tmp_path / "b.pdf")
+    j = job(tmp_path / "b.pdf", ".pdf", native={1: 400, 2: 400}, ocr={3: 0})   # page 4 not read by OCR yet
+    out = by_key(prepare_document(j, dict(opts(tmp_path), ocr_on=True)))
+    assert set(out) == {(2, 0), (3, 0)}
