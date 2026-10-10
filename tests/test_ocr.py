@@ -1,6 +1,6 @@
 import os
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
@@ -51,17 +51,31 @@ MIXED_TEXT = "Texte normal du rapport Albatros avec assez de contenu pour une vr
 MIXED_SCAN = "Annexe signee Cormoran pour la validation finale de la machine"
 
 
-@pytest.fixture
-def scans(tmp_path, make_cfg):
+def build_scans(tmp_path, make_cfg, **kw):
     root = tmp_path / "Docs"
     for sub in ("Scans", "Mixed", "Text"):
         (root / sub).mkdir(parents=True)
     make_pdf(root / "Scans" / "scan.pdf", [("image", SCAN_1), ("image", SCAN_2)])
     make_pdf(root / "Mixed" / "mixed.pdf", [("text", MIXED_TEXT), ("image", MIXED_SCAN)])
     make_pdf(root / "Text" / "text.pdf", [("text", MIXED_TEXT), ("text", MIXED_TEXT)])
-    cfg = make_cfg(root, ocr_tessdata=TESSDATA)
+    cfg = make_cfg(root, **kw)
     run_index(cfg, progress=quiet)
     return cfg, root
+
+
+@pytest.fixture
+def scans(tmp_path, make_cfg):
+    return build_scans(tmp_path, make_cfg, ocr_tessdata=TESSDATA)
+
+
+@pytest.fixture
+def fake_scans(tmp_path, make_cfg):
+    """The same documents for tests whose page reader is a fake: a dummy language file stands in
+    for Tesseract's, so they run without the shared language files."""
+    tess = tmp_path / "tess"
+    tess.mkdir()
+    (tess / "fra.traineddata").write_bytes(b"x")
+    return build_scans(tmp_path, make_cfg, ocr_tessdata=str(tess))
 
 
 def doc_id(con, name):
@@ -366,7 +380,7 @@ def test_worker_crash_only_marks_the_culprit(scans, monkeypatch, tmp_path):
     assert (stats.pages, stats.text, stats.failed) == (3, 1, 2)
     assert ocr_rows(cfg) == {("scan.pdf", 1): "error", ("scan.pdf", 2): "error", ("mixed.pdf", 2): "text"}
     assert any("alone" in s and "scan.pdf" in s for s in said)
-    assert "OCR done" in said[-1]
+    assert "OCR done" in said[-2] and "2 pages failed or timed out" in said[-1]   # the run ended, with its hint
     con = store.connect(cfg.db_path)
     assert "crashed" in con.execute("SELECT error FROM ocr_pages WHERE page_no = 1").fetchone()[0]
     con.close()
@@ -395,7 +409,7 @@ def test_jobs_in_flight_when_a_worker_dies_are_read_again_one_by_one(scans, monk
             self._broken = "a worker died"
             return fut
 
-    def new_pool(max_workers, mp_context):
+    def new_pool(max_workers, mp_context, **kwargs):     # kwargs: the worker initializer, not needed by threads
         pools.append(Pool(max_workers, dying=not pools))
         return pools[-1]
 
@@ -426,7 +440,7 @@ def test_a_worker_dying_while_jobs_are_submitted_does_not_abort_the_run(scans, m
                 raise BrokenProcessPool("a worker died")
             return super().submit(fn, *args, **kwargs)
 
-    def new_pool(max_workers, mp_context):
+    def new_pool(max_workers, mp_context, **kwargs):
         pools.append(Pool(max_workers))
         return pools[-1]
 
@@ -473,3 +487,180 @@ def test_ctrl_c_stops_cleanly_and_the_next_run_goes_on(scans, monkeypatch):
     assert "Interrupted" in said[-1]
     assert os.environ.get("OMP_THREAD_LIMIT") == omp     # set for the workers only while the pool lives
     assert ocr.run_ocr(cfg, progress=quiet).pages == 3   # index not locked, nothing half saved
+
+
+# ---- memory of huge pages
+
+def test_ocr_resolution_is_lowered_for_huge_pages():
+    a4, a0 = pymupdf.Rect(0, 0, 595, 842), pymupdf.Rect(0, 0, 2384, 3370)
+    assert ocr.ocr_dpi(a4, 300) == 300                        # an ordinary page keeps the configured dpi
+    dpi = ocr.ocr_dpi(a0, 300)                                # ~140 million pixels at 300 dpi
+    assert 150 <= dpi <= 170
+    assert a0.width / 72 * dpi * a0.height / 72 * dpi <= ocr.MAX_OCR_PIXELS
+    assert ocr.ocr_dpi(pymupdf.Rect(0, 0, 14400, 14400), 300) == ocr.MIN_OCR_DPI   # never below the floor
+    assert ocr.ocr_dpi(a0, 72) == 72                          # nor above what was configured
+
+
+def make_big_scan(path):
+    """One A0-sized page: a picture (no text layer) of a few big words."""
+    src = pymupdf.open()
+    sp = src.new_page(width=2384, height=3370)
+    sp.insert_textbox(pymupdf.Rect(100, 100, 2300, 900), "Plan general ligne Gondolier\nImplantation des convoyeurs",
+                      fontsize=90)
+    png = sp.get_pixmap(dpi=100, colorspace=pymupdf.csGRAY).tobytes("png")
+    src.close()
+    doc = pymupdf.open()
+    page = doc.new_page(width=2384, height=3370)
+    page.insert_image(page.rect, stream=png)
+    doc.save(str(path), deflate=True)
+    doc.close()
+
+
+@needs_tesseract
+def test_a_huge_page_is_still_read_at_a_capped_resolution(tmp_path, monkeypatch):
+    big = tmp_path / "plan_A0.pdf"
+    make_big_scan(big)
+    used = []
+    real = pymupdf.Page.get_textpage_ocr
+
+    def spy(self, *args, **kwargs):
+        used.append(kwargs["dpi"])
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(pymupdf.Page, "get_textpage_ocr", spy)
+    out = ocr.read_pages(str(big), [1], {"languages": "fra", "dpi": 300, "tessdata": TESSDATA})
+    assert [(p, status) for p, status, _ in out] == [(1, "text")]
+    assert "Gondolier" in out[0][2] and "convoyeurs" in out[0][2]
+    assert used and ocr.MIN_OCR_DPI <= used[0] < 300       # ~2 GB of memory per page at 300 dpi
+
+
+# ---- Tesseract's console messages
+
+def noisy_read(path, pages, options):
+    """Like Tesseract, which writes its warnings straight to file descriptor 2."""
+    os.write(2, b"Line cannot be recognized!!\n")
+    return [(p, "empty", "") for p in pages]
+
+
+def test_tesseract_messages_of_the_workers_go_to_a_log_file_not_the_console(fake_scans, monkeypatch, capfd):
+    cfg, _ = fake_scans
+    cfg.workers = 1
+    monkeypatch.setattr(ocr, "read_pages", noisy_read)
+    ocr.run_ocr(cfg, progress=quiet)                      # a real spawn pool: two jobs, one worker
+    assert "cannot be recognized" not in capfd.readouterr().err
+    log = cfg.logs_dir / "ocr-tesseract.log"
+    assert log.read_text(encoding="utf-8", errors="replace").count("Line cannot be recognized!!") == 2
+
+
+def test_a_job_read_alone_logs_tesseract_messages_too(fake_scans, monkeypatch, tmp_path, capfd):
+    cfg, root = fake_scans
+    monkeypatch.setattr(ocr, "read_pages", noisy_read)
+    log = tmp_path / "somewhere" / "ocr-tesseract.log"
+    out = ocr._read_alone(ocr.Job(1, str(root / "Scans" / "scan.pdf"), [1]), {}, str(log))
+    assert out == [(1, "empty", "")]
+    assert "cannot be recognized" not in capfd.readouterr().err
+    assert "Line cannot be recognized!!" in log.read_text(encoding="utf-8", errors="replace")
+
+
+def test_real_tesseract_messages_are_redirected_too(tmp_path, capfd):
+    from dmx_docs.indexer import _MP
+
+    pdf = tmp_path / "s.pdf"
+    make_pdf(pdf, [("image", SCAN_1)])
+    log = tmp_path / "logs" / "ocr-tesseract.log"
+    pool = ProcessPoolExecutor(max_workers=1, mp_context=_MP, initializer=ocr._worker_init, initargs=(str(log),))
+    try:   # a language that does not exist: Tesseract says so on file descriptor 2 and the page is an error
+        out = pool.submit(ocr.read_pages, str(pdf), [1],
+                          {"languages": "xxx", "dpi": 100, "tessdata": str(tmp_path)}).result(timeout=120)
+    finally:
+        pool.shutdown()
+    assert [(p, status) for p, status, _ in out] == [(1, "error")]
+    assert "Failed loading language" not in capfd.readouterr().err
+    assert "Failed loading language" in log.read_text(encoding="utf-8", errors="replace")
+
+
+def test_a_log_file_that_cannot_be_opened_does_not_stop_the_worker(tmp_path, capfd):
+    blocked = tmp_path / "file"
+    blocked.write_text("not a folder")
+    saved = os.dup(2)
+    try:
+        ocr._worker_init(str(blocked / "ocr-tesseract.log"))   # its folder cannot be created
+        os.write(2, b"goes to the null device\n")
+    finally:
+        os.dup2(saved, 2)
+        os.close(saved)
+    assert "null device" not in capfd.readouterr().err         # discarded, not shown
+
+
+# ---- circuit breaker and closing summary
+
+threads = lambda max_workers, mp_context, **kwargs: ThreadPoolExecutor(max_workers)  # noqa: E731
+
+
+def failing_read(path, pages, options):
+    return [(p, "error", "OSError: share not reachable") for p in pages]
+
+
+def test_run_stops_when_jobs_keep_failing_and_the_rest_stays_a_candidate(fake_scans, monkeypatch):
+    cfg, _ = fake_scans
+    cfg.workers = 1
+    monkeypatch.setattr(ocr, "PAGES_PER_JOB", 1)                # three jobs: scan p.1, scan p.2, mixed p.2
+    monkeypatch.setattr(ocr, "MAX_FAILED_JOBS_IN_A_ROW", 2)
+    monkeypatch.setattr(ocr, "read_pages", failing_read)
+    monkeypatch.setattr(ocr, "ProcessPoolExecutor", threads)
+    said = []
+    stats = ocr.run_ocr(cfg, progress=said.append)
+    assert (stats.pages, stats.failed) == (2, 2)
+    assert ocr_rows(cfg) == {("scan.pdf", 1): "error", ("scan.pdf", 2): "error"}   # mixed.pdf: not recorded
+    stop = [s for s in said if "in a row" in s]
+    assert len(stop) == 1
+    assert "2 jobs in a row failed (last error: OSError: share not reachable)" in stop[0]
+    assert "Stopped: check the file share / language files, then run again" in stop[0]
+    assert "--retry" in stop[0]
+    assert not any("Time limit" in s for s in said)
+    con = store.connect(cfg.db_path)
+    left = {j.doc_id: j.pages for j in ocr.candidates(con, cfg.max_pdf_pages)}
+    assert left == {doc_id(con, "mixed.pdf"): [2]}              # still a candidate; the failed ones wait for --retry
+    con.close()
+
+
+def test_a_job_that_works_resets_the_count_of_failed_jobs(fake_scans, monkeypatch):
+    cfg, _ = fake_scans
+    cfg.workers = 1
+    monkeypatch.setattr(ocr, "PAGES_PER_JOB", 1)
+    monkeypatch.setattr(ocr, "MAX_FAILED_JOBS_IN_A_ROW", 2)
+
+    def sometimes_failing(path, pages, options):
+        if path.endswith("scan.pdf") and pages == [2]:
+            return [(2, "text", "Texte lu sans incident")]
+        return failing_read(path, pages, options)
+
+    monkeypatch.setattr(ocr, "read_pages", sometimes_failing)
+    monkeypatch.setattr(ocr, "ProcessPoolExecutor", threads)
+    said = []
+    stats = ocr.run_ocr(cfg, progress=said.append)              # error, text, error: never 2 in a row
+    assert (stats.pages, stats.text, stats.failed) == (3, 1, 2)
+    assert not any("in a row" in s for s in said)
+
+
+def test_summary_says_how_to_read_failed_pages_again(tmp_path, make_cfg, monkeypatch):
+    tess = tmp_path / "tess"
+    tess.mkdir()
+    (tess / "fra.traineddata").write_bytes(b"x")
+    monkeypatch.setattr(ocr, "read_pages", failing_read)
+    monkeypatch.setattr(ocr, "ProcessPoolExecutor", threads)
+    cfg, _ = build_scans(tmp_path, make_cfg, ocr_tessdata=str(tess), world="projects")
+    said = []
+    assert ocr.run_ocr(cfg, progress=said.append).failed == 3
+    assert said[-1] == ("3 pages failed or timed out: read them again with `dmx-docs ocr --retry` "
+                        "(launcher: dmx.ps1 ocr -World projects --retry)")
+    assert "OCR done" in said[-2]
+
+
+def test_summary_without_failed_pages_has_no_retry_hint(fake_scans, monkeypatch):
+    cfg, _ = fake_scans
+    monkeypatch.setattr(ocr, "read_pages", lambda path, pages, options: [(p, "empty", "") for p in pages])
+    monkeypatch.setattr(ocr, "ProcessPoolExecutor", threads)
+    said = []
+    assert ocr.run_ocr(cfg, progress=said.append).failed == 0
+    assert "OCR done" in said[-1] and not any("--retry" in s for s in said)

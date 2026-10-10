@@ -28,6 +28,10 @@ MIN_OCR_CHARS = 20       # less recognized text: 'empty' (photo, drawing without
 PAGES_PER_JOB = 20       # pages of one document read by one worker call
 STALL_S = 600            # no job finished for this long: the running ones are stuck
 PROGRESS_EVERY_S = 15
+MAX_OCR_PIXELS = 40_000_000  # a page rendered for OCR needs ~12 bytes per pixel (~2.3 GB for an A0 at 300 dpi)
+MIN_OCR_DPI = 100            # a huge page is read at a lower resolution, but not below this
+MAX_FAILED_JOBS_IN_A_ROW = 50  # that many jobs with only errors in a row: the file share is probably gone
+TESSERACT_LOG = "ocr-tesseract.log"  # the console messages of Tesseract in the workers (in the logs folder)
 
 _LEAD = "(«\"'“‘["        # punctuation before a word
 _TAIL = ".,;:!?)»\"'”’]"  # punctuation after a word
@@ -91,6 +95,15 @@ def candidates(con, max_pages: int, retry: bool = False) -> list[Job]:
     return jobs
 
 
+def ocr_dpi(rect, dpi: int) -> int:
+    """The resolution to render a page of this size at: the configured one, lowered for a huge page
+    (a drawing) so that it has at most MAX_OCR_PIXELS pixels, but not below MIN_OCR_DPI."""
+    pixels = (rect.width / 72 * dpi) * (rect.height / 72 * dpi)
+    if pixels <= MAX_OCR_PIXELS:
+        return dpi
+    return min(dpi, max(MIN_OCR_DPI, int(dpi * (MAX_OCR_PIXELS / pixels) ** 0.5)))
+
+
 def read_pages(path: str, pages: list[int], options: dict) -> list[tuple[int, str, str]]:
     """Read pages of one PDF with Tesseract: [(page_no, 'text'|'empty'|'error', text or error)].
     Runs in a worker process: plain arguments and results only."""
@@ -107,7 +120,7 @@ def read_pages(path: str, pages: list[int], options: dict) -> list[tuple[int, st
         for p in pages:
             try:
                 page = doc[p - 1]
-                tp = page.get_textpage_ocr(language=options["languages"], dpi=options["dpi"],
+                tp = page.get_textpage_ocr(language=options["languages"], dpi=ocr_dpi(page.rect, options["dpi"]),
                                            full=True, tessdata=options["tessdata"])
                 text = filter_text(page.get_text("text", textpage=tp))
                 out.append((p, "text" if len(text) >= MIN_OCR_CHARS else "empty", text))
@@ -176,16 +189,37 @@ class OcrStats:
                 f"(photos, drawings), {self.failed} failed")
 
 
+def _worker_init(log_path: str) -> None:
+    """Runs first in every OCR worker process (a module-level function: spawn pickles it by name).
+    Tesseract writes warnings ('Line cannot be recognized!!') to file descriptor 2, tens of thousands
+    of them on a run over drawings: they go to a log file instead of the console and the shared log.
+    If that file cannot be opened they are discarded."""
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        target = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+    except OSError:
+        try:
+            target = os.open(os.devnull, os.O_WRONLY)
+        except OSError:
+            return
+    try:
+        os.dup2(target, 2)
+    except OSError:
+        pass
+    finally:
+        os.close(target)
+
+
 def _failed(job: Job, status: str, message: str) -> list[tuple[int, str, str]]:
     return [(p, status, message) for p in job.pages]
 
 
-def _read_alone(job: Job, options: dict) -> list[tuple[int, str, str]]:
+def _read_alone(job: Job, options: dict, log_path: str) -> list[tuple[int, str, str]]:
     """Read a job in a process of its own, giving up after STALL_S. A job that was in flight when a
     worker crashed is recorded as an error only if it crashes (or hangs) alone too."""
     from .indexer import _MP, _terminate_pool
 
-    solo = ProcessPoolExecutor(max_workers=1, mp_context=_MP)
+    solo = ProcessPoolExecutor(max_workers=1, mp_context=_MP, initializer=_worker_init, initargs=(log_path,))
     try:
         try:
             fut = solo.submit(read_pages, job.path, job.pages, options)
@@ -232,8 +266,11 @@ def run_ocr(cfg, max_minutes: float | None = None, retry: bool = False, progress
     # perf_counter, not monotonic: on Windows monotonic ticks every 15.6 ms, too coarse for a tiny limit
     deadline = time.perf_counter() + max_minutes * 60 if max_minutes else None
 
+    log_path = str(cfg.logs_dir / TESSERACT_LOG)
+
     def new_pool() -> ProcessPoolExecutor:
-        return ProcessPoolExecutor(max_workers=workers, mp_context=_MP)
+        return ProcessPoolExecutor(max_workers=workers, mp_context=_MP,
+                                   initializer=_worker_init, initargs=(log_path,))
 
     def save(job: Job, results) -> None:
         con.execute("BEGIN IMMEDIATE")  # the write lock at once: waits for another writer (busy_timeout)
@@ -260,8 +297,11 @@ def run_ocr(cfg, max_minutes: float | None = None, retry: bool = False, progress
     pending: dict = {}
     suspects: list[Job] = []  # in flight when a worker crashed: any of them may be the culprit
     started = last_progress = last_done = time.perf_counter()
+    failed_in_a_row = 0  # jobs in a row whose pages ALL came back as errors (the share is gone?)
+    last_error = ""
 
     def collect(fut) -> None:
+        nonlocal failed_in_a_row, last_error
         job = pending.pop(fut)
         try:
             results = fut.result()
@@ -271,6 +311,14 @@ def run_ocr(cfg, max_minutes: float | None = None, retry: bool = False, progress
         except Exception as e:  # noqa: BLE001
             results = _failed(job, "error", f"{type(e).__name__}: {e}"[:300])
         save(job, results)
+        if results and all(status == "error" for _, status, _ in results):
+            failed_in_a_row += 1
+            last_error = results[-1][2]
+        else:
+            failed_in_a_row = 0
+
+    def too_many_failures() -> bool:
+        return failed_in_a_row >= MAX_FAILED_JOBS_IN_A_ROW
 
     def replace_broken_pool() -> None:
         nonlocal executor
@@ -287,7 +335,9 @@ def run_ocr(cfg, max_minutes: float | None = None, retry: bool = False, progress
             if getattr(executor, "_broken", False):
                 replace_broken_pool()
             # At most one job per worker: every pending job is really running, none waits behind another.
-            while queue and len(pending) < workers and not (deadline and time.perf_counter() > deadline):
+            # After too many failed jobs in a row nothing new is submitted: what is in flight is recorded.
+            while (queue and len(pending) < workers and not too_many_failures()
+                   and not (deadline and time.perf_counter() > deadline)):
                 job = queue.pop(0)
                 try:
                     fut = executor.submit(read_pages, job.path, job.pages, options)
@@ -296,7 +346,7 @@ def run_ocr(cfg, max_minutes: float | None = None, retry: bool = False, progress
                     fut = executor.submit(read_pages, job.path, job.pages, options)
                 pending[fut] = job
             if not pending:
-                break  # time limit reached
+                break  # time limit reached, or stopped after too many failed jobs
             done, _ = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
             for fut in done:
                 collect(fut)
@@ -317,14 +367,14 @@ def run_ocr(cfg, max_minutes: float | None = None, retry: bool = False, progress
                 progress(f"  {stats.pages}/{total} pages ({rate:.1f}/s, "
                          f"~{(total - stats.pages) / max(rate, 1e-6) / 3600:.1f} h remaining)")
                 last_progress = now
-        if suspects:
+        if suspects and not too_many_failures():
             progress(f"A worker crashed: the {len(suspects)} jobs it may have been reading are read again "
                      f"one by one ({STALL_S // 60} min max each).")
             log.warning("worker crash, read again alone: %s", "; ".join(j.path for j in suspects))
-        while suspects and not (deadline and time.perf_counter() > deadline):
+        while suspects and not too_many_failures() and not (deadline and time.perf_counter() > deadline):
             job = suspects.pop(0)
             progress(f"  reading alone: {job.path}")
-            save(job, _read_alone(job, options))
+            save(job, _read_alone(job, options, log_path))
     except KeyboardInterrupt:
         progress("Interrupted - the pages read so far are saved.")
         raise
@@ -336,7 +386,14 @@ def run_ocr(cfg, max_minutes: float | None = None, retry: bool = False, progress
         else:
             os.environ["OMP_THREAD_LIMIT"] = omp_before
     left = queue + suspects
-    if left:
+    if left and too_many_failures():
+        progress(f"{MAX_FAILED_JOBS_IN_A_ROW} jobs in a row failed (last error: {last_error}). Stopped: check the "
+                 "file share / language files, then run again; the failed pages can be read again with --retry.")
+    elif left:
         progress(f"Time limit reached: {sum(len(j.pages) for j in left)} pages left for the next run.")
     progress(f"OCR done in {(time.perf_counter() - started) / 60:.1f} min: {stats.summary()}")
+    if stats.failed:
+        launcher = f"dmx.ps1 ocr -World {cfg.world} --retry" if cfg.world else "dmx.ps1 ocr --retry"
+        progress(f"{stats.failed} pages failed or timed out: read them again with `dmx-docs ocr --retry` "
+                 f"(launcher: {launcher})")
     return stats
