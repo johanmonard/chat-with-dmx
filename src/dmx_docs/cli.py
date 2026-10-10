@@ -1,4 +1,4 @@
-"""Command line: dmx-docs web | index | ocr | embed | status | search | read | serve."""
+"""Command line: dmx-docs web | index | ocr | describe | embed | status | search | read | serve."""
 
 from __future__ import annotations
 
@@ -52,6 +52,10 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("ocr", help="read the text of scanned PDF pages (OCR); run before embed")
     p.add_argument("--max-minutes", type=float, help="stop after this many minutes (resume later)")
     p.add_argument("--retry", action="store_true", help="read again the pages that failed or timed out")
+
+    p = sub.add_parser("describe", help="describe pictures with the local vision model (Ollama); run before embed")
+    p.add_argument("--max-minutes", type=float, help="stop after this many minutes (resume later)")
+    p.add_argument("--retry", action="store_true", help="describe again the pictures that failed or timed out")
 
     sub.add_parser("status", help="show index statistics")
 
@@ -119,6 +123,14 @@ def main(argv: list[str] | None = None) -> None:
             run_ocr(cfg, max_minutes=args.max_minutes, retry=args.retry)
         except KeyboardInterrupt:
             print("Stopped. Run `dmx-docs ocr` again to continue.")
+            sys.exit(130)
+    elif args.command == "describe":
+        from .describe import run_describe
+        _setup_logging(cfg, "describe")
+        try:
+            run_describe(cfg, max_minutes=args.max_minutes, retry=args.retry)
+        except KeyboardInterrupt:
+            print("Stopped. Run `dmx-docs describe` again to continue.")
             sys.exit(130)
     elif args.command == "status":
         from .tools import DocTools
