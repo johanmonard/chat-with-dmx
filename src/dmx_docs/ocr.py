@@ -9,8 +9,18 @@ makes the step resumable and lets the tools label OCR text.
 
 from __future__ import annotations
 
+import logging
+import os
 import re
+import time
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
+
+from . import store
+from .chunking import split_text
+
+log = logging.getLogger("dmx_docs.ocr")
 
 OCR_VERSION = 1          # bump when OCR output changes: pages read by an older version are redone
 MIN_PAGE_CHARS = 50      # a PDF page with less extracted text is an OCR candidate
@@ -79,3 +89,199 @@ def candidates(con, max_pages: int, retry: bool = False) -> list[Job]:
         for i in range(0, len(pages), PAGES_PER_JOB):
             jobs.append(Job(d, path, pages[i:i + PAGES_PER_JOB]))
     return jobs
+
+
+def read_pages(path: str, pages: list[int], options: dict) -> list[tuple[int, str, str]]:
+    """Read pages of one PDF with Tesseract: [(page_no, 'text'|'empty'|'error', text or error)].
+    Runs in a worker process: plain arguments and results only."""
+    from .extract import pymupdf
+
+    try:
+        doc = pymupdf.open(store.fs_path(path))
+    except Exception as e:  # noqa: BLE001 - unreadable file or share not reachable
+        return [(p, "error", f"{type(e).__name__}: {e}"[:300]) for p in pages]
+    out = []
+    with doc:
+        if doc.needs_pass:
+            return [(p, "error", "password-protected PDF") for p in pages]
+        for p in pages:
+            try:
+                page = doc[p - 1]
+                tp = page.get_textpage_ocr(language=options["languages"], dpi=options["dpi"],
+                                           full=True, tessdata=options["tessdata"])
+                text = filter_text(page.get_text("text", textpage=tp))
+                out.append((p, "text" if len(text) >= MIN_OCR_CHARS else "empty", text))
+            except Exception as e:  # noqa: BLE001
+                out.append((p, "error", f"{type(e).__name__}: {e}"[:300]))
+    return out
+
+
+def _delete_chunks(con, ids: list[int]) -> bool:
+    """Remove chunks (with their FTS entries and vectors). True if vectors were removed."""
+    if not ids:
+        return False
+    marks = ",".join("?" * len(ids))
+    rows = con.execute(f"SELECT id, text FROM chunks WHERE id IN ({marks})", ids).fetchall()
+    con.executemany("INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', ?, ?)",
+                    [(r[0], r[1]) for r in rows])
+    cur = con.execute(f"DELETE FROM vectors WHERE chunk_id IN ({marks})", ids)
+    con.execute(f"DELETE FROM chunks WHERE id IN ({marks})", ids)
+    return cur.rowcount > 0
+
+
+def save_page(con, doc_id: int, page_no: int, status: str, text: str) -> bool:
+    """Record one page read by OCR and append its text as chunks. Replaces only the chunks a
+    previous OCR of this page added. Returns True if vectors were removed."""
+    old = con.execute("SELECT chunk_ids FROM ocr_pages WHERE doc_id = ? AND page_no = ?",
+                      (doc_id, page_no)).fetchone()
+    removed = _delete_chunks(con, [int(i) for i in (old[0] or "").split(",") if i]) if old else False
+    ids: list[int] = []
+    if status == "text":
+        count, last_seq = con.execute("SELECT count(*), max(seq) FROM chunks WHERE doc_id = ? AND page_no = ?",
+                                      (doc_id, page_no)).fetchone()
+        body = ("\n\n" if count else "") + text  # keeps the page rebuildable from its chunks
+        for k, part in enumerate(split_text(body)):
+            cur = con.execute("INSERT INTO chunks(doc_id, page_no, seq, text) VALUES(?, ?, ?, ?)",
+                              (doc_id, page_no, (last_seq + 1 if count else 0) + k, part))
+            con.execute("INSERT INTO chunks_fts(rowid, text) VALUES(?, ?)", (cur.lastrowid, part))
+            ids.append(cur.lastrowid)
+        con.execute("UPDATE docs SET status = 'ok', error = NULL WHERE id = ? AND status = 'no_text'", (doc_id,))
+    con.execute("""INSERT OR REPLACE INTO ocr_pages(doc_id, page_no, status, chars, ocr_version, done_at,
+                   chunk_ids, error) VALUES(?, ?, ?, ?, ?, ?, ?, ?)""",
+                (doc_id, page_no, status, len(text) if status == "text" else 0, OCR_VERSION, time.time(),
+                 ",".join(map(str, ids)) or None, text if status in ("error", "timeout") else None))
+    return removed
+
+
+def unavailable(cfg) -> str | None:
+    """Why OCR cannot run for this configuration, or None."""
+    if not cfg.ocr_enabled:
+        return "OCR is disabled for this world ([ocr] enabled = false or the world's ocr = false)."
+    missing = [f"{lang}.traineddata" for lang in cfg.ocr_languages.split("+")
+               if not (cfg.tessdata_dir / f"{lang}.traineddata").is_file()]
+    if missing:
+        return f"OCR not available: {', '.join(missing)} not found in {cfg.tessdata_dir}."
+    return None
+
+
+@dataclass
+class OcrStats:
+    pages: int = 0
+    text: int = 0
+    empty: int = 0
+    failed: int = 0
+
+    def summary(self) -> str:
+        return (f"{self.pages} pages read: {self.text} with text, {self.empty} without usable text "
+                f"(photos, drawings), {self.failed} failed")
+
+
+def run_ocr(cfg, max_minutes: float | None = None, retry: bool = False, progress=print) -> OcrStats:
+    from .indexer import _MP, _terminate_pool
+
+    stats = OcrStats()
+    why = unavailable(cfg)
+    if why:
+        progress(why)
+        return stats
+    con = store.connect(cfg.db_path)
+    con.isolation_level = None  # explicit transactions, one per job
+    queue = candidates(con, cfg.max_pdf_pages, retry)
+    total = sum(len(j.pages) for j in queue)
+    if not queue:
+        progress("No page needs OCR.")
+        con.close()
+        return stats
+    workers = max(1, int(cfg.workers))
+    progress(f"{total} pages to read in {len({j.doc_id for j in queue})} documents "
+             f"({workers} workers, language {cfg.ocr_languages}, {cfg.ocr_dpi} dpi).")
+    omp_before = os.environ.get("OMP_THREAD_LIMIT")
+    os.environ["OMP_THREAD_LIMIT"] = "1"  # one Tesseract thread per worker process
+    options = {"languages": cfg.ocr_languages, "dpi": cfg.ocr_dpi, "tessdata": str(cfg.tessdata_dir)}
+    # perf_counter, not monotonic: on Windows monotonic ticks every 15.6 ms, too coarse for a tiny limit
+    deadline = time.perf_counter() + max_minutes * 60 if max_minutes else None
+
+    def new_pool() -> ProcessPoolExecutor:
+        return ProcessPoolExecutor(max_workers=workers, mp_context=_MP)
+
+    def save(job: Job, results) -> None:
+        con.execute("BEGIN IMMEDIATE")  # the write lock at once: waits for another writer (busy_timeout)
+        try:
+            removed = False
+            for page_no, status, text in results:
+                removed |= save_page(con, job.doc_id, page_no, status, text)
+                stats.pages += 1
+                if status == "text":
+                    stats.text += 1
+                elif status == "empty":
+                    stats.empty += 1
+                else:
+                    stats.failed += 1
+                    log.info("OCR %s: %s p.%d (%s)", status, job.path, page_no, text)
+            if removed:
+                store.bump_vector_version(con)
+            con.execute("COMMIT")
+        except BaseException:
+            con.execute("ROLLBACK")
+            raise
+
+    executor = new_pool()
+    pending: dict = {}
+    started = last_progress = last_done = time.perf_counter()
+    try:
+        while queue or pending:
+            while queue and len(pending) < workers * 2 and not (deadline and time.perf_counter() > deadline):
+                if getattr(executor, "_broken", False):
+                    _terminate_pool(executor)
+                    executor = new_pool()
+                job = queue.pop(0)
+                pending[executor.submit(read_pages, job.path, job.pages, options)] = job
+            if not pending:
+                break  # time limit reached
+            done, _ = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
+            for fut in done:
+                job = pending.pop(fut)
+                try:
+                    results = fut.result()
+                except BrokenProcessPool:
+                    results = [(p, "error", "OCR worker crashed") for p in job.pages]
+                except Exception as e:  # noqa: BLE001
+                    results = [(p, "error", f"{type(e).__name__}: {e}"[:300]) for p in job.pages]
+                save(job, results)
+                last_done = time.perf_counter()
+            if not done and time.perf_counter() - last_done > STALL_S:
+                # The jobs a worker has taken are stuck; the ones still waiting for a worker never started.
+                taken = [f for f in pending if f.running()] or list(pending)
+                progress(f"WARNING: no OCR job finished for {STALL_S // 60} min; restarting the workers. "
+                         "Probably stuck: " + "; ".join(pending[f].path for f in taken))
+                waiting = []
+                for fut in list(pending):
+                    job = pending.pop(fut)
+                    if fut in taken:
+                        save(job, [(p, "timeout", f"no result within {STALL_S // 60} min") for p in job.pages])
+                    else:
+                        waiting.append(job)
+                queue[:0] = waiting
+                _terminate_pool(executor)
+                executor = new_pool()
+                last_done = time.perf_counter()
+            now = time.perf_counter()
+            if now - last_progress >= PROGRESS_EVERY_S:
+                rate = stats.pages / max(now - started, 1e-6)
+                progress(f"  {stats.pages}/{total} pages ({rate:.1f}/s, "
+                         f"~{(total - stats.pages) / max(rate, 1e-6) / 3600:.1f} h remaining)")
+                last_progress = now
+    except KeyboardInterrupt:
+        progress("Interrupted - the pages read so far are saved.")
+        raise
+    finally:
+        _terminate_pool(executor)
+        con.close()
+        if omp_before is None:
+            os.environ.pop("OMP_THREAD_LIMIT", None)
+        else:
+            os.environ["OMP_THREAD_LIMIT"] = omp_before
+    if queue:
+        progress(f"Time limit reached: {sum(len(j.pages) for j in queue)} pages left for the next run.")
+    progress(f"OCR done in {(time.perf_counter() - started) / 60:.1f} min: {stats.summary()}")
+    return stats

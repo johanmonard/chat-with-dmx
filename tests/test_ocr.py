@@ -1,4 +1,6 @@
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -169,3 +171,175 @@ def test_reindexing_a_document_forgets_its_ocr(scans):
     store.delete_doc_content(con, scan)
     assert con.execute("SELECT count(*) FROM ocr_pages WHERE doc_id = ?", (scan,)).fetchone()[0] == 0
     con.close()
+
+
+from dmx_docs.embeddings import run_embed
+from dmx_docs.tools import DocTools
+
+
+def chunk_count(cfg):
+    con = store.connect(cfg.db_path)
+    n = con.execute("SELECT count(*), sum(embedded) FROM chunks").fetchone()
+    con.close()
+    return n
+
+
+def test_unavailable_ocr_says_why_and_reads_nothing(scans, tmp_path):
+    cfg, _ = scans
+    said = []
+    cfg.ocr_enabled = False
+    assert ocr.run_ocr(cfg, progress=said.append).pages == 0
+    assert "disabled" in said[-1]
+    cfg.ocr_enabled, cfg.ocr_tessdata = True, str(tmp_path / "empty")
+    assert ocr.run_ocr(cfg, progress=said.append).pages == 0
+    assert "fra.traineddata" in said[-1]
+
+
+@needs_tesseract
+def test_ocr_makes_scanned_pages_searchable_and_is_not_repeated(scans):
+    cfg, _ = scans
+    before = chunk_count(cfg)
+    stats = ocr.run_ocr(cfg, progress=quiet)
+    assert (stats.pages, stats.text) == (3, 3)
+    tools = DocTools(cfg)
+    assert "scan.pdf" in tools.search("Gondolier", mode="keyword")
+    assert "mixed.pdf" in tools.search("Cormoran", mode="keyword")
+    con = store.connect(cfg.db_path)
+    assert con.execute("SELECT status FROM docs WHERE name = 'scan.pdf'").fetchone()[0] == "ok"
+    assert con.execute("SELECT count(*) FROM ocr_pages WHERE status = 'text'").fetchone()[0] == 3
+    con.close()
+    after = chunk_count(cfg)
+    assert after[0] > before[0]
+    run_embed(cfg, progress=quiet)
+    assert chunk_count(cfg)[1] == after[0]          # the new chunks get embeddings
+    assert ocr.run_ocr(cfg, progress=quiet).pages == 0   # nothing read twice
+
+
+@needs_tesseract
+def test_text_already_on_the_page_is_kept_and_the_page_rebuilt(scans):
+    cfg, root = scans
+    make_pdf(root / "Mixed" / "header.pdf", [("text", MIXED_TEXT), ("image", "Page 2\n\n" + MIXED_SCAN)])
+    run_index(cfg, progress=quiet)
+    con = store.connect(cfg.db_path)
+    d = doc_id(con, "header.pdf")
+    con.execute("INSERT INTO chunks(doc_id, page_no, seq, text) VALUES(?, 2, 0, 'Page 2')", (d,))
+    con.commit()
+    con.close()
+    ocr.run_ocr(cfg, progress=quiet)
+    text = DocTools(cfg).read_document(str(root / "Mixed" / "header.pdf"), start_page=2)
+    assert "Page 2\n\n" in text and "Cormoran" in text
+
+
+@needs_tesseract
+def test_changed_scan_is_read_again(scans):
+    cfg, root = scans
+    ocr.run_ocr(cfg, progress=quiet)
+    make_pdf(root / "Scans" / "scan.pdf", [("image", "Nouveau bordereau Flamant pour la livraison")])
+    run_index(cfg, progress=quiet)
+    assert ocr.run_ocr(cfg, progress=quiet).text == 1
+    tools = DocTools(cfg)
+    assert "scan.pdf" in tools.search("Flamant", mode="keyword")
+    assert "scan.pdf" not in tools.search("Gondolier", mode="keyword")
+
+
+@needs_tesseract
+def test_time_limit_stops_between_jobs_and_the_next_run_finishes(scans):
+    cfg, _ = scans
+    said = []
+    stopped = ocr.run_ocr(cfg, max_minutes=1e-9, progress=said.append)
+    assert stopped.pages == 0 and any("Time limit" in s for s in said)
+    assert ocr.run_ocr(cfg, progress=quiet).pages == 3
+
+
+@needs_tesseract
+def test_new_ocr_version_replaces_the_old_ocr_chunks(scans, monkeypatch):
+    cfg, _ = scans
+    ocr.run_ocr(cfg, progress=quiet)
+    count = chunk_count(cfg)[0]
+    monkeypatch.setattr(ocr, "OCR_VERSION", ocr.OCR_VERSION + 1)
+    assert ocr.run_ocr(cfg, progress=quiet).pages == 3
+    assert chunk_count(cfg)[0] == count             # replaced, not added twice
+    con = store.connect(cfg.db_path)
+    assert {r[0] for r in con.execute("SELECT ocr_version FROM ocr_pages")} == {ocr.OCR_VERSION}
+    con.close()
+
+
+def test_cli_ocr_without_language_files(scans, capsys, tmp_path):
+    cfg, _ = scans
+    from dmx_docs.cli import main
+    p = tmp_path / "c.toml"
+    p.write_text(f"[index]\ndata_dir = '{cfg.data_dir.as_posix()}'\n\n[ocr]\ntessdata = '{(tmp_path / 'none').as_posix()}'\n",
+                 encoding="utf-8")
+    main(["--config", str(p), "ocr"])
+    assert "OCR not available" in capsys.readouterr().out
+
+
+def test_unreadable_pdf_is_an_error_for_each_of_its_pages(tmp_path):
+    out = ocr.read_pages(str(tmp_path / "nope.pdf"), [1, 2], {})
+    assert [(p, status) for p, status, _ in out] == [(1, "error"), (2, "error")]
+    assert all(msg for _, _, msg in out)
+
+
+@needs_tesseract
+def test_replaced_ocr_chunks_lose_their_vectors_and_the_vector_cache_is_dropped(scans, monkeypatch):
+    cfg, _ = scans
+    ocr.run_ocr(cfg, progress=quiet)
+    run_embed(cfg, progress=quiet)
+    con = store.connect(cfg.db_path)
+    version = store.get_meta(con, "vec_version")
+    vectors = con.execute("SELECT count(*) FROM vectors").fetchone()[0]
+    con.close()
+    monkeypatch.setattr(ocr, "OCR_VERSION", ocr.OCR_VERSION + 1)
+    assert ocr.run_ocr(cfg, progress=quiet).pages == 3
+    con = store.connect(cfg.db_path)
+    assert store.get_meta(con, "vec_version") != version
+    assert con.execute("SELECT count(*) FROM vectors").fetchone()[0] == vectors - 3   # the 3 old OCR chunks
+    assert con.execute("SELECT count(*) FROM chunks WHERE embedded = 0").fetchone()[0] == 3  # their replacements
+    con.close()
+
+
+@needs_tesseract
+def test_stalled_jobs_are_timed_out_and_the_ones_still_waiting_are_read_again(scans, monkeypatch):
+    cfg, _ = scans
+    cfg.workers = 1                                  # scan.pdf takes the only worker, mixed.pdf waits
+    release = threading.Event()
+
+    def fake_read(path, pages, options):
+        if path.endswith("scan.pdf"):
+            release.wait(60)                         # stuck in its worker
+            return []
+        return [(p, "empty", "") for p in pages]
+
+    monkeypatch.setattr(ocr, "read_pages", fake_read)
+    monkeypatch.setattr(ocr, "ProcessPoolExecutor", lambda max_workers, mp_context: ThreadPoolExecutor(max_workers))
+    monkeypatch.setattr(ocr, "STALL_S", 0.5)
+    said = []
+    try:
+        stats = ocr.run_ocr(cfg, progress=said.append)
+    finally:
+        release.set()
+    assert any("WARNING" in s for s in said)
+    assert (stats.pages, stats.empty, stats.failed) == (3, 1, 2)
+    con = store.connect(cfg.db_path)
+    rows = {(r[0], r[1]): r[2] for r in con.execute(
+        "SELECT d.name, o.page_no, o.status FROM ocr_pages o JOIN docs d ON d.id = o.doc_id")}
+    con.close()
+    assert rows == {("scan.pdf", 1): "timeout", ("scan.pdf", 2): "timeout", ("mixed.pdf", 2): "empty"}
+
+
+@needs_tesseract
+def test_ctrl_c_stops_cleanly_and_the_next_run_goes_on(scans, monkeypatch):
+    cfg, _ = scans
+    omp = os.environ.get("OMP_THREAD_LIMIT")
+    said = []
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as m:
+        m.setattr(ocr, "wait", interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            ocr.run_ocr(cfg, progress=said.append)
+    assert "Interrupted" in said[-1]
+    assert os.environ.get("OMP_THREAD_LIMIT") == omp     # set for the workers only while the pool lives
+    assert ocr.run_ocr(cfg, progress=quiet).pages == 3   # index not locked, nothing half saved

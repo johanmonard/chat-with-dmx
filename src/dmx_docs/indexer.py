@@ -133,7 +133,7 @@ def _kill_automation_office_after_run() -> None:
         log.warning("could not stop PowerPoint: %s", e)
 
 
-def _kill_pool(executor: ProcessPoolExecutor) -> None:
+def _terminate_pool(executor: ProcessPoolExecutor) -> None:
     """Stop a pool whose workers may be stuck: shutdown(wait=True) would wait forever."""
     for proc in list((getattr(executor, "_processes", None) or {}).values()):
         try:
@@ -141,6 +141,10 @@ def _kill_pool(executor: ProcessPoolExecutor) -> None:
         except Exception:  # noqa: BLE001
             pass
     executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _kill_pool(executor: ProcessPoolExecutor) -> None:
+    _terminate_pool(executor)
     _kill_automation_office()
 
 
