@@ -68,6 +68,17 @@ CREATE TABLE IF NOT EXISTS meta (
     key    TEXT PRIMARY KEY,
     value  TEXT
 );
+CREATE TABLE IF NOT EXISTS ocr_pages (
+    doc_id       INTEGER NOT NULL,
+    page_no      INTEGER NOT NULL,
+    status       TEXT NOT NULL,
+    chars        INTEGER NOT NULL DEFAULT 0,
+    ocr_version  INTEGER NOT NULL,
+    done_at      REAL,
+    chunk_ids    TEXT,
+    error        TEXT,
+    PRIMARY KEY (doc_id, page_no)
+);
 """
 
 
@@ -124,6 +135,7 @@ def bump_vector_version(con: sqlite3.Connection) -> None:
 
 def delete_doc_content(con: sqlite3.Connection, doc_id: int) -> bool:
     """Remove a document's chunks, FTS entries and vectors. Returns True if vectors were removed."""
+    con.execute("DELETE FROM ocr_pages WHERE doc_id=?", (doc_id,))  # read again after re-extraction
     rows = con.execute("SELECT id, text FROM chunks WHERE doc_id=?", (doc_id,)).fetchall()
     if not rows:
         return False

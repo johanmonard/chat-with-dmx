@@ -56,6 +56,11 @@ class Config:
     world: str | None = None
     world_title: str | None = None
     profile: str = "projects"
+    # OCR of PDF pages without text (ocr.py). The language files live in tessdata_dir.
+    ocr_enabled: bool = True
+    ocr_languages: str = "fra"
+    ocr_dpi: int = 300
+    ocr_tessdata: str | None = None
 
     def __post_init__(self) -> None:
         self.extensions = [e.lower() if e.startswith(".") else "." + e.lower() for e in self.extensions]
@@ -102,6 +107,11 @@ class Config:
     @property
     def logs_dir(self) -> Path:
         return self.world_dir / "logs"
+
+    @property
+    def tessdata_dir(self) -> Path:
+        """Tesseract language files: [ocr] tessdata, else next to data_dir (C:\\dmx-rag\\tessdata)."""
+        return Path(self.ocr_tessdata) if self.ocr_tessdata else self.data_dir.parent / "tessdata"
 
     @property
     def server_name(self) -> str:
@@ -200,4 +210,11 @@ def load_config(path: str | os.PathLike, world: str | None = None) -> Config:
             kwargs["register_path"] = str(rp if rp.is_absolute() else (path.parent / rp))
     if srv.get("export_dir"):
         kwargs["export_dir"] = os.path.expandvars(os.path.expanduser(str(srv["export_dir"])))
+    ocr = raw.get("ocr", {})
+    for key, attr in (("enabled", "ocr_enabled"), ("languages", "ocr_languages"),
+                      ("dpi", "ocr_dpi"), ("tessdata", "ocr_tessdata")):
+        if key in ocr:
+            kwargs[attr] = ocr[key]
+    if name and "ocr" in w:  # a world can switch OCR off
+        kwargs["ocr_enabled"] = bool(w["ocr"])
     return Config(**kwargs)
