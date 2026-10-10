@@ -1,6 +1,6 @@
 # OCR of scanned and image-only PDF pages (sub-project B1)
 
-Date: 2026-10-10. Status: design approved in chat (option 1 + spike results), spec under review.
+Date: 2026-10-10. Status: approved; amended by the implementation plan (chunk ids in ocr_pages, crash handling).
 
 ## Goal
 
@@ -67,9 +67,7 @@ first, then pages inside `ok` documents.
   * New chunks for the page via `chunking.split_text`, with `seq` continuing after the page's
     existing chunks; when the page already had text, the OCR text is prefixed with a blank line
     so that concatenating a page's chunks still rebuilds it (read_document relies on this).
-  * New column `chunks.ocr INTEGER NOT NULL DEFAULT 0` (added with ALTER TABLE: instant, no
-    rewrite of the 10 GB Projects index); OCR chunks have `ocr = 1`, `embedded = 0`, and are
-    added to `chunks_fts`.
+  * Each `ocr_pages` row keeps the ids of the chunks it added (`chunk_ids`), so a page read again by a newer `OCR_VERSION` replaces exactly its own OCR chunks; no column is added to `chunks` (an index copied from before this feature keeps working unchanged in Claude Desktop).
   * New table `ocr_pages(doc_id, page_no, status, chars, ocr_version, done_at)`, primary key
     `(doc_id, page_no)`; status `text` | `empty` | `timeout` | `error`.
   * A `no_text` document that gets at least one `text` page becomes `ok` (error cleared).
@@ -113,8 +111,7 @@ first, then pages inside `ok` documents.
 * Unreadable or password-protected PDF: the document's candidate pages are recorded `error`.
 * Network share unreachable during a run: pages of that document are recorded `error`
   (retried with `--retry`).
-* Tesseract crash in a worker: as the indexer, the pool is replaced and the document is retried
-  alone once; then `error`.
+* Tesseract crash in a worker: the jobs hit by the crash are read again one by one in a single-worker pool; only a job that crashes or hangs alone is recorded `error`/`timeout` (`ocr --retry` reads those again).
 
 ## Tests
 

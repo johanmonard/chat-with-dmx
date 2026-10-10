@@ -236,7 +236,7 @@ U:\DMX-RAG\
   3 - Index new and changed files.cmd
   4 - Compute embeddings.cmd           from a cmd prompt you can add e.g. --max-minutes 300
   5 - Update Claude Desktop copy.cmd   local copy for Claude Desktop + the configuration to paste
-  7 - Update a world (index + embeddings).cmd   unattended run, e.g. on the GPU machine
+  7 - Update a world (index + embeddings).cmd   unattended: index, OCR of scanned pages, embeddings
   Unlock after a crash.cmd
   config.toml      settings for all machines (data_dir = 'C:\dmx-rag\data') + [worlds.<name>]
   thesaurus.toml   search vocabulary shared by every world
@@ -244,6 +244,7 @@ U:\DMX-RAG\
   worlds\<name>\   index.sqlite3, index.prev.sqlite3 (previous version), LOCK, register.csv (projects)
   models\          embedding model, copied to each machine once
   tools\uv.exe     installs Python and the packages without admin rights
+  tools\tessdata   OCR language files, copied to each machine
   logs\            one log per run
 ```
 
@@ -267,6 +268,7 @@ U:\DMX-RAG\
 |---|---|
 | `dmx-docs web [--port 8765]` | Configuration page: folders, exclusions, scans, status |
 | `dmx-docs index [--retry-errors]` | Crawl roots, extract text, update the keyword index |
+| `dmx-docs ocr [--max-minutes N] [--retry]` | Read scanned PDF pages (OCR) and add their text; run before embed |
 | `dmx-docs embed [--max-minutes N] [--reset]` | Add embeddings to new chunks (`--reset` after changing model) |
 | `dmx-docs status` | Counts per status/type, embedding coverage |
 | `dmx-docs search "..." [--mode keyword\|semantic\|hybrid] [--folder ...]` | Test a search |
@@ -285,6 +287,7 @@ folder, or the `DMX_DOCS_CONFIG` environment variable).
 * PowerPoint: python-pptx, one slide = one page (titles, text, tables, speaker notes); .ppt converted to .pptx first.
   PowerPoint files are indexed only when `.pptx` and/or `.ppt` are in `extensions`
   (see `[worlds.marketing]` in config.example.toml).
+* OCR: PDF pages with (almost) no text are read by Tesseract (built into PyMuPDF, French model by default) in a separate `ocr` step; the text is appended as extra chunks marked "(OCR)" in search results, without touching existing chunks or embeddings.
 * Chunks: ~1,200–2,000 characters, never spanning two pages, so every hit has a page number.
 * Keyword search: SQLite FTS5 with BM25 ranking, case- and accent-insensitive. Codes like
   `MN-114` are matched as phrases.

@@ -93,3 +93,13 @@ max_read_chars = 40000
 # profile = "marketing"
 # extensions = ['.pdf', '.docx', '.doc', '.pptx', '.ppt']
 # roots = ['\\server\share\Marketing']
+
+# OCR of scanned PDF pages (`dmx-docs ocr`, part of launcher 7). Uses the Tesseract engine built
+# into PyMuPDF; only the language files are needed (tessdata_best from
+# github.com/tesseract-ocr, e.g. fra.traineddata). 'fra' also reads English, German and Spanish
+# text well and is twice as fast as 'fra+eng'. A world can switch OCR off with ocr = false.
+# [ocr]
+# enabled = true
+# languages = 'fra'
+# dpi = 300
+# tessdata = 'C:\dmx-rag\tessdata'
