@@ -835,8 +835,9 @@ class DocTools:
                   f"modified {_date(info.get('mtime'))}; source: {info['source']})")
         if info.get("status") == "no_text":
             header += "\nNote: this PDF has (almost) no text layer — probably a scan; content may be missing."
-        if info.get("ocr_pages"):
-            shown = ", ".join(map(str, info["ocr_pages"][:30])) + (" ..." if len(info["ocr_pages"]) > 30 else "")
+        ocr_shown = [p for p in info.get("ocr_pages", ()) if start_page <= p <= shown_until]  # OCR pages in this output
+        if ocr_shown:
+            shown = ", ".join(map(str, ocr_shown[:30])) + (" ..." if len(ocr_shown) > 30 else "")
             header += (f"\nNote: text of {label} {shown} was recognized by OCR (scanned page): it may contain "
                        "recognition errors - check codes and numbers with view_page.")
         footer = ""
