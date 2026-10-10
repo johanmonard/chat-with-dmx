@@ -11,10 +11,14 @@ resumable and lets the tools label picture passages.
 
 from __future__ import annotations
 
+import base64
+import html
 import json
 import logging
 import os
+import random
 import sqlite3
+import statistics
 import time
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
@@ -344,3 +348,98 @@ def run_describe(cfg, max_minutes: float | None = None, retry: bool = False, pro
         progress(f"{stats.failed} pictures failed: describe them again with `dmx-docs describe --retry` "
                  f"(launcher: {launcher})")
     return stats
+
+
+def run_compare(cfg, models: list[str], sample: int = 25, out_dir: str | None = None, progress=print) -> str | None:
+    """Describe a fixed sample of the world's pictures with each model and write a side-by-side HTML
+    page (thumbnail, context, each model's answer and seconds). Read-only for the index."""
+    from .pictures import scale_picture
+
+    con = store.connect(cfg.db_path)
+    try:
+        ids = [r[0] for r in con.execute(
+            f"SELECT id FROM docs WHERE ext IN ({','.join('?' * len(DOC_EXTS))}) AND status IN ('ok', 'no_text')",
+            DOC_EXTS)]
+        random.Random(7).shuffle(ids)
+        options, items, seen = prep_options(cfg), [], set()
+        for doc_id in ids:
+            if len(items) >= sample:
+                break
+            job = job_for(con, doc_id)
+            if job is None:
+                continue
+            ready = [p for p in prepare_document(job, options) if p.status == "ready" and p.sha1 not in seen]
+            unique = list({p.sha1: p for p in ready}.values())
+            for p in random.Random(doc_id).sample(unique, min(2, len(unique))):   # at most 2 per document
+                seen.add(p.sha1)
+                items.append((job["path"], p))
+    finally:
+        con.close()
+    items = items[:sample]
+    if not items:
+        progress("No picture to compare in this world.")
+        return None
+    progress(f"{len(items)} pictures sampled; models: {', '.join(models)}.")
+    results: dict[str, list] = {}
+    for model in models:
+        why = vision.unavailable(cfg.vision_url, model)
+        if why:
+            progress(why)
+            results[model] = [why] * len(items)
+            continue
+        results[model] = []
+        for i, (path, p) in enumerate(items, 1):
+            try:
+                d = vision.describe_image(cfg.vision_url, model, p.image, p.context, cfg.vision_timeout_s)
+                results[model].append(d)
+                progress(f"  {model} {i}/{len(items)} {d.seconds:.1f} s  {d.type}: {d.description[:80]}")
+            except vision.VisionError as e:
+                results[model].append(str(e))
+                progress(f"  {model} {i}/{len(items)} failed: {e}")
+        vision.unload(cfg.vision_url, model)
+    out_dir = out_dir or str(cfg.logs_dir)
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"describe-compare-{cfg.world or 'index'}-{time.strftime('%Y%m%d-%H%M')}.html")
+    thumbs = [base64.b64encode(scale_picture(p.image, 300)[0]).decode("ascii") for _, p in items]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(_compare_html(cfg, models, items, thumbs, results))
+    progress(f"Written: {path}")
+    return path
+
+
+def _compare_html(cfg, models, items, thumbs, results) -> str:
+    e = html.escape
+    summary = []
+    for m in models:
+        secs = [r.seconds for r in results[m] if isinstance(r, vision.Description)]
+        failed = sum(not isinstance(r, vision.Description) for r in results[m])
+        if secs:
+            med = statistics.median(secs)
+            summary.append(f"<li><b>{e(m)}</b>: median {med:.1f} s per picture, {failed} failed; "
+                           f"1,000 pictures ≈ {1000 * med / 3600:.1f} h</li>")
+        else:
+            summary.append(f"<li><b>{e(m)}</b>: no description, {failed} failed</li>")
+    rows = []
+    for i, ((path, p), thumb) in enumerate(zip(items, thumbs)):
+        mime = "image/png" if base64.b64decode(thumb)[:4] == b"\x89PNG" else "image/jpeg"
+        where = f"page {p.page_no}" + (f", image {p.image_no}" if p.image_no else " (whole page)")
+        cells = [f"<td class=pic><img src='data:{mime};base64,{thumb}'><div class=src>{e(path)} — {where}</div>"
+                 f"<details><summary>context</summary><pre>{e(p.context)}</pre></details></td>"]
+        for m in models:
+            r = results[m][i]
+            if isinstance(r, vision.Description):
+                cells.append(f"<td><b>{e(r.type)}</b> · {r.seconds:.1f} s<p>{e(r.description)}</p>"
+                             f"<p class=vis>Texte visible : {e(r.visible_text or '—')}</p>"
+                             f"<p class=kw>{e(', '.join(r.keywords))}</p></td>")
+            else:
+                cells.append(f"<td class=err>{e(str(r))}</td>")
+        rows.append(f"<tr><td class=n>{i + 1}</td>{''.join(cells)}</tr>")
+    head = "".join(f"<th>{e(m)}</th>" for m in models)
+    return f"""<!doctype html><html><head><meta charset=utf-8><title>Vision models</title><style>
+body{{font:14px Segoe UI,Arial,sans-serif;margin:16px;background:#fff;color:#222}}
+table{{border-collapse:collapse;width:100%}} td,th{{border:1px solid #ccc;vertical-align:top;padding:8px}}
+th{{background:#f3f3f3;position:sticky;top:0}} td.pic{{width:300px}} td.pic img{{max-width:300px;max-height:260px}}
+.src{{font-size:11px;color:#666;word-break:break-all}} pre{{white-space:pre-wrap;font-size:11px}}
+.vis{{color:#555}} .kw{{color:#06c;font-size:12px}} .err{{color:#b00}} td.n{{width:24px}}
+</style></head><body><h1>Vision models — {e(cfg.world_title or cfg.world or 'index')} — {time.strftime('%Y-%m-%d %H:%M')}</h1>
+<ul>{''.join(summary)}</ul><table><tr><th>#</th><th>picture</th>{head}</tr>{''.join(rows)}</table></body></html>"""

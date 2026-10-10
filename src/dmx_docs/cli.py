@@ -56,6 +56,11 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("describe", help="describe pictures with the local vision model (Ollama); run before embed")
     p.add_argument("--max-minutes", type=float, help="stop after this many minutes (resume later)")
     p.add_argument("--retry", action="store_true", help="describe again the pictures that failed or timed out")
+    p.add_argument("--compare", metavar="MODELS",
+                   help="comma-separated Ollama models: describe a sample with each and write a side-by-side "
+                        "HTML page (the index is not changed)")
+    p.add_argument("--sample", type=int, default=25, help="pictures in the --compare sample (default 25)")
+    p.add_argument("--out", help="folder for the --compare page (default: the world's logs folder)")
 
     sub.add_parser("status", help="show index statistics")
 
@@ -125,6 +130,11 @@ def main(argv: list[str] | None = None) -> None:
             print("Stopped. Run `dmx-docs ocr` again to continue.")
             sys.exit(130)
     elif args.command == "describe":
+        if args.compare:
+            from .describe import run_compare
+            run_compare(cfg, [m.strip() for m in args.compare.split(",") if m.strip()], sample=args.sample,
+                        out_dir=args.out)
+            return
         from .describe import run_describe
         _setup_logging(cfg, "describe")
         try:

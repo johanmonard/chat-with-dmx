@@ -188,3 +188,26 @@ def test_cli_describe_skips_with_exit_code_0(tmp_path, capsys):
                    "[vision]\nurl = 'http://127.0.0.1:9'\n", encoding="utf-8")
     main(["--config", str(cfg), "describe"])
     assert "skipped" in capsys.readouterr().out
+
+
+def test_compare_writes_a_page_and_leaves_the_index_alone(world, fake_ollama, tmp_path):
+    cfg, _ = world
+    fake_ollama.models.append("other-vision")
+    before = rows(cfg, "SELECT count(*) FROM chunks")[0][0]
+    path = describe.run_compare(cfg, ["test-vision", "other-vision"], sample=3, out_dir=str(tmp_path / "out"),
+                                progress=quiet)
+    html = open(path, encoding="utf-8").read()
+    assert "test-vision" in html and "other-vision" in html and "préhenseur à ventouses" in html  # ' is escaped
+    assert html.count("<tr><td class=n>") == 3
+    assert rows(cfg, "SELECT count(*) FROM chunks")[0][0] == before
+    assert rows(cfg, "SELECT count(*) FROM picture_uses")[0][0] == 0
+    assert rows(cfg, "SELECT count(*) FROM picture_cache")[0][0] == 0
+
+
+def test_compare_reports_a_missing_model(world, fake_ollama, tmp_path):
+    cfg, _ = world
+    msgs = []
+    path = describe.run_compare(cfg, ["test-vision", "missing:7b"], sample=2, out_dir=str(tmp_path / "o"),
+                                progress=msgs.append)
+    assert any("ollama pull missing:7b" in m for m in msgs)
+    assert "missing:7b" in open(path, encoding="utf-8").read()
