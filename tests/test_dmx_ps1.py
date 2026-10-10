@@ -234,6 +234,8 @@ def test_update_that_succeeds_says_done_and_exits_zero(ready):
     r = run(shared, local, "update", "-World", "projects", env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "Running: dmx-docs --world projects embed" in r.stdout
+    out = r.stdout
+    assert out.index("--world projects index") < out.index("--world projects ocr") < out.index("--world projects embed")
     assert "Done. The 'projects' index in the shared folder is up to date and unlocked." in r.stdout
     assert "Stopped" not in r.stdout
     assert not (shared / "worlds" / "projects" / "LOCK").exists()
@@ -265,3 +267,21 @@ def test_pull_warns_about_a_register_left_in_the_shared_folder(ready):
     assert f"{stale} is not used" in r.stdout
     assert r"worlds\projects\register.csv" in r.stdout and "move it" in r.stdout
     assert stale.exists() and (shared / "worlds" / "projects" / "register.csv").read_bytes() == kept  # nothing was touched
+
+
+def test_language_files_are_copied_to_the_machine(ready):
+    shared, local, env = ready
+    td = shared / "tools" / "tessdata"
+    td.mkdir(parents=True)
+    (td / "fra.traineddata").write_bytes(b"model")
+    r = run(shared, local, "update", "-World", "projects", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (local / "tessdata" / "fra.traineddata").read_bytes() == b"model"
+
+
+def test_ocr_command_runs_locked_for_one_world(ready):
+    shared, local, env = ready
+    r = run(shared, local, "ocr", "-World", "projects", "--max-minutes", "5", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Running: dmx-docs --world projects ocr --max-minutes 5" in r.stdout
+    assert not (shared / "worlds" / "projects" / "LOCK").exists()

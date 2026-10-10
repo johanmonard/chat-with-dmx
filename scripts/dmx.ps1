@@ -24,7 +24,8 @@ first argument; otherwise the script asks (Enter = projects).
   web            configuration page (folders, exclusions, scans), checked in when closed
   index          scan for new/changed/deleted files
   embed [args]   compute embeddings, e.g. embed --max-minutes 300
-  update         index, then embed: unattended run, e.g. on the GPU machine (a failing step stops
+  ocr [args]     read scanned PDF pages (OCR), e.g. ocr --max-minutes 300 or ocr --retry
+  update         index, then OCR, then embed: unattended run, e.g. on the GPU machine (a failing step stops
                  the run, is named in the last message and becomes the exit code)
   pull           refresh this machine's read-only copy for Claude Desktop (no lock)
   status         index statistics of the local copy
@@ -34,7 +35,7 @@ first argument; otherwise the script asks (Enter = projects).
 #>
 param(
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet('setup', 'web', 'index', 'embed', 'update', 'pull', 'status', 'search', 'unlock', 'migrate')]
+    [ValidateSet('setup', 'web', 'index', 'embed', 'ocr', 'update', 'pull', 'status', 'search', 'unlock', 'migrate')]
     [string]$Command,
     [string]$World,
     [switch]$Force,
@@ -47,6 +48,7 @@ $App = Split-Path $PSScriptRoot -Parent
 $Shared = Split-Path $App -Parent
 $SharedConfig = Join-Path $Shared 'config.toml'
 $SharedModels = Join-Path $Shared 'models'
+$SharedTessdata = Join-Path $Shared 'tools\tessdata'
 $Logs = Join-Path $Shared 'logs'
 $Uv = Join-Path $Shared 'tools\uv.exe'
 
@@ -54,6 +56,7 @@ $Uv = Join-Path $Shared 'tools\uv.exe'
 $Local = if ($env:DMX_RAG_LOCAL) { $env:DMX_RAG_LOCAL } else { 'C:\dmx-rag' }
 $LocalData = Join-Path $Local 'data'
 $LocalModels = Join-Path $LocalData 'models'
+$LocalTessdata = Join-Path $Local 'tessdata'
 $LocalConfig = Join-Path $Local 'config.toml'
 $Venv = Join-Path $Local 'venv'
 $Py = Join-Path $Venv 'Scripts\python.exe'
@@ -148,6 +151,13 @@ function Publish-Models {
     if (-not (Test-Path (Join-Path $SharedModels '*')) -and (Test-Path (Join-Path $LocalModels '*'))) {
         Say 'Saving the embedding model to the shared folder for the other machines ...'
         robocopy $LocalModels $SharedModels /E /NFL /NDL /NJH /NP | Out-Null
+    }
+}
+
+function Sync-Tessdata {
+    # OCR language files (a few MB each): mirrored from the shared folder when they change.
+    if (Test-Path (Join-Path $SharedTessdata '*.traineddata')) {
+        robocopy $SharedTessdata $LocalTessdata *.traineddata /MIR /NFL /NDL /NJH /NP | Out-Null
     }
 }
 
@@ -396,6 +406,7 @@ function Invoke-Locked([string]$what, [object[]]$steps) {
     try {
         Assert-Env
         Sync-Models
+        Sync-Tessdata
         if (-not $resumed -or -not (Test-Path $LocalDb)) { Copy-MasterToLocal }
         $working = $true
         foreach ($dmxArgs in $steps) {
@@ -442,12 +453,13 @@ try {
     # unlock must work even while the layout cannot be moved (a lock of the old layout is why).
     if ($Command -ne 'unlock') { Move-LegacyLayout }
     switch ($Command) {
-        'setup' { Install-Env; Sync-Models }
+        'setup' { Install-Env; Sync-Models; Sync-Tessdata }
         'migrate' { Say 'The layout is up to date.' }
         'web' { Invoke-Locked 'web' @(, (@('web') + $Rest)) }
         'index' { Invoke-Locked 'index' @(, (@('index') + $Rest)) }
         'embed' { Invoke-Locked 'embed' @(, (@('embed') + $Rest)) }
-        'update' { Invoke-Locked 'update' @(@('index'), @('embed')) }
+        'ocr' { Invoke-Locked 'ocr' @(, (@('ocr') + $Rest)) }
+        'update' { Invoke-Locked 'update' @(@('index'), @('ocr'), @('embed')) }
         'pull' {
             Assert-Env
             Sync-Models
