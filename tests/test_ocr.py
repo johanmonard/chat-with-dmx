@@ -67,6 +67,10 @@ def doc_id(con, name):
 def test_line_filter_keeps_prose_and_drops_drawing_noise():
     assert ocr.keep_line("Remplir le tube de graisse, ensuite enfiler l'axe pour faire sortir le surplus")
     assert ocr.keep_line("Fill the tube with grease (Ref: Mobil")
+    assert ocr.keep_line("Vérifier l'état de l'axe d'entraînement")
+    assert ocr.keep_line("S'assurer que l'opérateur a coupé l'alimentation")
+    assert ocr.keep_line("Le sous-ensemble est monté sur le bâti")
+    assert ocr.keep_line("Retirar el sí del motor")
     assert not ocr.keep_line("2 4 5 6 | 140,141 20 11#,12 /10 = LA")
     assert not ocr.keep_line("| | 8 5SF HP) AVE :")
     assert not ocr.keep_line("Paloma")  # a single word is not enough
@@ -115,6 +119,34 @@ def test_pages_already_read_are_not_candidates_unless_retried_or_outdated(scans)
     assert plain[scan] == [2]                      # timeout skipped, older version redone
     retried = {j.doc_id: j.pages for j in ocr.candidates(con, cfg.max_pdf_pages, retry=True)}
     assert retried[scan] == [1, 2]
+    con.close()
+
+
+def test_a_page_with_ocr_text_is_judged_by_its_record(scans):
+    cfg, _ = scans
+    con = store.connect(cfg.db_path)
+    mixed = doc_id(con, "mixed.pdf")
+    con.execute("INSERT INTO chunks(doc_id, page_no, seq, text) VALUES(?, 2, 1, ?)", (mixed, MIXED_SCAN))
+    con.commit()
+
+    def jobs(retry=False):
+        return {j.doc_id: j.pages for j in ocr.candidates(con, cfg.max_pdf_pages, retry=retry)}
+
+    assert mixed not in jobs()                     # OCR text of 50+ characters, no record: nothing to do
+    con.execute("INSERT INTO ocr_pages(doc_id, page_no, status, chars, ocr_version) VALUES(?, 2, 'text', ?, ?)",
+                (mixed, len(MIXED_SCAN), ocr.OCR_VERSION - 1))
+    con.commit()
+    assert jobs()[mixed] == [2]                    # read by an older OCR_VERSION: redone
+    assert jobs(retry=True)[mixed] == [2]
+    con.execute("UPDATE ocr_pages SET status = 'timeout', ocr_version = ? WHERE doc_id = ? AND page_no = 2",
+                (ocr.OCR_VERSION, mixed))
+    con.commit()
+    assert mixed not in jobs()                     # timed out at this version: skipped ...
+    assert jobs(retry=True)[mixed] == [2]          # ... unless retried
+    con.execute("UPDATE ocr_pages SET status = 'text', ocr_version = ? WHERE doc_id = ? AND page_no = 2",
+                (ocr.OCR_VERSION, mixed))
+    con.commit()
+    assert mixed not in jobs(retry=True)           # control: read with text at this version, never again
     con.close()
 
 

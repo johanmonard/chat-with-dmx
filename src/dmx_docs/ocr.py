@@ -19,16 +19,27 @@ PAGES_PER_JOB = 20       # pages of one document read by one worker call
 STALL_S = 600            # no job finished for this long: the running ones are stuck
 PROGRESS_EVERY_S = 15
 
-_WORD = re.compile(r"^[^\W\d_]{2,}[.,;:!?)]?$")
-_VOWEL = re.compile(r"[aeiouyàâäéèêëîïôöûùüÿAEIOUYÀÂÄÉÈÊËÎÏÔÖÛÙÜ]")
+_LEAD = "(«\"'“‘["        # punctuation before a word
+_TAIL = ".,;:!?)»\"'”’]"  # punctuation after a word
+_WORD = re.compile(r"^[^\W\d_]+(?:['’\-][^\W\d_]+)*$")  # letters, joined by an apostrophe or a hyphen
+_VOWEL = re.compile(r"[aeiouyàâäéèêëîïôöûùüÿœæáíóúAEIOUYÀÂÄÉÈÊËÎÏÔÖÛÙÜŒÆÁÍÓÚ]")
+
+
+def _word(token: str) -> str | None:
+    """The word of a token, without the punctuation around it, or None."""
+    core = token.lstrip(_LEAD).rstrip(_TAIL)
+    return core if _WORD.match(core) and _VOWEL.search(core) else None
 
 
 def keep_line(line: str) -> bool:
-    """A line of real text, not drawing or photo noise: at least 2 word-like tokens (letters
-    only, with a vowel), making up at least half of the line's tokens."""
+    """A line of real text, not drawing or photo noise: at least 2 words of 2+ letters, and words
+    making up at least half of the line's tokens. A word is letters, possibly joined by an
+    apostrophe or a hyphen (l'axe, sous-ensemble), with a vowel. A single letter (a, y) is a word
+    for the half of the tokens, but not one of the 2 words."""
     tokens = line.split()
-    words = [t for t in tokens if _WORD.match(t) and _VOWEL.search(t)]
-    return len(words) >= 2 and len(words) * 2 >= len(tokens)
+    words = [w for w in map(_word, tokens) if w]
+    long_words = [w for w in words if sum(c.isalpha() for c in w) >= 2]
+    return len(long_words) >= 2 and len(words) * 2 >= len(tokens)
 
 
 def filter_text(text: str) -> str:
