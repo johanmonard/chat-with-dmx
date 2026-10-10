@@ -660,7 +660,7 @@ def pptx_pictures(path: str) -> list[list[tuple[bytes, str]]]:
 
 # ---------------------------------------------------------------- Markdown
 
-_MD_IMAGE = re.compile(r"!\[([^\]]*)\]\(([^)]*)\)")
+_MD_IMAGE = re.compile(r"!\[([^\]]*)\]\(((?:[^()]|\([^()]*\))*)\)")   # one level of (...) in the path
 _MD_TITLE = re.compile(r'^(.*?)\s+"[^"]*"$')   # ![alt](path "title")
 
 
@@ -674,7 +674,10 @@ def md_pictures(text: str) -> list[tuple[str, str]]:
     for alt, target in _MD_IMAGE.findall(text):
         target = target.strip()
         m = _MD_TITLE.match(target)
-        out.append((_md_caption(alt), m.group(1) if m else target))
+        target = m.group(1) if m else target
+        if target.startswith("<") and target.endswith(">"):  # ![alt](<path with spaces>)
+            target = target[1:-1]
+        out.append((_md_caption(alt), target))
     return out
 
 

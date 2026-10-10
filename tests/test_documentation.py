@@ -140,6 +140,39 @@ def test_link_resolution_rebases_an_unmapped_drive(tmp_path):
     assert resolve_md_link("Q:/Anything/Elsewhere/none.png", str(md), [str(root)]) is None
 
 
+def test_an_existing_link_outside_the_roots_does_not_hide_the_rebased_one(tmp_path):
+    # e.g. O: mapped as \\SERVER\... on this PC while the root is configured as \\SERVER.domain\...
+    root = tmp_path / "Share" / "DOC_Machines" / "Source"
+    (root / "Img").mkdir(parents=True)
+    make_png(root / "Img" / "a.png", (1, 2, 3))
+    other = tmp_path / "Other" / "DOC_Machines" / "Source" / "Img"
+    other.mkdir(parents=True)
+    make_png(other / "a.png", (9, 9, 9))
+    link = str(other / "a.png").replace("\\", "/")      # first candidate: exists, but outside the roots
+    allowed = lambda key: key.startswith(str(root).lower())  # noqa: E731
+    found = resolve_md_link(link, str(root / "p_FR.md"), [str(root)], allows=allowed)
+    assert found and found.lower().startswith(str(root).lower())
+
+
+def test_the_rebase_needs_two_matching_folder_names(tmp_path):
+    root = tmp_path / "Share" / "DOC_Machines" / "Source"
+    (root / "Img").mkdir(parents=True)
+    make_png(root / "Img" / "a.png", (1, 2, 3))
+    md = str(root / "p_FR.md")
+    assert resolve_md_link("Q:/X/DOC_Projets/Source/Img/a.png", md, [str(root)]) is None   # only "Source"
+    assert resolve_md_link("Q:/X/DOC_Machines/Source/Img/a.png", md, [str(root)])
+
+
+def test_link_forms_and_language_case():
+    from dmx_docs.facets import compute_documentation
+    assert md_pictures("![p](O:/x/Photo (1).png)") == [("p", "O:/x/Photo (1).png")]
+    assert md_pictures("![p](<O:/x y/z.png>)") == [("p", "O:/x y/z.png")]
+    lang = lambda name: compute_documentation("\\\\s\\Source\\7000_Appendice\\" + name, r"\\s\Source").get("language")  # noqa: E731
+    assert lang("7100_Description_de_l'application_PROJET_FR_V00.md") == "FR"   # "_de_" is a French word
+    assert lang("6216_DocxPourCreationImageS52Anotee_DE_NonVérifié.md") == "DE"
+    assert lang("Listing_en_cours.md") is None
+
+
 def test_documentation_server_tools(manual):
     cfg, _ = manual
     from mcp import Client

@@ -171,6 +171,7 @@ def compute_marketing(path: str, root: str) -> dict:
     return {}
 
 
+# Upper case only: French words in file names ("Description_de_l'application_FR") are not tags.
 _LANGUAGE = re.compile(r"_(FR|DE|EN|ES|IT)(?=_|$)")
 
 
@@ -178,9 +179,9 @@ def compute_documentation(path: str, root: str) -> dict:
     """Machine manual: the category is the chapter folder (1000_Introduction, 6000_Entretien...)
     and the language comes from the file name (..._FR_V00.md)."""
     out = compute_marketing(path, root)
-    m = _LANGUAGE.search(os.path.splitext(os.path.basename(path))[0])
-    if m:
-        out["language"] = m.group(1)
+    tags = _LANGUAGE.findall(os.path.splitext(os.path.basename(path))[0])
+    if tags:
+        out["language"] = tags[-1]  # the language tag comes last (..._DE_FR_V00: a FR translation)
     return out
 
 

@@ -212,30 +212,40 @@ def _slide_picture_raw(fs: str, path: str, slide: int, image: int | None,
     return data, ext, k, len(pictures), n
 
 
-def resolve_md_link(target: str, md_path: str, roots: list[str]) -> str | None:
-    """File a Markdown picture link points to, or None. The machine manual uses absolute drive
-    paths (O:/ASA/.../Source/...): tried through this PC's drive mapping, then rebuilt from an
-    indexed root folder whose last folder names appear in the link (drives differ between PCs)."""
+def _md_link_candidates(target: str, md_path: str, roots: list[str]) -> list[str]:
+    """Where a Markdown picture link may point to, most likely first. The machine manual uses
+    absolute drive paths (O:/ASA/.../Source/...): through this PC's drive mapping, then rebuilt
+    from the indexed root sharing the longest folder tail with the link (at least 2 folder names
+    when the root has them; drives and server spellings differ between PCs)."""
     import urllib.parse
 
     t = urllib.parse.unquote(target.strip()).replace("/", "\\")
-    candidates: list[str] = []
     if re.match(r"^[A-Za-z]:\\", t):
-        candidates.append(sources.to_unc(t))
+        candidates = [sources.to_unc(t)]
         low = t.lower()
+        rebased = []
         for root in roots:
             parts = [p for p in root.rstrip("\\").split("\\") if p]
-            for n in range(min(3, len(parts)), 0, -1):
+            for n in range(min(3, len(parts)), min(2, len(parts)) - 1, -1):
                 tail = "\\" + "\\".join(parts[-n:]).lower() + "\\"
                 i = low.find(tail)
                 if i >= 0:
-                    candidates.append(root.rstrip("\\") + "\\" + t[i + len(tail):])
+                    rebased.append((n, root.rstrip("\\") + "\\" + t[i + len(tail):]))
                     break
-    elif t.startswith("\\\\"):
-        candidates.append(t)
-    else:
-        candidates.append(os.path.normpath(os.path.join(os.path.dirname(md_path), t)))
-    return next((c for c in candidates if os.path.isfile(store.fs_path(c))), None)
+        return candidates + [path for _, path in sorted(rebased, key=lambda x: -x[0])]
+    if t.startswith("\\\\"):
+        return [t]
+    return [os.path.normpath(os.path.join(os.path.dirname(md_path), t))]
+
+
+def resolve_md_link(target: str, md_path: str, roots: list[str], allows=None) -> str | None:
+    """The file a Markdown picture link points to, or None: the first candidate that is inside
+    the indexed folders (checked before touching the file system, so a link never makes this PC
+    contact another server) and exists."""
+    for c in _md_link_candidates(target, md_path, roots):
+        if (allows is None or allows(store.path_key(c))) and os.path.isfile(store.fs_path(c)):
+            return c
+    return None
 
 
 def _md_picture_raw(fs: str, path: str, image: int | None, cfg: Config) -> tuple[bytes, str, int, int, str]:
@@ -251,11 +261,12 @@ def _md_picture_raw(fs: str, path: str, image: int | None, cfg: Config) -> tuple
     if not 1 <= k <= len(pictures):
         raise ValueError(f"image must be between 1 and {len(pictures)}")
     caption, target = pictures[k - 1]
-    found = resolve_md_link(target, path, cfg.roots)
+    found = resolve_md_link(target, path, cfg.roots, allows=cfg.allows)
     if found is None:
+        candidates = _md_link_candidates(target, path, cfg.roots)
+        if candidates and not any(cfg.allows(store.path_key(c)) for c in candidates):
+            raise ValueError(f"Picture {k} is outside the indexed folders: {target}")
         raise FileNotFoundError(f"Picture {k} of {path} not found: {target}")
-    if not cfg.allows(store.path_key(found)):
-        raise ValueError(f"Picture {k} is outside the indexed folders: {found}")
     ext = os.path.splitext(found)[1].lower()
     if ext not in PICTURE_EXTS:
         raise ValueError(f"Picture {k} cannot be shown ({ext or 'no extension'}): {found}")

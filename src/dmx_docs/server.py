@@ -298,7 +298,8 @@ def build_server(cfg: Config) -> MCPServer:
             region: Optional zoom on part of a PDF page, 'x0,y0,x1,y1' as fractions of the page
                 (0,0 = top-left), e.g. '0.5,0.5,1,1' = bottom-right quarter. Rendered sharper.
             image: For .docx files: number of the embedded picture (1 = first, document order).
-                For PowerPoint: number of the picture on the slide (1 = first).
+                For PowerPoint: number of the picture on the slide (1 = first). For Markdown
+                (.md): the number N of an [Image N] marker in the text.
         """
         caption, data, fmt = tools.view_page(path, page=page, region=region, image=image)
         return [caption, Image(data=data, format=fmt)]
@@ -317,7 +318,8 @@ def build_server(cfg: Config) -> MCPServer:
             page: PDF page number, or PowerPoint slide number (default 1).
             region: Optional part of a PDF page, 'x0,y0,x1,y1' as fractions (0,0 = top-left).
             image: For .docx files: number of the embedded picture (1 = first). For PowerPoint:
-                number of the picture on the slide.
+                number of the picture on the slide. For Markdown (.md): the number N of an
+                [Image N] marker in the text.
             name: Optional file name (without extension), e.g. "DUOMO_preheneur_SS".
         """
         return tools.export_image(path, page=page, region=region, image=image, name=name)
