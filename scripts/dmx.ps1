@@ -26,8 +26,10 @@ first argument; otherwise the script asks (Enter = projects).
   index          scan for new/changed/deleted files
   embed [args]   compute embeddings, e.g. embed --max-minutes 300
   ocr [args]     read scanned PDF pages (OCR), e.g. ocr --max-minutes 300 or ocr --retry
-  update         index, then OCR, then embed: unattended run, e.g. on the GPU machine (a failing step stops
-                 the run, is named in the last message and becomes the exit code)
+  describe [args] describe pictures with the local vision model (Ollama), e.g. describe --max-minutes 600,
+                 describe --retry, or describe --compare gemma4:12b,qwen3-vl:8b (side-by-side page, index unchanged)
+  update         index, then OCR, then picture descriptions, then embed: unattended run, e.g. on the GPU machine
+                 (a failing step stops the run, is named in the last message and becomes the exit code)
   pull           refresh this machine's read-only copy for Claude Desktop (no lock)
   status         index statistics of the local copy
   search "..."   test a search on the local copy
@@ -36,7 +38,7 @@ first argument; otherwise the script asks (Enter = projects).
 #>
 param(
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet('setup', 'web', 'index', 'embed', 'ocr', 'update', 'pull', 'status', 'search', 'unlock', 'migrate')]
+    [ValidateSet('setup', 'web', 'index', 'embed', 'ocr', 'describe', 'update', 'pull', 'status', 'search', 'unlock', 'migrate')]
     [string]$Command,
     [string]$World,
     [switch]$Force,
@@ -464,7 +466,8 @@ try {
         'index' { Invoke-Locked 'index' @(, (@('index') + $Rest)) }
         'embed' { Invoke-Locked 'embed' @(, (@('embed') + $Rest)) }
         'ocr' { Invoke-Locked 'ocr' @(, (@('ocr') + $Rest)) }
-        'update' { Invoke-Locked 'update' @(@('index'), @('ocr'), @('embed')) }
+        'describe' { Invoke-Locked 'describe' @(, (@('describe') + $Rest)) }
+        'update' { Invoke-Locked 'update' @(@('index'), @('ocr'), @('describe'), @('embed')) }
         'pull' {
             Assert-Env
             Sync-Models

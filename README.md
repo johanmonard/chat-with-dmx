@@ -240,7 +240,7 @@ U:\DMX-RAG\
   3 - Index new and changed files.cmd
   4 - Compute embeddings.cmd           from a cmd prompt you can add e.g. --max-minutes 300
   5 - Update Claude Desktop copy.cmd   local copy for Claude Desktop + the configuration to paste
-  7 - Update a world (index + embeddings).cmd   unattended: index, OCR of scanned pages, embeddings
+  7 - Update a world (index + embeddings).cmd   unattended: index, OCR of scanned pages, picture descriptions, embeddings
   Unlock after a crash.cmd
   config.toml      settings for all machines (data_dir = 'C:\dmx-rag\data') + [worlds.<name>]
   thesaurus.toml   search vocabulary shared by every world
@@ -273,6 +273,8 @@ U:\DMX-RAG\
 | `dmx-docs web [--port 8765]` | Configuration page: folders, exclusions, scans, status |
 | `dmx-docs index [--retry-errors]` | Crawl roots, extract text, update the keyword index |
 | `dmx-docs ocr [--max-minutes N] [--retry]` | Read scanned PDF pages (OCR) and add their text; run before embed |
+| `dmx-docs describe [--max-minutes N] [--retry]` | Describe pictures with the local vision model (Ollama); run before embed |
+| `dmx-docs describe --compare MODEL1,MODEL2 [--sample 25] [--out DIR]` | Side-by-side HTML page of models on a sample (index unchanged) |
 | `dmx-docs embed [--max-minutes N] [--reset]` | Add embeddings to new chunks (`--reset` after changing model) |
 | `dmx-docs status` | Counts per status/type, embedding coverage |
 | `dmx-docs search "..." [--mode keyword\|semantic\|hybrid] [--folder ...]` | Test a search |
@@ -296,6 +298,15 @@ folder, or the `DMX_DOCS_CONFIG` environment variable).
   PowerPoint files are indexed only when `.pptx` and/or `.ppt` are in `extensions`
   (see `[worlds.marketing]` in config.example.toml).
 * OCR: PDF pages with (almost) no text are read by Tesseract (built into PyMuPDF, French model by default) in a separate `ocr` step; the text is appended as extra chunks marked "(OCR)" in search results, without touching existing chunks or embeddings.
+* Picture descriptions (`dmx-docs describe`, part of `update`): a local vision model in
+  [Ollama](https://ollama.com) describes each picture once (Markdown pictures, pictures in Word
+  and PowerPoint files, PDF pages that are mostly pictures, picture files) in French with French
+  and English keywords. Each description becomes a passage of its document, marked
+  `picture N` / `whole-page picture` in search results; `search(pictures=true)` searches only them.
+  Install Ollama and `ollama pull gemma4:12b` on the GPU machine; `dmx-docs describe --compare
+  a,b` writes a side-by-side page to choose a model. Without Ollama the step is skipped.
+* Picture files (`.jpg .jpeg .png .bmp .gif .tif .tiff`, when listed in a world's `extensions`)
+  are one-page documents: found by name at once, by content once described.
 * Chunks: ~1,200–2,000 characters, never spanning two pages, so every hit has a page number.
 * Keyword search: SQLite FTS5 with BM25 ranking, case- and accent-insensitive. Codes like
   `MN-114` are matched as phrases.

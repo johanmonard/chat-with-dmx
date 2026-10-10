@@ -88,11 +88,13 @@ max_read_chars = 40000
 # [worlds.projects]
 # title = "Projects"
 # profile = "projects"
+# vision = false   # picture descriptions off for this world
 #
 # [worlds.marketing]
 # title = "Marketing"
 # profile = "marketing"
-# extensions = ['.pdf', '.docx', '.doc', '.pptx', '.ppt']
+# # picture files become one-page documents, described by the describe step
+# extensions = ['.pdf', '.docx', '.doc', '.pptx', '.ppt', '.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff']
 # roots = ['\\server\share\Marketing']
 #
 # [worlds.documentation]
@@ -111,3 +113,16 @@ max_read_chars = 40000
 # languages = 'fra'
 # dpi = 300
 # tessdata = 'C:\dmx-rag\tessdata'
+
+# Picture descriptions by a local vision model (dmx-docs describe; part of `update`). Needs Ollama
+# on the machine that runs the step (https://ollama.com) and the model: `ollama pull gemma4:12b`.
+# Without Ollama the step is skipped with a message. Pictures are sent only to this url.
+# A world can switch it off with vision = false.
+# [vision]
+# enabled = true
+# url = 'http://127.0.0.1:11434'
+# model = 'gemma4:12b'
+# timeout_s = 180
+# min_side = 150            # smaller pictures (icons) are not described
+# pdf_picture_share = 0.15  # a PDF page with text is described when pictures cover this share of it
+# parallel_requests = 1
