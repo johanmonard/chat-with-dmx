@@ -1,6 +1,6 @@
 # OCR of scanned and image-only PDF pages (sub-project B1)
 
-Date: 2026-10-10. Status: approved; amended by the implementation plan (chunk ids in ocr_pages, crash handling).
+Date: 2026-10-10. Status: approved; amended by the implementation plan (chunk ids in ocr_pages, crash handling) and by the final review (pixel cap per page, Tesseract log file, stop after 50 failed jobs).
 
 ## Goal
 
@@ -49,15 +49,33 @@ first, then pages inside `ok` documents.
 
 ### New step `ocr` (between `index` and `embed`)
 
-* CLI: `dmx-docs [--world W] ocr [--max-minutes N]`. Resumable like `embed`: Ctrl+C or the time
+* CLI: `dmx-docs [--world W] ocr [--max-minutes N] [--retry]`. Resumable like `embed`: Ctrl+C or the time
   limit stops after committing what is done; the next run continues.
-* Work is done per document in a process pool (`workers` from the config): open the PDF once,
-  OCR its candidate pages at `dpi` (300) with `languages` (`fra`), return the text per page.
-  `OMP_THREAD_LIMIT=1` is set before the pool starts so that 16 workers do not oversubscribe
-  the CPU.
-* Hang protection like the indexer: if no document finishes for 10 minutes, the pool is
-  restarted and the pending documents' pages are recorded with status `timeout` (not retried
+* Work is done in jobs of up to 20 pages (`PAGES_PER_JOB`) of one document, in a process pool
+  (`workers` from the config), with at most one job per worker in flight (so every job in
+  flight is really running): open the PDF once, OCR the job's candidate pages at `dpi` (300)
+  with `languages` (`fra`), return the text per page. `OMP_THREAD_LIMIT=1` is set before the
+  pool starts so that 16 workers do not oversubscribe the CPU.
+* **Pixel cap per page.** A page rendered for OCR needs about 12 bytes per pixel, i.e. 2.3 GB
+  for an A0 drawing at 300 dpi, and a folder of drawings puts every worker on such pages at
+  once. A page that would exceed `MAX_OCR_PIXELS` (40 million pixels) is read at a lower
+  resolution: `max(100, int(dpi * sqrt(40e6 / pixels)))` (an A0 page: about 160 dpi; an A4 page
+  keeps 300). Words on a drawing are big, so the text is still found.
+* **Tesseract's messages.** Tesseract writes warnings ("Line cannot be recognized!!", "Image too
+  small to scale!!") to the standard error stream of the worker, tens of thousands of lines on
+  the Projects run. Every worker (the pool and the single-worker pool of crash suspects) starts
+  by redirecting file descriptor 2 to `<logs folder>\ocr-tesseract.log` (appended; discarded if
+  that file cannot be opened), so that they reach neither the console nor the shared log.
+* Hang protection like the indexer: if no job finishes for 10 minutes, the pool is
+  restarted and the pages of the jobs in flight are recorded with status `timeout` (not retried
   automatically; `--retry` retries `timeout` and `error` pages).
+* **Circuit breaker.** If 50 jobs in a row (`MAX_FAILED_JOBS_IN_A_ROW`) come back with only
+  `error` pages (the file share became unreachable, language files gone), no new job is
+  submitted; the jobs in flight are recorded and the run ends with the message "50 jobs in a row
+  failed (last error: ...). Stopped: check the file share / language files, then run again; the
+  failed pages can be read again with --retry." The pages not yet tried are not recorded: they
+  stay candidates. The closing summary of any run with failed pages says how to read them again
+  (`dmx-docs ocr --retry`, launcher: `dmx.ps1 ocr -World <world> --retry`).
 * **Line filter** (noise from drawings and photos): keep a line when it has at least 2 word-like
   tokens (letters only, length >= 2, containing a vowel; trailing punctuation allowed) and
   word-like tokens are at least half of its tokens. Page text = kept lines joined by newlines,
@@ -68,8 +86,8 @@ first, then pages inside `ok` documents.
     existing chunks; when the page already had text, the OCR text is prefixed with a blank line
     so that concatenating a page's chunks still rebuilds it (read_document relies on this).
   * Each `ocr_pages` row keeps the ids of the chunks it added (`chunk_ids`), so a page read again by a newer `OCR_VERSION` replaces exactly its own OCR chunks; no column is added to `chunks` (an index copied from before this feature keeps working unchanged in Claude Desktop).
-  * New table `ocr_pages(doc_id, page_no, status, chars, ocr_version, done_at)`, primary key
-    `(doc_id, page_no)`; status `text` | `empty` | `timeout` | `error`.
+  * New table `ocr_pages(doc_id, page_no, status, chars, ocr_version, done_at, chunk_ids, error)`,
+    primary key `(doc_id, page_no)`; status `text` | `empty` | `timeout` | `error`.
   * A `no_text` document that gets at least one `text` page becomes `ok` (error cleared).
   * Existing chunks and vectors are untouched: the next `embed` only embeds the new chunks.
 * `OCR_VERSION = 1`. A higher version makes pages recorded with an older version candidates
@@ -84,12 +102,13 @@ first, then pages inside `ok` documents.
 
 ### Configuration and deployment
 
-* `[ocr]` table in config.toml (global; a world may override `enabled`):
+* `[ocr]` table in config.toml (global; a world may switch OCR off with `ocr = false`):
   `enabled = true`, `languages = 'fra'`, `dpi = 300`,
   `tessdata` (default: `<data_dir parent>\tessdata`, i.e. `C:\dmx-rag\tessdata`).
 * `scripts\dmx.ps1`:
   * copies `<shared>\tools\tessdata` to `C:\dmx-rag\tessdata` when missing or different
-    (like the embedding model);
+    (like the embedding model), with 2 retries of 5 s at most; it says when files were
+    updated and warns (without failing the step) when the copy did not work;
   * new command `ocr [args]` (locked, per world);
   * `update` becomes `index`, `ocr`, `embed` (stops at the first failing step, as today).
 * If OCR is disabled or the tessdata folder is missing, `ocr` prints why and exits 0, so
@@ -99,7 +118,8 @@ first, then pages inside `ok` documents.
 
 * Search hits from OCR chunks are marked `(OCR)` after the page reference.
 * `read_document` on a document with OCR pages adds a header note: "pages N, M: text
-  recognized by OCR (may contain recognition errors)" and no longer says "would need OCR" for
+  recognized by OCR (may contain recognition errors)", listing only the OCR pages that this
+  call shows (no note when none of them is OCR), and no longer says "would need OCR" for
   pages that have OCR text.
 * `index_status` shows `OCR: X pages with text, Y without usable text (photos, drawings),
   Z failed`.
@@ -122,11 +142,15 @@ skipped when neither exists.
 
 * candidate selection: image page selected, text page not, page with < 50 chars selected,
   page already in `ocr_pages` not;
-* run: words of the image page found by keyword search, chunk flagged `ocr`, doc `no_text`
+* run: words of the image page found by keyword search, chunk recorded in `ocr_pages.chunk_ids`, doc `no_text`
   becomes `ok`, `(OCR)` label in search, read_document note, embed embeds the new chunks;
 * second run processes 0 pages; file change → OCR redone; `--max-minutes` stops and resumes;
 * line filter unit tests (prose kept, noise dropped, mixed line);
 * disabled / no tessdata → message, exit 0;
+* a huge page is still read, at a lower resolution (dpi computation: A4 keeps 300, A0 gets about 160);
+* Tesseract's messages from the workers land in `ocr-tesseract.log`, not on the console;
+* 50 failed jobs in a row stop the run and leave the rest as candidates; the summary of a run
+  with failed pages names `ocr --retry`;
 * dmx.ps1: `update` runs index, ocr, embed in order (temp-folder test with the stub CLI,
   as the existing ones); tessdata copy.
 

@@ -70,7 +70,8 @@ opens in your browser at <http://127.0.0.1:8765> and is only reachable from this
   is removed at the next scan.
 * **Scan for changes**: indexes new, modified and deleted files, then computes embeddings
   (search by meaning). Live progress is shown. *Stop* keeps what is done, and the next scan
-  continues from there.
+  continues from there. The scan runs index and embeddings only: scanned PDF pages become
+  searchable with `dmx-docs ocr` (launcher 7 includes it, see section 6).
 * **Files that could not be read** lists corrupt and password-protected files, scans
   without text, and skipped files, each with the reason.
 * **Exclusion patterns** apply everywhere, by name (e.g. `~$*`, `Archives`) or by path
@@ -92,6 +93,7 @@ without restarting anything.
 * Later runs only process new or modified files and remove deleted ones, so they are quick.
 * Files that could not be read (corrupt, password-protected, scanned PDFs without text)
   are counted in the summary. Details are in `data_dir\logs`. `--retry-errors` tries them again.
+  The scanned PDFs without text are read by `dmx-docs ocr` (OCR, see the Reference below).
 
 Then compute the embeddings for by-meaning search:
 
@@ -209,7 +211,9 @@ with jargon, abbreviations and exact cross-language terms.
 
 `scripts\update_index.bat` runs `index` and then `embed` (5 h at most). Schedule it every night
 with the **Windows Task Scheduler** (*Create Basic Task → Daily → Start a program →*
-`C:\dmx\chat-with-dmx\scripts\update_index.bat`).
+`C:\dmx\chat-with-dmx\scripts\update_index.bat`). It does not read scanned pages: run
+`dmx-docs ocr` (before `embed`) for those, or use launcher 7 of section 6, which does index,
+OCR and embeddings.
 
 > Mapped drives (`Z:\`) exist only in your logged-on session. If the task must run while you
 > are logged off, use UNC paths (`\\server\share\...`) in `roots`.
