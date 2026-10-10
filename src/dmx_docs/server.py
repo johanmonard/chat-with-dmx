@@ -287,8 +287,9 @@ def build_server(cfg: Config) -> MCPServer:
     def view_page(path: str, page: int = 1, region: str | None = None,
                   image: int | None = None) -> list[str | Image]:
         """Look at a document as an image: a PDF page as it is printed (drawings, schematics,
-        layouts, photos, tables), a picture embedded in a Word .docx (photos of FAT reports...), or
-        a picture on a PowerPoint slide (page = slide number, image = n-th picture on it).
+        layouts, photos, tables), a picture embedded in a Word .docx (photos of FAT reports...),
+        a picture on a PowerPoint slide (page = slide number, image = n-th picture on it), or a
+        picture file (JPG, PNG...).
         Use it when the extracted text is not enough: visual content, garbled tables, values in
         drawings. Reads the live file, so it needs access to the file server.
 
@@ -309,8 +310,8 @@ def build_server(cfg: Config) -> MCPServer:
                      name: str | None = None) -> str:
         """Save a picture from a document as an image FILE on the user's PC, to use it elsewhere
         (presentation, report, email): a PDF page or a zoomed region of it (rendered sharply, up
-        to 2400 px), or a picture embedded in a .docx or on a PowerPoint slide (original
-        resolution). Returns the file path, in the user's local export folder (default
+        to 2400 px), a picture embedded in a .docx or on a PowerPoint slide (original
+        resolution), or a copy of a picture file (JPG, PNG...). Returns the file path, in the user's local export folder (default
         C:\\dmx-rag\\exports). Check the page/region first with view_page.
 
         Args:

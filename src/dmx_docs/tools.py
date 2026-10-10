@@ -14,11 +14,12 @@ from datetime import datetime
 
 from . import facets, machines, register, sources, store
 from .config import Config
-from .extract import extract_file
+from .extract import PICTURE_EXTS, docx_picture_names, extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
 
 TYPE_LABEL = {".pdf": "PDF", ".docx": "Word", ".doc": "Word 97-2003",
               ".pptx": "PowerPoint", ".ppt": "PowerPoint 97-2003", ".md": "Markdown"}
+TYPE_LABEL.update(dict.fromkeys(PICTURE_EXTS, "Picture"))
 SLIDE_EXTS = (".pptx", ".ppt")
 
 # Query/passage cosine similarity with multilingual-e5-large, calibrated on the indexed
@@ -152,9 +153,7 @@ def _docx_picture_raw(fs: str, image: int | None) -> tuple[bytes, str, int, int]
 
     with zipfile.ZipFile(fs) as z:
         media = [n for n in z.namelist() if n.startswith("word/media/")]
-        media.sort(key=lambda n: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", n)])
-        shown = [n for n in media if os.path.splitext(n)[1].lower() in
-                 (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff")]
+        shown = docx_picture_names(z)
         if not shown:
             raise ValueError("No picture that can be shown in this file"
                              + (f" ({len(media)} vector drawings only)" if media else ""))
@@ -291,7 +290,7 @@ def _size(n: int | None) -> str:
 def _page_label(ext: str) -> str:
     if ext in SLIDE_EXTS:
         return "slide"
-    return "page" if ext in (".pdf", ".md") else "page (approx.)"
+    return "page" if ext in (".pdf", ".md") or ext in PICTURE_EXTS else "page (approx.)"
 
 
 def _units(ext: str) -> str:
@@ -485,8 +484,12 @@ class DocTools:
             label = f' "{caption}"' if caption else ""
             return (f"{path} — picture {k} of {total}{label} (the [Image {k}] marker in the text), "
                     f"{w}x{h} px. Use image=N for the others."), data, fmt
-        raise ValueError(f"Pictures of {TYPE_LABEL.get(ext, ext)} files cannot be shown "
-                         "(only PDF pages and pictures in .docx, PowerPoint and Markdown files).")
+        if ext in PICTURE_EXTS:
+            with open(fs, "rb") as f:
+                data, fmt, w, h = _scaled_picture(f.read(), ext)
+            return f"{path} — picture file, shown at {w}x{h} px.", data, fmt
+        raise ValueError(f"Pictures of {TYPE_LABEL.get(ext, ext)} files cannot be shown (only PDF pages, "
+                         "pictures in .docx, PowerPoint and Markdown files, and picture files).")
 
     # -------------------------------------------------------- export_image
     def export_image(self, path: str, page: int = 1, region: str | None = None,
@@ -514,9 +517,13 @@ class DocTools:
         elif ext == ".md":
             data, out_ext, k, total, _ = _md_picture_raw(fs, path, image, self.cfg)  # original file
             default, what = f"{stem}_img{k}", f"picture {k} of {total}"
+        elif ext in PICTURE_EXTS:
+            with open(fs, "rb") as f:
+                data = f.read()  # the original file
+            out_ext, default, what = ext, stem, "picture file"
         else:
-            raise ValueError(f"Images can only be exported from PDF pages and pictures in .docx, "
-                             f"PowerPoint and Markdown files, not {ext}")
+            raise ValueError(f"Images can only be exported from PDF pages, pictures in .docx, "
+                             f"PowerPoint and Markdown files, and picture files, not {ext}")
         folder = self.cfg.export_dir or default_export_dir(self.cfg)
         os.makedirs(folder, exist_ok=True)
         base = _safe_name(name) if name else default
@@ -790,7 +797,8 @@ class DocTools:
             return f"No indexed file matches '{name}'."
         lines = [f"{len(rows)} files matching '{name}':"]
         for r in rows:
-            extra = "" if r["status"] == "ok" else f", status: {r['status']}"
+            extra = ("" if r["status"] == "ok" else ", not described yet" if r["ext"] in PICTURE_EXTS
+                     and r["status"] == "no_text" else f", status: {r['status']}")
             lines.append(f"- {r['path']} ({TYPE_LABEL.get(r['ext'], r['ext'])}, {r['n_pages'] or 0} pages, "
                          f"{_size(r['size'])}, modified {_date(r['mtime'])}{extra})")
         return "\n".join(lines)
@@ -912,7 +920,9 @@ class DocTools:
             shown_until = p
         header = (f"{path} ({TYPE_LABEL.get(info.get('ext'), info.get('ext'))}, {last} {_units(info.get('ext', ''))}, "
                   f"modified {_date(info.get('mtime'))}; source: {info['source']})")
-        if info.get("status") == "no_text":
+        if info.get("status") == "no_text" and info.get("ext") in PICTURE_EXTS:
+            header += "\nNote: a picture file with no description yet — look at it with view_page."
+        elif info.get("status") == "no_text":
             header += "\nNote: this PDF has (almost) no text layer — probably a scan; content may be missing."
         ocr_shown = [p for p in info.get("ocr_pages", ()) if start_page <= p <= shown_until]  # OCR pages in this output
         if ocr_shown:

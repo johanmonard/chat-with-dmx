@@ -88,6 +88,8 @@ def extract_file(path: str, options: dict | None = None) -> Extracted:
             return extract_ppt(path, options.get("doc_converter", "auto"), options.get("libreoffice_path"))
         if ext == ".md":
             return extract_md(fs)
+        if ext in PICTURE_EXTS:
+            return extract_picture_file(path)
         return Extracted(status="skipped", error=f"unsupported extension {ext}")
     except Exception as e:  # corrupt or unreadable files must not stop the run
         return Extracted(status="error", error=f"{type(e).__name__}: {e}"[:500])
@@ -656,6 +658,29 @@ def pptx_pictures(path: str) -> list[list[tuple[bytes, str]]]:
                 pictures.append((blob, ext))
         slides.append(pictures)
     return slides
+
+
+def docx_picture_names(z) -> list[str]:
+    """Pictures of a .docx (an open ZipFile) that can be shown, in the numbering of view_page's image=N:
+    word/media files in natural order (image2 before image10), vector drawings (EMF/WMF) left out."""
+    media = [n for n in z.namelist() if n.startswith("word/media/")]
+    media.sort(key=lambda n: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", n)])
+    return [n for n in media if os.path.splitext(n)[1].lower() in PICTURE_EXTS]
+
+
+# ------------------------------------------------------------ picture files
+
+def picture_title(path: str) -> str:
+    """A picture file's name as words: 'Paloma_4R-tray loader.png' -> 'Paloma 4R tray loader'."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    return re.sub(r"[_\-.\s]+", " ", stem).strip() or stem
+
+
+def extract_picture_file(path: str) -> Extracted:
+    """A picture file is a one-page document without text: found by its name at once, by its content
+    once the `describe` step has added its description (which also makes it 'ok')."""
+    return Extracted(status="no_text", n_pages=1, title=picture_title(path),
+                     error="picture file: no description yet (describe step)")
 
 
 # ---------------------------------------------------------------- Markdown
