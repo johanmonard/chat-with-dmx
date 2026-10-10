@@ -71,6 +71,9 @@ Never answer from the first search alone. Follow this loop for every question:
    full path + page, e.g. \\\\server\\share\\THOR\\5_Gestion\\FAT.pdf (p. 7). Prefer the most recent
    document when versions disagree and say so. State clearly what was not found or is
    uncertain; never fill gaps with general knowledge presented as coming from the documents.
+
+Hits marked (OCR) come from scanned pages read by OCR: the text can contain recognition errors -
+check codes, numbers and names with view_page before quoting them.
 """
 
 MARKETING_INSTRUCTIONS = """\
@@ -96,6 +99,9 @@ Never answer from the first search alone. Follow this loop for every question:
 5. SYNTHESIZE in the user's language, only from what you read. Cite every fact as full path +
    page or slide. Marketing material is promotional: say so when a figure only comes from a
    brochure. State clearly what was not found.
+
+Hits marked (OCR) come from scanned pages read by OCR: the text can contain recognition errors -
+check codes, numbers and names with view_page before quoting them.
 """
 
 GENERIC_INSTRUCTIONS = """\
@@ -103,6 +109,8 @@ Read-only access to the company's "{title}" documents (Demaurex: robotic packagi
 Search with `search` (2-4 reformulated queries, several languages), check each hit by reading it
 with `read_document` / `find_in_document`, look at pictures with `view_page`, browse with
 `list_folder`, and answer only from what you read, citing full path + page.
+Hits marked (OCR) come from scanned pages read by OCR: the text can contain recognition errors -
+check codes, numbers and names with view_page before quoting them.
 """
 
 

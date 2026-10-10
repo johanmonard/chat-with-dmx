@@ -236,6 +236,19 @@ def _units(ext: str) -> str:
     return "slides" if ext in SLIDE_EXTS else "pages"
 
 
+def _has_ocr_table(con) -> bool:
+    return con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ocr_pages'").fetchone() is not None
+
+
+def _ocr_text_pages(con, doc_ids) -> set[tuple[int, int]]:
+    """(doc_id, page_no) of pages whose text comes from OCR. Empty for indexes without OCR."""
+    ids = list(doc_ids)
+    if not ids or not _has_ocr_table(con):
+        return set()
+    return {(r[0], r[1]) for r in con.execute(
+        f"SELECT doc_id, page_no FROM ocr_pages WHERE status = 'text' AND doc_id IN ({','.join('?' * len(ids))})", ids)}
+
+
 class DocTools:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -307,6 +320,7 @@ class DocTools:
                                         modified_after=modified_after, mode=mode,
                                         allowed=self.cfg.allows, facets=facet_filter, expand=expand)
             doc_facets = self._facets(con, {h.doc_id for h in hits})
+            ocr_pages = _ocr_text_pages(con, {h.doc_id for h in hits})
         finally:
             con.close()
         notes = []
@@ -336,7 +350,8 @@ class DocTools:
                 match += f", similarity {h.similarity:.2f}"
                 if calibrated:
                     match += " " + _strength(h.similarity)
-            lines.append(f"[{i}] {h.path} — {_page_label(h.ext)} {h.page_no}/{h.n_pages} "
+            ocr_mark = " (OCR)" if (h.doc_id, h.page_no) in ocr_pages else ""
+            lines.append(f"[{i}] {h.path} — {_page_label(h.ext)} {h.page_no}/{h.n_pages}{ocr_mark} "
                          f"({TYPE_LABEL.get(h.ext, h.ext)}, modified {_date(h.mtime)}) [{match}]")
             if h.doc_id in doc_facets:
                 lines.append("    " + doc_facets[h.doc_id])
@@ -781,7 +796,8 @@ class DocTools:
                     for r in con.execute("SELECT page_no, text FROM chunks WHERE doc_id = ? "
                                          "ORDER BY page_no, seq", (doc["id"],)):
                         pages[r["page_no"]] = pages.get(r["page_no"], "") + r["text"]
-                    info.update(ext=doc["ext"], mtime=doc["mtime"], status=doc["status"])
+                    ocr_pages = sorted(p for _, p in _ocr_text_pages(con, [doc["id"]]))
+                    info.update(ext=doc["ext"], mtime=doc["mtime"], status=doc["status"], ocr_pages=ocr_pages)
                     return pages, doc["n_pages"] or 0, info
         finally:
             con.close()
@@ -819,6 +835,10 @@ class DocTools:
                   f"modified {_date(info.get('mtime'))}; source: {info['source']})")
         if info.get("status") == "no_text":
             header += "\nNote: this PDF has (almost) no text layer — probably a scan; content may be missing."
+        if info.get("ocr_pages"):
+            shown = ", ".join(map(str, info["ocr_pages"][:30])) + (" ..." if len(info["ocr_pages"]) > 30 else "")
+            header += (f"\nNote: text of {label} {shown} was recognized by OCR (scanned page): it may contain "
+                       "recognition errors - check codes and numbers with view_page.")
         footer = ""
         if shown_until < end_page:
             footer = f"\n[Showing {label}s {start_page}-{shown_until} of {last}. " \
@@ -859,6 +879,9 @@ class DocTools:
             chunks = con.execute("SELECT count(*), sum(embedded) FROM chunks").fetchone()
             last = store.get_meta(con, "last_index_finished")
             model = store.get_meta(con, "embedding_model")
+            ocr = (con.execute("""SELECT sum(status = 'text'), sum(status = 'empty'),
+                                  sum(status IN ('error', 'timeout')) FROM ocr_pages""").fetchone()
+                   if _has_ocr_table(con) else None)
         finally:
             con.close()
         total = sum(r["n"] for r in by_status)
@@ -872,4 +895,7 @@ class DocTools:
                  "Roots: " + (", ".join(self.cfg.roots) or "none"),
                  "Excluded folders: " + (", ".join(self.cfg.excluded_dirs) or "none"),
                  f"Indexed file types: {', '.join(self.cfg.extensions)} (other types, e.g. Excel, are not searchable yet)"]
+        lines.insert(lines.index(next(l for l in lines if l.startswith("Chunks:"))) + 1,
+                     f"OCR: {ocr[0] or 0} pages with text, {ocr[1] or 0} without usable text (photos, drawings), "
+                     f"{ocr[2] or 0} failed or timed out" if ocr and any(ocr) else "OCR: not run yet")
         return "\n".join(lines)
