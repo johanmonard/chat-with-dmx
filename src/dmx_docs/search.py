@@ -361,8 +361,10 @@ class Searcher:
     def search(self, con, query: str, limit: int = 10, folder: str | None = None,
                file_type: str | None = None, modified_after: str | None = None,
                mode: str = "hybrid", allowed=None, facets: dict | None = None,
-               expand: bool | None = None) -> list[Hit]:
+               expand: bool | None = None, pictures_only: bool = False) -> list[Hit]:
         clauses, params = self._filters(folder, file_type, modified_after, facets)
+        if pictures_only:  # passages written from pictures by the vision model (describe.py)
+            clauses.append("c.id IN (SELECT chunk_id FROM picture_uses WHERE chunk_id IS NOT NULL)")
         filtered = bool(clauses)
         ranked: dict[str, list[int]] = {}
         qvec = None

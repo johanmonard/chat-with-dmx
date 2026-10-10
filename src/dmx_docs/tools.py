@@ -310,6 +310,29 @@ def _ocr_text_pages(con, doc_ids) -> set[tuple[int, int]]:
         f"SELECT doc_id, page_no FROM ocr_pages WHERE status = 'text' AND doc_id IN ({','.join('?' * len(ids))})", ids)}
 
 
+def _picture_chunks(con, chunk_ids) -> dict[int, tuple[int, int]]:
+    """chunk_id -> (page, picture number; 0 = whole page) of passages written from pictures."""
+    ids = list(chunk_ids)
+    if not ids or not store.has_table(con, "picture_uses"):
+        return {}
+    return {r[0]: (r[1], r[2]) for r in con.execute(
+        f"SELECT chunk_id, page_no, image_no FROM picture_uses WHERE chunk_id IN ({','.join('?' * len(ids))})", ids)}
+
+
+def _picture_label(ext: str, page: int, image: int) -> str:
+    if image == 0:
+        return f" — whole-page picture (view_page page={page})"
+    where = f"page={page} image={image}" if ext in SLIDE_EXTS else f"image={image}"
+    return f" — picture {image} (view_page {where})"
+
+
+def _picture_pages(con, doc_id: int) -> list[int]:
+    if not store.has_table(con, "picture_uses"):
+        return []
+    return [r[0] for r in con.execute(
+        "SELECT DISTINCT page_no FROM picture_uses WHERE doc_id = ? AND chunk_id IS NOT NULL ORDER BY page_no", (doc_id,))]
+
+
 class DocTools:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -368,7 +391,7 @@ class DocTools:
                project: str | None = None, doc_type: str | None = None, section: str | None = None,
                collection: str | None = None, machine: str | None = None, expand: bool | None = None,
                client: str | None = None, country: str | None = None, category: str | None = None,
-               language: str | None = None) -> str:
+               language: str | None = None, pictures: bool = False) -> str:
         if mode not in ("hybrid", "keyword", "semantic"):
             raise ValueError("mode must be 'hybrid', 'keyword' or 'semantic'")
         limit = max(1, min(int(limit), 30))
@@ -377,16 +400,20 @@ class DocTools:
                         "language": language}
         con = self._con()
         try:
+            if pictures and not store.has_table(con, "picture_uses"):
+                return "No picture descriptions in this index yet (the describe step has not run on it)."
             if folder:
                 folder, _ = self._resolve_folder(con, folder)
             hits = self.searcher.search(con, query, limit=limit, folder=folder, file_type=file_type,
                                         modified_after=modified_after, mode=mode,
-                                        allowed=self.cfg.allows, facets=facet_filter, expand=expand)
+                                        allowed=self.cfg.allows, facets=facet_filter, expand=expand,
+                                        pictures_only=bool(pictures))
             doc_facets = self._facets(con, {h.doc_id for h in hits})
             ocr_pages = _ocr_text_pages(con, {h.doc_id for h in hits})
+            picture_hits = _picture_chunks(con, [h.chunk_id for h in hits])
         finally:
             con.close()
-        notes = []
+        notes = ["(only passages written from pictures)"] if pictures else []
         if self.searcher.last_expanded:
             notes.append("(keyword search widened with the thesaurus: " + "; ".join(
                 f"{term} → {', '.join(eq[:6])}" for term, eq in self.searcher.last_expanded) + ")")
@@ -414,7 +441,9 @@ class DocTools:
                 if calibrated:
                     match += " " + _strength(h.similarity)
             ocr_mark = " (OCR)" if (h.doc_id, h.page_no) in ocr_pages else ""
-            lines.append(f"[{i}] {h.path} — {_page_label(h.ext)} {h.page_no}/{h.n_pages}{ocr_mark} "
+            pic = picture_hits.get(h.chunk_id)
+            pic_mark = _picture_label(h.ext, *pic) if pic else ""
+            lines.append(f"[{i}] {h.path} — {_page_label(h.ext)} {h.page_no}/{h.n_pages}{pic_mark}{ocr_mark} "
                          f"({TYPE_LABEL.get(h.ext, h.ext)}, modified {_date(h.mtime)}) [{match}]")
             if h.doc_id in doc_facets:
                 lines.append("    " + doc_facets[h.doc_id])
@@ -884,7 +913,8 @@ class DocTools:
                                          "ORDER BY page_no, seq", (doc["id"],)):
                         pages[r["page_no"]] = pages.get(r["page_no"], "") + r["text"]
                     ocr_pages = sorted(p for _, p in _ocr_text_pages(con, [doc["id"]]))
-                    info.update(ext=doc["ext"], mtime=doc["mtime"], status=doc["status"], ocr_pages=ocr_pages)
+                    info.update(ext=doc["ext"], mtime=doc["mtime"], status=doc["status"], ocr_pages=ocr_pages,
+                                picture_pages=_picture_pages(con, doc["id"]))
                     return pages, doc["n_pages"] or 0, info
         finally:
             con.close()
@@ -929,6 +959,11 @@ class DocTools:
             shown = ", ".join(map(str, ocr_shown[:30])) + (" ..." if len(ocr_shown) > 30 else "")
             header += (f"\nNote: text of {label} {shown} was recognized by OCR (scanned page): it may contain "
                        "recognition errors - check codes and numbers with view_page.")
+        pic_shown = [p for p in info.get("picture_pages", ()) if start_page <= p <= shown_until]
+        if pic_shown:
+            header += ("\nNote: passages starting with [Image N — type] or [Page entière — type] were written by a "
+                       "vision model from the pictures: look at the picture with view_page before quoting a "
+                       "precise value (number, label, code) from one.")
         footer = ""
         if shown_until < end_page:
             footer = f"\n[Showing {label}s {start_page}-{shown_until} of {last}. " \
@@ -972,6 +1007,13 @@ class DocTools:
             ocr = (con.execute("""SELECT sum(status = 'text'), sum(status = 'empty'),
                                   sum(status IN ('error', 'timeout')) FROM ocr_pages""").fetchone()
                    if _has_ocr_table(con) else None)
+            pictures = None
+            if store.has_table(con, "picture_uses"):
+                pictures = {
+                    "status": dict(con.execute("SELECT status, count(*) FROM picture_uses GROUP BY status").fetchall()),
+                    "types": con.execute("""SELECT type, count(*) n FROM picture_uses WHERE status = 'described'
+                                            GROUP BY type ORDER BY n DESC""").fetchall(),
+                    "models": [r[0] for r in con.execute("SELECT DISTINCT model FROM picture_docs ORDER BY model")]}
         finally:
             con.close()
         total = sum(r["n"] for r in by_status)
@@ -988,4 +1030,13 @@ class DocTools:
         lines.insert(lines.index(next(l for l in lines if l.startswith("Chunks:"))) + 1,
                      f"OCR: {ocr[0] or 0} pages with text, {ocr[1] or 0} without usable text (photos, drawings), "
                      f"{ocr[2] or 0} failed or timed out" if ocr and any(ocr) else "OCR: not run yet")
+        if pictures and pictures["status"]:
+            s = pictures["status"]
+            types = ", ".join(f"{t} {n}" for t, n in pictures["types"])
+            line = (f"Pictures: {s.get('described', 0)} described" + (f" ({types})" if types else "")
+                    + f", {s.get('small', 0)} too small, {s.get('logo', 0)} logos, "
+                    f"{s.get('error', 0) + s.get('timeout', 0)} failed; model {', '.join(pictures['models']) or '?'}")
+        else:
+            line = "Pictures: not described yet"
+        lines.insert(lines.index(next(l for l in lines if l.startswith("OCR:"))) + 1, line)
         return "\n".join(lines)

@@ -140,14 +140,26 @@ check codes, numbers and names with view_page before quoting them.
 """
 
 
+PICTURES_NOTE = """\
+Passages marked "picture N" or "whole-page picture" in search results were written by a vision model
+from the pictures (photos, schemas, screenshots, picture pages). Use them to find and choose pictures
+- open one with view_page (the page/image given in the hit), save it for a presentation with
+export_image - and to answer questions about what pictures show. To find a picture, search with
+pictures=true. Look at the picture with view_page before quoting a precise value (number, label,
+code) from a description.
+"""
+
+
 def instructions_for(cfg: Config) -> str:
     if cfg.profile == "projects":
-        return INSTRUCTIONS
-    if cfg.profile == "marketing":
-        return MARKETING_INSTRUCTIONS
-    if cfg.profile == "documentation":
-        return DOCUMENTATION_INSTRUCTIONS
-    return GENERIC_INSTRUCTIONS.format(title=cfg.world_title or cfg.world)
+        base = INSTRUCTIONS
+    elif cfg.profile == "marketing":
+        base = MARKETING_INSTRUCTIONS
+    elif cfg.profile == "documentation":
+        base = DOCUMENTATION_INSTRUCTIONS
+    else:
+        base = GENERIC_INSTRUCTIONS.format(title=cfg.world_title or cfg.world)
+    return base + "\n" + PICTURES_NOTE
 
 
 def build_server(cfg: Config) -> MCPServer:
@@ -159,7 +171,8 @@ def build_server(cfg: Config) -> MCPServer:
                modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
                project: str | None = None, doc_type: str | None = None, section: str | None = None,
                collection: str | None = None, machine: str | None = None,
-               expand: bool | None = None, client: str | None = None, country: str | None = None) -> str:
+               expand: bool | None = None, client: str | None = None, country: str | None = None,
+               pictures: bool = False) -> str:
         """Search the documentation by meaning and keywords. Returns excerpts with file path and page,
         how each one matched (keyword, semantic or both) and its meaning similarity to the query
         (strong >= 0.86, medium 0.83-0.86, weak < 0.83 = often off topic). These are hints: judge by reading.
@@ -189,13 +202,15 @@ def build_server(cfg: Config) -> MCPServer:
                 "Acme", "Acme Foods": documents of the projects delivered to that client
                 (from the machine register).
             country: Optional country of installation in English, e.g. "France", "United Kingdom".
+            pictures: True to search only the descriptions of pictures (photos, schemas, screenshots,
+                picture pages), e.g. to find a picture to show or export.
             Facet filters leave out documents whose facet is unknown (mostly old projects):
             search again without them when results are thin.
         """
         return tools.search(query, folder=folder, file_type=file_type, modified_after=modified_after,
                             limit=limit, mode=mode, project=project, doc_type=doc_type,
                             section=section, collection=collection, machine=machine, expand=expand,
-                            client=client, country=country)
+                            client=client, country=country, pictures=pictures)
 
     def list_projects(name: str | None = None, collection: str | None = None, machine: str | None = None,
                       limit: int = 300, client: str | None = None, country: str | None = None,
@@ -346,7 +361,7 @@ def build_server(cfg: Config) -> MCPServer:
 
     def marketing_search(query: str, folder: str | None = None, file_type: str | None = None,
                          modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
-                         category: str | None = None, expand: bool | None = None) -> str:
+                         category: str | None = None, expand: bool | None = None, pictures: bool = False) -> str:
         """Search the marketing documents by meaning and keywords. Returns excerpts with file path
         and page (slide for PowerPoint), how each one matched (keyword, semantic or both) and its
         meaning similarity to the query (strong >= 0.86, medium 0.83-0.86, weak < 0.83 = often off
@@ -363,13 +378,15 @@ def build_server(cfg: Config) -> MCPServer:
             category: Optional top folder(s), comma-separated: Brochures, Competition, Datasheets,
                 Exhibition, Graphics, Pictures, Presentations, Publications, Videos.
             expand: Widen the keyword part with the company thesaurus. Default: as configured.
+            pictures: True to search only the descriptions of pictures (photos, schemas, screenshots,
+                picture pages, picture files), e.g. to find a picture to show or export.
         """
         return tools.search(query, folder=folder, file_type=file_type, modified_after=modified_after,
-                            limit=limit, mode=mode, category=category, expand=expand)
+                            limit=limit, mode=mode, category=category, expand=expand, pictures=pictures)
 
     def plain_search(query: str, folder: str | None = None, file_type: str | None = None,
                      modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
-                     expand: bool | None = None) -> str:
+                     expand: bool | None = None, pictures: bool = False) -> str:
         """Search the documents by meaning and keywords. Returns excerpts with file path and page,
         how each one matched and its meaning similarity to the query (strong >= 0.86, medium
         0.83-0.86, weak < 0.83). These are hints: judge by reading.
@@ -382,14 +399,16 @@ def build_server(cfg: Config) -> MCPServer:
             limit: Number of results (1-30, default 10).
             mode: 'hybrid' (default), 'keyword' or 'semantic'.
             expand: Widen the keyword part with the company thesaurus. Default: as configured.
+            pictures: True to search only the descriptions of pictures (photos, schemas, screenshots,
+                picture pages), e.g. to find a picture to show or export.
         """
         return tools.search(query, folder=folder, file_type=file_type, modified_after=modified_after,
-                            limit=limit, mode=mode, expand=expand)
+                            limit=limit, mode=mode, expand=expand, pictures=pictures)
 
     def documentation_search(query: str, folder: str | None = None, file_type: str | None = None,
                              modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
                              category: str | None = None, language: str | None = None,
-                             expand: bool | None = None) -> str:
+                             expand: bool | None = None, pictures: bool = False) -> str:
         """Search the standard machine manual by meaning and keywords. Returns excerpts with file
         path, how each one matched and its meaning similarity to the query (strong >= 0.86, medium
         0.83-0.86, weak < 0.83 = often off topic), and each section's chapter and language.
@@ -406,9 +425,12 @@ def build_server(cfg: Config) -> MCPServer:
             language: Optional language(s), comma-separated: fr, de, en. Use the user's language;
                 repeat without it if a section is missing in that language.
             expand: Widen the keyword part with the company thesaurus. Default: as configured.
+            pictures: True to search only the descriptions of the manual's pictures (photos, schemas,
+                screenshots), e.g. to find a picture to show or export.
         """
         return tools.search(query, folder=folder, file_type=file_type, modified_after=modified_after,
-                            limit=limit, mode=mode, category=category, language=language, expand=expand)
+                            limit=limit, mode=mode, category=category, language=language, expand=expand,
+                            pictures=pictures)
 
     # Tools that depend on the world's profile.
     if cfg.profile == "projects":

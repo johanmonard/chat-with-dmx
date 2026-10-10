@@ -106,11 +106,11 @@ def test_marketing_server_tools(marketing):
 
 
 def test_instructions_and_name_follow_the_profile(marketing, corpus_copy, make_cfg):
-    from dmx_docs.server import INSTRUCTIONS, instructions_for
+    from dmx_docs.server import INSTRUCTIONS, PICTURES_NOTE, instructions_for
     cfg, _ = marketing
     assert cfg.server_name == "dmx-marketing"
     assert "Brochures" in instructions_for(cfg) and "0_Vente" not in instructions_for(cfg)
-    assert instructions_for(make_cfg(corpus_copy)) == INSTRUCTIONS
+    assert instructions_for(make_cfg(corpus_copy)) == INSTRUCTIONS + "\n" + PICTURES_NOTE
 
 
 def test_claude_desktop_snippet_names_the_world(marketing):
