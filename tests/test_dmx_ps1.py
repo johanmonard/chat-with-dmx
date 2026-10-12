@@ -255,6 +255,13 @@ def test_update_stopped_by_a_failing_step_does_not_report_success(ready):
     assert "saved" in r.stdout and "unlocked" in r.stdout
 
 
+def test_pull_prints_the_claude_desktop_entry_named_after_the_world(ready):
+    shared, local, env = ready
+    r = run(shared, local, "pull", "-World", "projects", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert '"dmx-projects"' in r.stdout and '"dmx-docs"' not in r.stdout
+
+
 def test_pull_warns_about_a_register_left_in_the_shared_folder(ready):
     shared, local, env = ready
     first = run(shared, local, "pull", "-World", "projects", env=env)

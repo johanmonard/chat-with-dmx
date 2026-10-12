@@ -256,7 +256,12 @@ U:\DMX-RAG\
   argument, e.g. `"7 - Update a world (index + embeddings).cmd" marketing`.
 * One machine at a time works on a world; two machines can work on two different worlds.
 * Local copies are in `C:\dmx-rag\data\<world>`. Claude Desktop gets one server per world:
-  `dmx-docs` for projects, `dmx-<world>` for the others (launcher 5 prints the entry).
+  `dmx-<world>` (`dmx-projects`, `dmx-marketing`, `dmx-documentation`; launcher 5 prints the
+  entry). The projects entry was called `dmx-docs` before: rename that key in
+  `claude_desktop_config.json` (with Claude Desktop closed, or restart it right away).
+* The skill `skills\dmx-research` teaches Claude how to search the worlds, together or alone.
+  Build its zip with `python scripts\build_skill.py U:\DMX-RAG\skills` and upload it in
+  Claude Desktop (Settings → Skills); turn off the older `dmx-docs-research` skill.
 * The launchers are in `scripts\launchers` and the logic in `scripts\dmx.ps1`. The first run
   of the new script moves the old single index (`data\`) to `worlds\projects` (renames only).
 * Use UNC paths for root folders (`\\server\share\...`): drive letters can differ between machines.

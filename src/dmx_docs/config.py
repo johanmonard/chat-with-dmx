@@ -123,8 +123,9 @@ class Config:
 
     @property
     def server_name(self) -> str:
-        """MCP server name in Claude Desktop (dmx-docs for the project documentation)."""
-        return "dmx-docs" if self.world in (None, "projects") else f"dmx-{self.world}"
+        """MCP server name in Claude Desktop: dmx-<world> (dmx-projects, dmx-marketing...); dmx-docs for
+        a config without worlds."""
+        return f"dmx-{self.world}" if self.world else "dmx-docs"
 
     def is_excluded(self, name: str, path: str) -> bool:
         name_l = name.lower()

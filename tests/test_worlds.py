@@ -36,7 +36,7 @@ def test_default_world_is_projects(config_file, tmp_path):
     assert cfg.models_dir == data / "models"  # one embedding model for all worlds
     assert cfg.register_path == str(data / "projects" / "register.csv")
     assert cfg.extensions == [".pdf", ".docx", ".doc"]
-    assert cfg.server_name == "dmx-docs"
+    assert cfg.server_name == "dmx-projects"
 
 
 def test_marketing_world_has_its_own_folder_and_file_types(config_file, tmp_path):

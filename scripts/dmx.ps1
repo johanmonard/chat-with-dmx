@@ -490,7 +490,7 @@ try {
             Say 'Preparing the search cache (about 30-60 s) ...'
             Invoke-Native $Py @('-c', "from dmx_docs.config import load_config; from dmx_docs.tools import DocTools; DocTools(load_config(r'$LocalConfig', world='$World')).search('warm-up', limit=1)") -AllowFail
             Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $LocalConfig) + $WorldArgs + @('status')) -AllowFail
-            $name = if ($World -eq 'projects') { 'dmx-docs' } else { "dmx-$World" }
+            $name = "dmx-$World"   # dmx-projects, dmx-marketing... (the projects entry was called dmx-docs before)
             $serverArgs = @('-m', 'dmx_docs.cli', '--config', $LocalConfig) + $WorldArgs + @('serve')
             $snippet = @{ mcpServers = @{ $name = @{ command = $Py; args = $serverArgs } } } | ConvertTo-Json -Depth 5
             Say "Claude Desktop configuration for this machine:`n$snippet"
