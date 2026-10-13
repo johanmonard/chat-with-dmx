@@ -223,3 +223,14 @@ def test_small_world_tree_is_not_folded(tmp_path, make_cfg):
     run_index(cfg, progress=quiet)
     out = DocTools(cfg).world_map()
     assert "  - 7000_Appendice (1)" in out and "    - 7300_Schemas (1)" in out
+
+
+def test_projects_map_never_suggests_a_bare_template_folder():
+    # folder= with a template path ("0_Vente/01_Prix_final") resolves to ONE project's folder
+    # (tools._resolve_folder), so the map must send Claude to project= + the project's own path.
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "maps" / "projects.md").read_text(encoding="utf-8")
+    filters = [row.split("|")[4] for row in text.splitlines() if row.startswith("| ") and row.count("|") >= 6]
+    assert not [f for f in filters if "`folder=`" in f]
+    assert "folder=" in text and "one project only" in text.lower()

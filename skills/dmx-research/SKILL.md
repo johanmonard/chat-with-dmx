@@ -31,7 +31,8 @@ Each connector is one **world**, a separate index of documents with its own audi
 - **Start with the map.** Call `world_map` on each world you are going to search, once per
   conversation, before routing: it says what kinds of documents the world holds, in which folders
   and with which filters, and **what it does not hold and where to look instead**. Use it to pick
-  the world, the folder (`folder=`) and the filters; when the map says a kind is missing, say so in
+  the world, the filters and the folder (in Projects a template folder exists once per project:
+  give `folder=` the project's own path, never `0_Vente\...` alone); when the map says a kind is missing, say so in
   the answer instead of searching on and on.
 
 ## 1. Route the question

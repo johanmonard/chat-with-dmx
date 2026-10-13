@@ -12,11 +12,11 @@ delivered and fixed for a given client or machine.
 | Kind | What it is | Where | Filter | Answers questions like |
 |---|---|---|---|---|
 | Offers (reference offers) | formal offers and quotations sent to clients, with scope, options and price | `0_Vente\00_Offres`, old: `Cahier des charges\Offre` | `doc_type="offre"` + `machine=` | "find offers for a Paloma 4R to reuse for a new one" |
-| Final price, negotiation | price summaries, signed price sheets | `0_Vente\01_Prix_final` | `folder=` | "what was the final price structure" |
+| Final price, negotiation | price summaries, signed price sheets | `0_Vente\01_Prix_final` | `project=` + `list_folder` | "what was the final price structure" |
 | Orders | purchase orders, order confirmations, additional orders | `0_Vente\02_Commandes`, `10_Commandes complémentaires` | `doc_type="commande"` | "what did the client finally order" |
 | Specifications | client specifications, line descriptions, validation form (signed scope: products, cadence, formats) | `0_Vente\03_Cahier_des_charges`, `04_Formulaire_validation`, old: `Cahier des charges` | `doc_type="cahier_des_charges"` | "what cadence/products were agreed" |
 | Third-party equipment | offers, orders, specifications (CDC) and manuals of bought-in equipment: conveyors, case packers, printers, vision... | `0_Vente\06_Materiel_Tiers` (purchase), `3_Mecanique\37_Materiel_Tiers`, `2_Electrique\27_Materiel_Tiers`, `8_Documentation\89_Third_Party`, `85_Received_DOC` | `doc_type="doc_fournisseur"` | "which conveyor supplier, what was specified to them" |
-| Design and development | electrical and mechanical design: open points, studies, calculations, product and tray studies, component datasheets | `2_Electrique\20_Conception`, `3_Mecanique\30_Conception`, old: `Developpement mec`, `Mécanique\Calculs` | `folder=` (doc_type often doc_electrique / doc_mecanique) | "how was the buffer designed, which tests were made" |
+| Design and development | electrical and mechanical design: open points, studies, calculations, product and tray studies, component datasheets | `2_Electrique\20_Conception`, `3_Mecanique\30_Conception`, old: `Developpement mec`, `Mécanique\Calculs` | `project=` + `section="Electrique,Mecanique"` | "how was the buffer designed, which tests were made" |
 | Modifications | modification notes after design or delivery | `21_Modifications`, `31_Modifications` | `doc_type="modification"` | "what was changed after FAT" |
 | Risk analysis, safety | risk assessments, safety checklists, CE | `3_Mecanique\32_Analyse_Risques`, `2_Electrique\28_Safety`, old: `Analyse sécurité` | `doc_type="securite"` | "risk analysis of the machine" |
 | Electrical schematics | schematics (long, mostly labels) | `2_Electrique\23_Schemas`, old: `Electrique\Schema` | `doc_type="schema_electrique"` | "schematic of the cabinet" |
@@ -44,7 +44,11 @@ delivered and fixed for a given client or machine.
 
 ## Pitfalls
 - Old projects (named folders) often have doc_type unknown or guessed: when a filtered search is thin,
-  drop `doc_type=` and use `folder=` or a plain search with `project=`.
+  drop `doc_type=` and use `project=` with `section=`, or a plain search with `project=`.
+- The folders in the table exist once per project: `folder="0_Vente\01_Prix_final"` alone searches
+  ONE project only (the first that matches). For a folder use the project's full path
+  (`folder="THOR\0_Vente\01_Prix_final"`, or the path from a hit), or `list_folder` on it; across
+  projects use `doc_type=` / `section=`.
 - Project names are often ordinary words (ANGE, BOULE, LEON): always filter with `project=`.
 - Manuals are duplicated (`80_CD Doc Project`, `80_USB stick`): cite one, do not count twice.
 - Scanned documents are OCR text ("(OCR)" hits): check figures with `view_page`.
