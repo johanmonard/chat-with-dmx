@@ -157,3 +157,45 @@ def compose(map_text: str, overview: Overview, max_chars: int = MAX_CHARS) -> st
         out.append(line)
         used += len(line) + 1
     return top + "\n".join(out) + bottom
+
+
+def _counts(con, sql: str) -> str:
+    return ", ".join(f"{k if k is not None else '(unknown)'} {n}" for k, n in con.execute(sql).fetchall()) or "none"
+
+
+def live_overview(con, cfg) -> Overview:
+    """Counts and folders of the world, from the index."""
+    from datetime import datetime
+
+    last = store.get_meta(con, "last_index_finished")
+    when = datetime.fromtimestamp(float(last)).strftime("%Y-%m-%d") if last else "never"
+    title = f"{cfg.world_title} ({cfg.world})" if cfg.world else "Index"
+    if cfg.profile == "projects":
+        rows = [tuple(r) for r in con.execute(
+            """SELECT d.path, d.path_key, f.project, f.subproject FROM docs d
+               LEFT JOIN doc_facets f ON f.doc_id = d.id""") if cfg.allows(r[1])]
+    else:
+        rows = [tuple(r) for r in con.execute("SELECT path, path_key FROM docs") if cfg.allows(r[1])]
+    head = ["## Live overview (from the index)",
+            f"{title}: {len(rows)} documents; last full index run {when}."]
+    if cfg.profile == "projects":
+        head += [f"Projects: {len({r[2] for r in rows if r[2]})}",
+                 "By collection: " + _counts(con, "SELECT collection, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC"),
+                 "By section: " + _counts(con, "SELECT section, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC"),
+                 "By document type: " + _counts(con, "SELECT doc_type, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC")]
+        tree_title = ("Template folders across projects (section folder and the folder below it; "
+                      "number of projects and documents having it):")
+        tree = template_folders(rows, cfg.roots)
+    else:
+        head.append("By file type: " + _counts(con, "SELECT ext, count(*) n FROM docs GROUP BY 1 ORDER BY n DESC"))
+        if cfg.profile == "documentation":
+            head.append("By language: " + _counts(
+                con, "SELECT language, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC"))
+        tree_title = "Folders (documents, subfolders included; depth 3):"
+        tree = folder_tree([r[:2] for r in rows], cfg.roots)
+    if store.has_table(con, "picture_uses"):
+        kinds = _counts(con, """SELECT type, count(*) n FROM picture_uses WHERE status = 'described'
+                                GROUP BY 1 ORDER BY n DESC""")
+        if kinds != "none":
+            head.append("Described pictures (search with pictures=true): " + kinds)
+    return Overview(head=head, tree_title=tree_title, tree=tree)

@@ -96,3 +96,72 @@ def test_compose_cuts_tree_not_map():
     assert len(out) <= 8000
     assert "... tree cut here (" in out and "more lines): browse with list_folder." in out
     assert out.rstrip().endswith(worldmap.FOOTER)
+
+
+# --- DocTools.world_map on real (small) indexes -------------------------------------------------
+
+import pytest  # noqa: E402
+
+from conftest import make_pdf  # noqa: E402
+from dmx_docs.indexer import run_index  # noqa: E402
+from dmx_docs.tools import DocTools  # noqa: E402
+
+quiet = lambda *a, **k: None  # noqa: E731
+
+
+@pytest.fixture
+def marketing(tmp_path, make_cfg):
+    root = tmp_path / "22_Marketing"
+    (root / "Presentations" / "Training Sales").mkdir(parents=True)
+    for i in range(5):
+        make_pdf(str(root / "Presentations" / "Training Sales" / f"t{i}.pdf"), [f"Training {i}: coflow"])
+    make_pdf(str(root / "Datasheets.pdf"), ["Paloma technical data"])
+    map_file = tmp_path / "maps" / "marketing.md"
+    map_file.parent.mkdir()
+    map_file.write_text("# Marketing - map\nSales trainings: Presentations\\Training Sales\n", encoding="utf-8")
+    cfg = make_cfg(root, world="marketing", world_title="Marketing", profile="marketing", map_path=str(map_file))
+    run_index(cfg, progress=quiet)
+    return cfg, root, map_file
+
+
+def test_world_map_marketing(marketing):
+    cfg, root, _ = marketing
+    out = DocTools(cfg).world_map()
+    assert out.startswith("# Marketing - map")
+    assert "Marketing (marketing): 6 documents" in out
+    assert "By file type: .pdf 6" in out
+    assert f"{root} (6 docs)" in out and "    - Training Sales (5)" in out
+
+
+def test_world_map_rereads_the_map_but_caches_the_overview(marketing):
+    cfg, _, map_file = marketing
+    tools = DocTools(cfg)
+    tools.world_map()
+    map_file.write_text("# Marketing - map v2\n", encoding="utf-8")
+    assert tools.world_map().startswith("# Marketing - map v2")
+    assert tools._overview is not None
+
+
+def test_world_map_without_map_file(marketing):
+    cfg, _, map_file = marketing
+    map_file.unlink()
+    assert DocTools(cfg).world_map().startswith("No map file for this world (")
+
+
+def test_world_map_projects(corpus_copy, make_cfg):
+    cfg = make_cfg(corpus_copy)  # profile projects, no world, no map configured
+    run_index(cfg, progress=quiet)
+    out = DocTools(cfg).world_map()
+    assert out.startswith("No map file configured for this world")
+    assert "Projects: " in out and "By section: " in out and "By document type: " in out
+    assert "Template folders across projects" in out
+    assert "outside the template sections" in out  # the test corpus has no template folders
+
+
+def test_world_map_on_empty_index(tmp_path, make_cfg):
+    root = tmp_path / "empty"
+    root.mkdir()
+    cfg = make_cfg(root, world="documentation", world_title="Documentation", profile="documentation")
+    run_index(cfg, progress=quiet)
+    out = DocTools(cfg).world_map()
+    assert "Documentation (documentation): 0 documents" in out
