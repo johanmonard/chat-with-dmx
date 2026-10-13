@@ -2,15 +2,13 @@
 
 ## What is in the index
 
-- The **standard** machine manual of Demaurex (`O:\ASA\Documentation\DOC_Machines\Source`):
-  Paloma, Presto, Hector, Delfi, Astor, Nestor, conveyors, vision, the Gemini HMI. Mostly Markdown
-  sections (one file = one section, read as one page), plus some PDF and Word procedures.
+Call `world_map` (this connector) for what this world holds, where, and what it lacks; it is kept
+up to date by hand and with live counts. The essentials for searching:
+
 - Each hit shows its **category** = the manual chapter, and its **language**:
   `0000_Page de garde`, `1000_Introduction`, `2000_Sécurité`, `3000_Instruction de commande`,
   `4000_Interface opérateur`, `5000_Descriptions fonctionnelles`, `6000_Entretien`,
   `7000_Appendice`; languages FR, DE, EN (most sections exist in several languages).
-- Old versions are not indexed. Each project's own, customised manual is in the Projects world
-  (`8_Documentation` of the project): this manual is the generic reference.
 
 ## Filters
 
