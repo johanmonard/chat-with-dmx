@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import facets, store
 
-MAX_CHARS = 12000
+MAX_CHARS = 15000     # about 4k tokens: map text + live overview
 MIN_DOCS = 5          # smaller folders are folded into one line...
 SMALL_WORLD = 1000    # ...except in a world this small, where every folder is shown
 TREE_DEPTH = 3
