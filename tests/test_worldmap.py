@@ -206,3 +206,20 @@ def test_cli_map_prints_the_world_map(marketing, tmp_path, capsys):
     cli.main(["--config", str(conf), "--world", "marketing", "map"])
     out = capsys.readouterr().out
     assert out.startswith("# Marketing - map") and "## Live overview" in out
+
+
+def test_template_folders_default_shows_8_rows_per_section():
+    r = [(rf"{P}\THOR\0_Vente\{k:02d}_Sub\o{i}.pdf", "THOR") for k in range(30) for i in range(5)]
+    data = [(p, store.path_key(p), proj, None) for p, proj in r]
+    lines = worldmap.template_folders(data, [P])
+    assert len(lines) == 1 + 8 + 1 and lines[-1] == "  - + 22 other folders (110 docs)"
+
+
+def test_small_world_tree_is_not_folded(tmp_path, make_cfg):
+    root = tmp_path / "Source"
+    (root / "7000_Appendice" / "7300_Schemas").mkdir(parents=True)
+    make_pdf(str(root / "7000_Appendice" / "7300_Schemas" / "schema_FR.pdf"), ["Schéma électrique"])
+    cfg = make_cfg(root, world="documentation", world_title="Documentation", profile="documentation")
+    run_index(cfg, progress=quiet)
+    out = DocTools(cfg).world_map()
+    assert "  - 7000_Appendice (1)" in out and "    - 7300_Schemas (1)" in out

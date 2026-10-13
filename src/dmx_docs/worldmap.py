@@ -15,8 +15,10 @@ from pathlib import Path
 from . import facets, store
 
 MAX_CHARS = 12000
-MIN_DOCS = 5          # smaller folders are folded into one line
+MIN_DOCS = 5          # smaller folders are folded into one line...
+SMALL_WORLD = 1000    # ...except in a world this small, where every folder is shown
 TREE_DEPTH = 3
+SECTION_ROWS = 8      # Projects: template folders shown per section (540 projects, many old variants)
 CACHE_S = 600         # the live overview is recomputed at most every 10 min per server
 FOOTER = "Counts are from the index; the map text is maintained by hand and may lag behind them."
 SECTION_ORDER = list(dict.fromkeys(facets.SECTIONS.values()))  # Vente, Finances, ... Cloture
@@ -95,7 +97,7 @@ def _section(folder: str) -> str | None:
     return facets.section_of(folder)
 
 
-def template_folders(rows, roots, min_docs: int = MIN_DOCS, max_rows: int = 25) -> list[str]:
+def template_folders(rows, roots, min_docs: int = MIN_DOCS, max_rows: int = SECTION_ROWS) -> list[str]:
     """The project template aggregated over every project: per section, its folder and the folder
     below it (0_Vente\\00_Offres) with the number of projects and documents having it.
     rows = (path, path_key, project, subproject)."""
@@ -192,7 +194,8 @@ def live_overview(con, cfg) -> Overview:
             head.append("By language: " + _counts(
                 con, "SELECT language, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC"))
         tree_title = "Folders (documents, subfolders included; depth 3):"
-        tree = folder_tree([r[:2] for r in rows], cfg.roots)
+        tree = folder_tree([r[:2] for r in rows], cfg.roots,
+                           min_docs=1 if len(rows) < SMALL_WORLD else MIN_DOCS)
     if store.has_table(con, "picture_uses"):
         kinds = _counts(con, """SELECT type, count(*) n FROM picture_uses WHERE status = 'described'
                                 GROUP BY 1 ORDER BY n DESC""")
