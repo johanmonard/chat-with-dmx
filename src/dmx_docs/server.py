@@ -20,6 +20,9 @@ except Exception:  # pragma: no cover
 from .config import Config
 from .tools import DocTools
 
+WORLD_MAP_LINE = ("Call world_map first when you do not know where a kind of information is kept or whether "
+                  "this world holds it at all: it lists what is here, where, and what is missing.")
+
 INSTRUCTIONS = """\
 Read-only access to the company's project documentation (Demaurex: robotic packaging lines;
 PDF and Word files, mostly French, also English, German, Spanish). One folder per project
@@ -30,6 +33,7 @@ specifications), 1_Finances, 2_Electrique (schematics), 3_Mecanique, 4_Soft,
 Electrique, Gestion, Rapports, Documentation, SAV, Clôture). Each search hit shows its
 project, collection, section and document type when known.
 
+""" + WORLD_MAP_LINE + "\n\n" + """\
 Never answer from the first search alone. Follow this loop for every question:
 
 1. REFORMULATE. Rewrite the question into 2-4 search queries: precise French technical terms
@@ -84,6 +88,7 @@ Each search hit shows its category = the top folder: Brochures, Competition, Dat
 Exhibition, Graphics, Pictures, Presentations, Publications, Videos. PowerPoint files are read
 slide by slide ("slide" instead of "page").
 
+""" + WORLD_MAP_LINE + "\n\n" + """\
 Never answer from the first search alone. Follow this loop for every question:
 
 1. REFORMULATE the question into 2-4 search queries: English and French terms, product names
@@ -106,6 +111,7 @@ check codes, numbers and names with view_page before quoting them.
 
 GENERIC_INSTRUCTIONS = """\
 Read-only access to the company's "{title}" documents (Demaurex: robotic packaging lines).
+""" + WORLD_MAP_LINE + "\n" + """\
 Search with `search` (2-4 reformulated queries, several languages), check each hit by reading it
 with `read_document` / `find_in_document`, look at pictures with `view_page`, browse with
 `list_folder`, and answer only from what you read, citing full path + page.
@@ -126,6 +132,7 @@ section is missing in that language. Each project's own, customised manual is in
 documentation (the projects' 8_Documentation folders, another world): this manual is the
 generic reference.
 
+""" + WORLD_MAP_LINE + "\n\n" + """\
 Never answer from the first search alone:
 1. REFORMULATE the question into 2-4 queries (precise terms, synonyms, module names); filter with
    category= when the chapter is obvious (maintenance -> 6000_Entretien, safety -> 2000_Sécurité).
@@ -352,6 +359,13 @@ def build_server(cfg: Config) -> MCPServer:
             page: Optional page to open the PDF at.
         """
         return tools.open_document(path, page=page)
+
+    @mcp.tool(**kw)
+    def world_map() -> str:
+        """What this world holds and where: the kinds of documents and the folders or filters that reach
+        them, what is NOT here and where to look instead (hand-written map), then live counts and the
+        folder tree from the index. Call it before routing a question you are unsure about."""
+        return tools.world_map()
 
     @mcp.tool(**kw)
     def index_status() -> str:

@@ -2,9 +2,9 @@
 
 ## What is in the index
 
-- PDF and Word files of the project folders on `\\DMX-FS01.rotzingerag.local\Daten$\RMA_PROJETS`
-  (= drive N:), mostly French; also English, German, Spanish. Excel and CAD are not indexed.
-  Scanned pages were read by OCR (hits marked "(OCR)").
+Call `world_map` (this connector) for what this world holds, where, and what it lacks; it is kept
+up to date by hand and with live counts. The essentials for searching:
+
 - One folder per project, code-named (THOR, YAKUMA, ANGE, BOULE, MANOLO, INIESTA...). Current
   projects sit directly under `RMA_PROJETS`; finished ones may be grouped in **collections** such
   as `2_Hors_Garantie` (out of warranty). **What is indexed changes over time**: check with
@@ -20,23 +20,6 @@
   open_points, tests, suivi, planning, transport, sav, doc_electrique, doc_mecanique, soft).
   "type X" = from the template folder (reliable); "type X (from name)" = guessed from the file
   name; "(from section)" = only the section is known; "type unknown" = not classified.
-- Current projects use this template (older projects use named folders instead: `Cahier des
-  charges`, `Electrique`, `Mécanique`, `Gestion`, `Rapports`, `Documentation`, `SAV`, `Clôture`,
-  `Facturation`; their doc_type is often guessed or unknown):
-
-| Folder | Holds | Typical subfolders |
-|---|---|---|
-| `0_Vente` | offers, customer specifications, orders | `00_Offres`, `02_Commandes`, `03_Cahier_des_charges`, `04_Formulaire_validation`, `06_Materiel_Tiers` |
-| `1_Finances` | invoices, payments | `11_Facturation` |
-| `2_Electrique` | electrical design, schematics (long, mostly labels) | `20_Conception`, `21_Modifications`, `23_Schemas` |
-| `3_Mecanique` | mechanical design, layouts, third-party equipment | `30_Conception`, `31_Modifications`, `33_Layouts`, `37_Materiel_Tiers` |
-| `4_Soft` | software | |
-| `5_Gestion` | follow-up, meetings, planning, acceptance, transport | `51_Suivi`, `52_Planning`, `54_Transport`, `55_MES`, `56_Acceptation_machine` (FAT/SAT protocols) |
-| `6_Rapports_Tests` | internal tests, commissioning reports, open points | `60_Tests_Internes`, `61_MES`, `604_Open_points_lists` |
-| `8_Documentation` | the project's own machine manual (FR/EN/DE), supplier documents | `80_USB stick Doc Project`, `85_Received_DOC` |
-| `9_SAV` | after-sales service | |
-
-- Folders named `Anciennes versions` / `old` are not indexed: the index holds current versions.
 
 ## Vocabulary
 

@@ -9,10 +9,11 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.request
 from datetime import datetime
 
-from . import facets, machines, register, sources, store
+from . import facets, machines, register, sources, store, worldmap
 from .config import Config
 from .extract import PICTURE_EXTS, docx_picture_names, extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
@@ -344,6 +345,7 @@ class DocTools:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.searcher = Searcher(cfg)
+        self._overview: tuple[float, worldmap.Overview] | None = None  # world_map's live part, cached
 
     def _con(self):
         con = store.connect(self.cfg.db_path, create=False)
@@ -1003,6 +1005,16 @@ class DocTools:
         return f"{total} occurrences of '{text}' in {path}{more}:\n\n" + "\n\n".join(hits)
 
     # ------------------------------------------------------------ status
+    def world_map(self) -> str:
+        now = time.monotonic()
+        if self._overview is None or now - self._overview[0] > worldmap.CACHE_S:
+            con = self._con()
+            try:
+                self._overview = (now, worldmap.live_overview(con, self.cfg))
+            finally:
+                con.close()
+        return worldmap.compose(worldmap.load_map_text(self.cfg.map_path), self._overview[1])
+
     def index_status(self) -> str:
         con = self._con()
         try:

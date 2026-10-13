@@ -2,15 +2,14 @@
 
 ## What is in the index
 
-- The marketing share `O:\SAL\2_Groupes\22_Marketing`: PDF, Word, PowerPoint (read **slide by
-  slide**: "slide" instead of "page") and **picture files** (JPG, PNG, BMP, GIF, TIF), mostly
-  English and French, also German.
+Call `world_map` (this connector) for what this world holds, where, and what it lacks; it is kept
+up to date by hand and with live counts. The essentials for searching:
+
+- PowerPoint files are read **slide by slide** ("slide" instead of "page"). Pictures are described
+  by the vision model; a picture file is a one-page document named after the file, and its
+  description passage starts with "Fichier : <name> (dossiers : A / B)".
 - Each hit shows its **category** = the top folder: Brochures, Competition, Datasheets, Exhibition,
   Graphics, Pictures, Presentations, Publications, Videos.
-- Pictures are described by the vision model: photos and graphics in the picture files, pictures
-  on slides and in Word files, brochure pages and exhibition posters (picture pages of PDFs).
-  A picture file is a one-page document named after the file; its description passage starts
-  with "Fichier : <name> (dossiers : A / B)".
 
 ## Filters
 

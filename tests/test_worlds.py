@@ -86,3 +86,21 @@ def test_vector_cache_lives_in_the_world_folder(config_file):
     cfg = load_config(config_file, world="marketing")
     ids, mat = VectorIndex(cfg)._cache_paths("abc")
     assert ids.parent == mat.parent == cfg.world_dir
+
+
+def test_map_path_defaults_to_maps_folder_next_to_config(config_file, tmp_path):
+    assert load_config(config_file, world="marketing").map_path == str(tmp_path / "maps" / "marketing.md")
+
+
+def test_map_path_override_is_relative_to_config(config_file, tmp_path):
+    text = config_file.read_text(encoding="utf-8").replace(
+        'title = "Marketing"', "title = \"Marketing\"\nmap = 'other/mkt.md'")
+    config_file.write_text(text, encoding="utf-8")
+    assert load_config(config_file, world="marketing").map_path == str(tmp_path / "other" / "mkt.md")
+
+
+def test_map_path_without_worlds(tmp_path, monkeypatch):
+    monkeypatch.delenv("DMX_DOCS_WORLD", raising=False)
+    p = tmp_path / "config.toml"
+    p.write_text("[index]\ndata_dir = 'data'\n", encoding="utf-8")
+    assert load_config(p).map_path == str(tmp_path / "maps" / "default.md")

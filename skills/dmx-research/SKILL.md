@@ -25,9 +25,15 @@ Each connector is one **world**, a separate index of documents with its own audi
   from the enabled ones and say plainly what is missing and what it would add ("the Marketing
   connector is not enabled: the brochure figures are not checked - enable dmx-marketing for them").
 - Every world has `search`, `find_files`, `list_folder`, `read_document`, `find_in_document`,
-  `view_page`, `export_image`, `open_document` and `index_status`; Projects also has
+  `view_page`, `export_image`, `open_document`, `index_status` and `world_map`; Projects also has
   `list_projects` and `project_card`. **The search filters differ per world**: read the world's
   reference file (table above) before your first search in it.
+- **Start with the map.** Call `world_map` on each world you are going to search, once per
+  conversation, before routing: it says what kinds of documents the world holds, in which folders
+  and with which filters, and **what it does not hold and where to look instead**. Use it to pick
+  the world, the filters and the folder (in Projects a template folder exists once per project:
+  give `folder=` the project's own path, never `0_Vente\...` alone); when the map says a kind is missing, say so in
+  the answer instead of searching on and on.
 
 ## 1. Route the question
 
@@ -39,6 +45,24 @@ Each connector is one **world**, a separate index of documents with its own audi
 | a project's own, customised manual | Projects (`8_Documentation` of that project), then Documentation for the standard part |
 | a photo, schema or screenshot to show or to put on a slide | Marketing first (picture files, brochures, decks), then Documentation, then Projects |
 | "promised vs delivered vs standard", a comparison across sources | every relevant world, one after the other |
+
+**Where each kind of information lives** (details and folders: `world_map`):
+
+| Kind | World | Where |
+|---|---|---|
+| real offers, reference offers for a new one | Projects | `0_Vente\00_Offres`, `doc_type="offre"` + `machine=` |
+| offer templates (3-page standard offers) | Marketing | `Brochures\Marketing\Quotations` |
+| client specifications, orders, modifications | Projects | `0_Vente`, `doc_type="cahier_des_charges,commande,modification"` |
+| third-party equipment (supplier docs and offers) | Projects | `*_Materiel_Tiers` folders, `doc_type="doc_fournisseur"` |
+| design and development | Projects | `20_Conception`, `30_Conception`, `Developpement mec` |
+| FAT, SAT, commissioning, open points | Projects | `5_Gestion\56_Acceptation_machine`, `6_Rapports_Tests` |
+| project closure | Projects | `Clôture`, `57_Cloture`, `section="Cloture"` |
+| a project's own manual, software specification | Projects | `8_Documentation`, `4_Soft\42_Documents` |
+| standard manual: operation, safety, HMI, maintenance | Documentation | chapters 1000-7000 |
+| standard software and electrical documentation | **none yet** | say so; the projects' `4_Soft`, `2_Electrique`, `8_Documentation` hold project versions |
+| sales trainings by topic (end-effectors, speed calculation, coflow/counterflow...) | Marketing | `Presentations\Training Sales\<chapter>` |
+| brochures, datasheets, exhibitions, competition | Marketing | `category=` |
+| photos and graphics for slides | Marketing | `category="Pictures,Graphics"`, `pictures=true` |
 
 **Several worlds:** search each one separately (their filters differ), keep the results apart,
 then compare. When they disagree:

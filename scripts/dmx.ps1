@@ -12,6 +12,7 @@ Shared folder layout (this script lives in <shared>\app\scripts):
   <shared>\config.toml        settings used by every machine (data_dir = 'C:\dmx-rag\data'),
                               with one [worlds.<name>] table per world
   <shared>\thesaurus.toml     search vocabulary shared by every world
+  <shared>\maps\<world>.md    world maps (what each world holds, where, what it lacks), copied by pull
   <shared>\worlds\<world>\    index.sqlite3 (master), index.prev.sqlite3 (previous), LOCK,
                               register.csv (projects: machine register)
   <shared>\models\            embedding model, copied to each machine once
@@ -32,13 +33,14 @@ first argument; otherwise the script asks (Enter = projects).
                  (a failing step stops the run, is named in the last message and becomes the exit code)
   pull           refresh this machine's read-only copy for Claude Desktop (no lock)
   status         index statistics of the local copy
+  map            print the world map (maps\<world>.md on the shared folder + live counts of the local copy)
   search "..."   test a search on the local copy
   unlock -Force  remove a stale lock left by a machine that crashed (also one of the old layout)
   migrate        one-time move from the single-index layout (every command but unlock does it first)
 #>
 param(
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet('setup', 'web', 'index', 'embed', 'ocr', 'describe', 'update', 'pull', 'status', 'search', 'unlock', 'migrate')]
+    [ValidateSet('setup', 'web', 'index', 'embed', 'ocr', 'describe', 'update', 'pull', 'status', 'map', 'search', 'unlock', 'migrate')]
     [string]$Command,
     [string]$World,
     [switch]$Force,
@@ -479,6 +481,11 @@ try {
             Copy-Item $SharedConfig $LocalConfig -Force
             $th = Join-Path $Shared 'thesaurus.toml'
             if (Test-Path $th) { Copy-Item $th (Join-Path $Local 'thesaurus.toml') -Force }  # search synonyms
+            $maps = Join-Path $Shared 'maps'
+            if (Test-Path $maps) {  # world maps, read by the world_map tool next to the local config
+                New-Item -ItemType Directory -Force (Join-Path $Local 'maps') | Out-Null
+                Copy-Item (Join-Path $maps '*.md') (Join-Path $Local 'maps') -Force
+            }
             $reg = Join-Path $SharedWorld 'register.csv'
             $stale = Join-Path $Shared 'register.csv'   # where the register was before worlds
             if ($World -eq 'projects' -and (Test-Path $stale)) {
@@ -496,6 +503,7 @@ try {
             Say "Claude Desktop configuration for this machine:`n$snippet"
         }
         'status' { Assert-Env; Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $WorldArgs + @('status')) -AllowFail }
+        'map' { Assert-Env; Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $WorldArgs + @('map')) -AllowFail }
         'search' { Assert-Env; Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $WorldArgs + @('search') + $Rest) -AllowFail }
         'unlock' {
             $held = Get-LockInfo
