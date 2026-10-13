@@ -63,6 +63,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--out", help="folder for the --compare page (default: the world's logs folder)")
 
     sub.add_parser("status", help="show index statistics")
+    sub.add_parser("map", help="print the world map (map file + live overview), as the world_map tool returns it")
 
     p = sub.add_parser("search", help="try a search from the command line")
     p.add_argument("query")
@@ -145,6 +146,9 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "status":
         from .tools import DocTools
         print(DocTools(cfg).index_status())
+    elif args.command == "map":
+        from .tools import DocTools
+        print(DocTools(cfg).world_map())
     elif args.command == "search":
         from .tools import DocTools
         print(DocTools(cfg).search(args.query, folder=args.folder, limit=args.limit, mode=args.mode))

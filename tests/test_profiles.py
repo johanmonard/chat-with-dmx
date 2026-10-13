@@ -98,7 +98,7 @@ def test_marketing_server_tools(marketing):
 
     listed, res = asyncio.run(run())
     assert set(listed) == {"search", "find_files", "list_folder", "read_document", "find_in_document",
-                           "index_status", "view_page", "open_document", "export_image"}
+                           "index_status", "view_page", "open_document", "export_image", "world_map"}
     search_tool = listed["search"]  # mcp 2 names it input_schema, mcp 1 inputSchema
     props = (getattr(search_tool, "input_schema", None) or search_tool.inputSchema)["properties"]
     assert "category" in props and "project" not in props and "machine" not in props

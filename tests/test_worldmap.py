@@ -165,3 +165,44 @@ def test_world_map_on_empty_index(tmp_path, make_cfg):
     run_index(cfg, progress=quiet)
     out = DocTools(cfg).world_map()
     assert "Documentation (documentation): 0 documents" in out
+
+
+# --- MCP tool, instructions, CLI ---------------------------------------------------------------
+
+import asyncio  # noqa: E402
+
+from dmx_docs.config import Config  # noqa: E402
+
+
+@pytest.mark.parametrize("profile", ["projects", "marketing", "documentation", "none"])
+def test_world_map_tool_and_instructions_in_every_profile(tmp_path, profile):
+    from mcp import Client
+
+    from dmx_docs.server import WORLD_MAP_LINE, build_server, instructions_for
+
+    cfg = Config(roots=[str(tmp_path)], data_dir=tmp_path / "data", world=profile.replace("none", "other"),
+                 world_title="X", profile=profile, embedding_model="hash:256")
+
+    async def names():
+        async with Client(build_server(cfg)) as client:
+            return {t.name for t in (await client.list_tools()).tools}
+
+    assert "world_map" in asyncio.run(names())
+    text = instructions_for(cfg)
+    assert WORLD_MAP_LINE in text
+    assert text.index(WORLD_MAP_LINE) < 1200  # near the top: some clients truncate instructions
+
+
+def test_cli_map_prints_the_world_map(marketing, tmp_path, capsys):
+    from dmx_docs import cli
+
+    cfg, root, map_file = marketing
+    conf = tmp_path / "config.toml"
+    conf.write_text(
+        f"[index]\ndata_dir = '{cfg.data_dir.as_posix()}'\n\n"
+        f"[worlds.marketing]\nprofile = 'marketing'\nroots = ['{root.as_posix()}']\n"
+        "[embeddings]\nmodel = 'hash:256'\nquery_prefix = ''\npassage_prefix = ''\n",
+        encoding="utf-8")
+    cli.main(["--config", str(conf), "--world", "marketing", "map"])
+    out = capsys.readouterr().out
+    assert out.startswith("# Marketing - map") and "## Live overview" in out
