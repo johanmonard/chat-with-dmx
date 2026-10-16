@@ -44,7 +44,7 @@ up to date by hand and with live counts. The essentials for searching:
   key documents, each fact with its source). Then search for details.
 - **Written project cards?** `catalog` lists the cards Claude wrote from the documents, one line
   per project: client, years, machines, infeed -> outfeed, end effector, speed, status. Filter
-  with `catalog infeed="flowpack"`, `catalog end_effector="suction cups" year_from=2015`,
+  with `catalog infeed="flowpack"`, `catalog end_effector="vacuum" year_from=2015`,
   `catalog outfeed="case" machine="Paloma"`, `catalog text="..."` (synonyms in any language work:
   "sachet", "ventouse"). Its last line gives the coverage: not every project has a card yet, so
   complete the answer with `list_projects` / `search`. A card is a pointer: verify what you quote

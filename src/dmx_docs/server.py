@@ -275,8 +275,9 @@ def build_server(cfg: Config) -> MCPServer:
         Args:
             infeed: What goes into the line, e.g. "flowpack", "loose", "pouch" (synonyms in any language
                 work: "sachet", "vrac").
-            outfeed: What comes out, e.g. "case", "tray", "wrap-around case".
-            end_effector: e.g. "suction cups", "mechanical gripper" ("ventouse", "pince" work too).
+            outfeed: What comes out, e.g. "box", "case", "tray", "blister", "flow wrapper chain"
+                (products placed into a flow wrapper's infeed chain).
+            end_effector: e.g. "vacuum", "mechanical gripper" ("ventouse", "vide", "pince" work too).
             machine: Machine family or model, e.g. "Paloma", "Presto 2R".
             client: Any part of the client's name.
             country: Country as written on the cards.

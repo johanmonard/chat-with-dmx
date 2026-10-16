@@ -31,7 +31,7 @@ years: 2019-2020
 machines: [Paloma 4R, Presto]
 infeed: [flowpack (chocolate bar 100 g, 4 formats), loose (biscuit)]
 outfeed: [wrap-around case (24 bars), tray]
-end_effectors: [suction cups]
+end_effectors: [vacuum]
 speed: 120 products/min
 read: 6
 ---
@@ -49,7 +49,7 @@ trays for ACME Foods (France), ordered 2019, accepted on site 2020.
 - Infeed: loose biscuits on a second belt [N:\THOR\0_Vente\Cahier des charges THOR.pdf p.6]
 - Outfeed: wrap-around cases of 24 bars; trays of biscuits [N:\THOR\0_Vente\Cahier des charges THOR.pdf p.7]
 - Speed: 120 products/min [N:\THOR\0_Vente\00_Offres\Offre THOR v3.pdf p.4]
-- End effector: suction cups ("ventouses"), 4 per tool [N:\THOR\5_Gestion\FAT THOR.pdf p.12]
+- End effector: vacuum, 4 suction cups ("ventouses") per tool [N:\THOR\5_Gestion\FAT THOR.pdf p.12]
 - Layout: two Paloma cells in line, Presto at the end [N:\THOR\0_Vente\00_Offres\Offre THOR v3.pdf p.5]
 
 ## C. History
@@ -94,7 +94,9 @@ rather than guess: the "Checked, not found" section says what was looked for.
   D. Key documents, Checked, not found.
 - Every `- ` line of A, B and C carries at least one source: `[register]` or
   `[<full path> p.<n>]` (`slide <n>` for PowerPoint; no page for a Word file). Use the full path
-  as the tools show it (N:\... or \\server\...), never an abbreviation.
+  as the tools show it (N:\... or \\server\...), never an abbreviation. A fact given by a person
+  who knows the project (a correction during review) is cited `[user, YYYY-MM-DD]` and wins over
+  both the register and the documents; keep the document's version on the line for the record.
 - Every header value appears in the body, with its source (for infeed, outfeed and end effectors
   the form or one of its synonyms).
 - English, with original French terms in quotes where they matter ("ventouses", "barquette").
