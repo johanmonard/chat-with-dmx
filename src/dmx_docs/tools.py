@@ -13,7 +13,7 @@ import time
 import urllib.request
 from datetime import datetime
 
-from . import facets, machines, register, sources, store, worldmap
+from . import facets, knowledge, machines, register, sources, store, worldmap
 from .config import Config
 from .extract import PICTURE_EXTS, docx_picture_names, extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
@@ -346,6 +346,7 @@ class DocTools:
         self.cfg = cfg
         self.searcher = Searcher(cfg)
         self._overview: tuple[float, worldmap.Overview] | None = None  # world_map's live part, cached
+        self.knowledge = knowledge.Knowledge(cfg.knowledge_path)  # written project cards
 
     def _con(self):
         con = store.connect(self.cfg.db_path, create=False)
@@ -804,10 +805,31 @@ class DocTools:
                         for p, m, y, idx in others))
         finally:
             con.close()
+        lines.append("\n" + self._written_card(project, name))
         lines.append("\n(client, machines delivered and years come from the company's machine register, a "
                      "hand-made list: when it disagrees with the documents, trust the documents; the rest "
                      "comes from the indexed documents)")
         return "\n".join(lines)
+
+    def _written_card(self, *names: str | None) -> str:
+        """The project's knowledge card (asked name first, then the indexed project name)."""
+        names = [n for n in names if n]
+        for n in names:
+            card = self.knowledge.card(n)
+            if card:
+                return (f"Written card ({card.status}, {card.written}, built from {card.read} documents):\n"
+                        f"{card.body}")
+        wanted = {register.fold(n) for n in names}
+        for file, reason in self.knowledge.errors().items():
+            stem = file.rsplit(".", 1)[0]
+            if {register.fold(stem), register.fold(stem.split("__")[-1])} & wanted:
+                return f"card {file} unreadable: {reason}"
+        return "No written card yet."
+
+    def _project_names(self, con) -> set[str]:
+        """Indexed project and sub-project names."""
+        return {r[0] for r in con.execute("SELECT project FROM doc_facets WHERE project IS NOT NULL UNION "
+                                          "SELECT subproject FROM doc_facets WHERE subproject IS NOT NULL")}
 
     # --------------------------------------------------------- find_files
     def find_files(self, name: str, folder: str | None = None, limit: int = 30) -> str:

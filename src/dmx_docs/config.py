@@ -50,6 +50,7 @@ class Config:
     expand_synonyms: bool = False       # expand keyword searches with the thesaurus
     register_path: str | None = None    # register.csv (installed machines) next to config.toml by default
     map_path: str | None = None         # world map text (maps\<world>.md next to config.toml), see worldmap.py
+    knowledge_path: str | None = None   # knowledge cards (knowledge\ next to config.toml), see knowledge.py
     export_dir: str | None = None  # where export_image saves files (default: ~\Claude\dmx-images)
     config_path: Path | None = None
     # A world is one family of documents with its own index (projects, marketing...), chosen
@@ -211,6 +212,9 @@ def load_config(path: str | os.PathLike, world: str | None = None) -> Config:
     # The world map (world_map tool): maps\<world>.md next to config.toml, or [worlds.<name>] map.
     mp = Path(os.path.expandvars(str(w.get("map") or f"maps/{name or 'default'}.md")))
     kwargs["map_path"] = str(mp if mp.is_absolute() else (path.parent / mp))
+    # The knowledge cards (project_card, catalog): knowledge\ next to config.toml, or [worlds.<name>] knowledge.
+    kp = Path(os.path.expandvars(str(w.get("knowledge") or "knowledge")))
+    kwargs["knowledge_path"] = str(kp if kp.is_absolute() else (path.parent / kp))
     if name:  # the machine register belongs to a world: data_dir\<world>\register.csv
         register = w.get("register", "register.csv" if kwargs["profile"] == "projects" else None)
         if register:

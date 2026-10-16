@@ -3,10 +3,15 @@ documents, served by project_card and catalog, validated by `dmx-docs knowledge 
 
 import os
 import time
+from pathlib import Path
 
 import pytest
 
+from conftest import make_pdf
+from dmx_docs.config import load_config
+from dmx_docs.indexer import run_index
 from dmx_docs.knowledge import CardError, Knowledge, Vocabulary, form_of, parse_card
+from dmx_docs.tools import DocTools
 
 CARD = """---
 type: project
@@ -91,3 +96,64 @@ def test_knowledge_reloads_changed_files_and_reports_bad_ones(tmp_path):
 def test_knowledge_without_folder(tmp_path):
     k = Knowledge(str(tmp_path / "missing"))
     assert not k.available and k.cards() == [] and Knowledge(None).cards() == []
+
+
+# --- served by the tools ---------------------------------------------------------------------
+
+def quiet(*_a, **_k):
+    pass
+
+
+@pytest.fixture
+def indexed(tmp_path, make_cfg):
+    """A tiny projects index (THOR, MOUSQUETAIRES\\1_Athos) with a card for each."""
+    root = tmp_path / "RMA"
+    for sub, name, text in ((r"THOR\0_Vente\00_Offres", "Offre THOR.pdf", "Offre Paloma 4R pour ACME."),
+                            (r"MOUSQUETAIRES\1_Athos\Rapports", "FAT Athos.pdf", "FAT Presto Athos.")):
+        d = root / sub
+        d.mkdir(parents=True)
+        make_pdf(str(d / name), [text])
+    cfg = make_cfg(root)
+    cfg.register_path = None
+    run_index(cfg, progress=quiet)
+    cards = tmp_path / "knowledge" / "projects"
+    cards.mkdir(parents=True)
+    (cards / "THOR.md").write_text(CARD, encoding="utf-8")
+    (cards / "MOUSQUETAIRES__1_Athos.md").write_text(CARD.replace("project: THOR", "project: 1_Athos"),
+                                                     encoding="utf-8")
+    cfg.knowledge_path = str(tmp_path / "knowledge")
+    return cfg
+
+
+def test_config_knowledge_path_default_and_override(tmp_path, monkeypatch):
+    monkeypatch.delenv("DMX_DOCS_WORLD", raising=False)
+    cfg_file = tmp_path / "config.toml"
+    base = f"[index]\ndata_dir = '{(tmp_path / 'data').as_posix()}'\n\n[worlds.projects]\nprofile = \"projects\"\n"
+    cfg_file.write_text(base, encoding="utf-8")
+    assert load_config(cfg_file, world="projects").knowledge_path == str(tmp_path / "knowledge")
+    cfg_file.write_text(base + "knowledge = \"cards\"\n", encoding="utf-8")
+    assert load_config(cfg_file, world="projects").knowledge_path == str(tmp_path / "cards")
+
+
+def test_project_card_appends_the_written_card(indexed):
+    out = DocTools(indexed).project_card("thor")
+    assert "Written card (unreviewed, 2026-10-16, built from 6 documents):" in out
+    assert out.index("Written card") > out.index("Documents by type")
+    assert "Line for ACME Foods." in out
+
+
+def test_project_card_finds_a_subproject_card(indexed):
+    assert "Written card" in DocTools(indexed).project_card("1_Athos")
+
+
+def test_project_card_without_card_or_folder(indexed):
+    (Path(indexed.knowledge_path) / "projects" / "THOR.md").unlink()
+    assert "No written card yet." in DocTools(indexed).project_card("THOR")
+    indexed.knowledge_path = None
+    assert "No written card yet." in DocTools(indexed).project_card("THOR")
+
+
+def test_project_card_names_an_unreadable_card(indexed):
+    (Path(indexed.knowledge_path) / "projects" / "THOR.md").write_text("---\ntype: project\n", encoding="utf-8")
+    out = DocTools(indexed).project_card("THOR")
+    assert "card THOR.md unreadable:" in out and "No written card yet." not in out
