@@ -2,6 +2,7 @@
 documents, served by project_card and catalog, validated by `dmx-docs knowledge check`."""
 
 import os
+import re
 import time
 from datetime import date
 from pathlib import Path
@@ -12,7 +13,7 @@ from conftest import make_pdf
 from dmx_docs import knowledge
 from dmx_docs.config import load_config
 from dmx_docs.indexer import run_index
-from dmx_docs.knowledge import CardError, Knowledge, Vocabulary, form_of, parse_card
+from dmx_docs.knowledge import CardError, Knowledge, Vocabulary, form_of, load_vocabulary, parse_card
 from dmx_docs.tools import DocTools
 
 CARD = """---
@@ -312,6 +313,20 @@ def test_cli_knowledge_check_exit_code(indexed_config_file, good_card, capsys):
     with pytest.raises(SystemExit) as e:
         cli.main(["--config", str(indexed_config_file), "knowledge", "check"])
     assert e.value.code == 1 and "THOR.md: error:" in capsys.readouterr().out
+
+
+# --- the README and the word list shipped in the repo ----------------------------------------
+
+def test_readme_example_card_follows_the_rules():
+    root = Path(__file__).resolve().parents[1] / "knowledge"
+    text = (root / "README.md").read_text(encoding="utf-8")
+    example = re.search(r"```markdown\n(---\n.*?)```", text, re.S).group(1)
+    card = parse_card(example, "EXAMPLE.md")
+    vocab = load_vocabulary(str(root / "vocabulary.md"))
+    for kind, key in (("forms", "infeed"), ("forms", "outfeed"), ("end_effectors", "end_effectors")):
+        assert card.values(key), key
+        for entry in card.values(key):
+            assert vocab.canonical(kind, form_of(entry)), entry
 
 
 def test_project_card_names_an_unreadable_card(indexed):

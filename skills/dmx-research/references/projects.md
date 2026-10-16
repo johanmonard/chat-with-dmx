@@ -39,7 +39,16 @@ up to date by hand and with live counts. The essentials for searching:
 - **One project?** Start with `project_card project="THOR"`: client (group, industry, site,
   country), every machine delivered (serial number, model, year, robots, controller, camera,
   maintenance contract, order date), order numbers, document counts by type, the newest offer /
-  order / specification / FAT / SAT, and the client's other projects. Then search for details.
+  order / specification / FAT / SAT, and the client's other projects - and at the end the
+  project's written card when it has one (summary, infeed/outfeed, end effector, speed, history,
+  key documents, each fact with its source). Then search for details.
+- **Written project cards?** `catalog` lists the cards Claude wrote from the documents, one line
+  per project: client, years, machines, infeed -> outfeed, end effector, speed, status. Filter
+  with `catalog infeed="flowpack"`, `catalog end_effector="suction cups" year_from=2015`,
+  `catalog outfeed="case" machine="Paloma"`, `catalog text="..."` (synonyms in any language work:
+  "sachet", "ventouse"). Its last line gives the coverage: not every project has a card yet, so
+  complete the answer with `list_projects` / `search`. A card is a pointer: verify what you quote
+  in the cited document, and when they disagree, the document wins.
 - **Client, country or period?** `list_projects client="<client or group>"`,
   `list_projects country="United Kingdom" year_from=2015` (combinable with `machine=`) give the
   complete list - including register machines whose documents are not indexed - and searches
@@ -59,7 +68,9 @@ up to date by hand and with live counts. The essentials for searching:
 
 ## Aggregation ("which projects ...")
 
-Search results are never exhaustive. Get the COMPLETE candidate list with `list_projects`
+Start with `catalog` (e.g. `catalog infeed="flowpack"`): the written cards answer many such
+questions directly, with sources. Then, for the projects without a card (see its coverage line):
+search results are never exhaustive. Get the COMPLETE candidate list with `list_projects`
 (e.g. `list_projects machine="Paloma"`), run the broad searches with the same filter
 (`search "..." machine="Paloma"`), then check the remaining candidates one by one with
 `project=`; say how many projects were checked out of how many candidates.

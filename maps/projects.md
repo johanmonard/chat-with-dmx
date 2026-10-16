@@ -8,6 +8,11 @@ of `2_Hors_Garantie`) use named folders (Cahier des charges, Electrique, Mécani
 Rapports, Documentation, SAV, Clôture). Use it for what was offered, agreed, built, measured,
 delivered and fixed for a given client or machine.
 
+Written project cards (pre-digested, with sources): `catalog` lists them with filters (infeed,
+outfeed, end effector, machine, client, years) and `project_card` shows a project's card. Start
+there for "which projects ..." questions, mind the coverage line (not every project has a card
+yet), and verify in the documents.
+
 ## Kinds of information
 | Kind | What it is | Where | Filter | Answers questions like |
 |---|---|---|---|---|

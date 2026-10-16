@@ -26,7 +26,7 @@ Each connector is one **world**, a separate index of documents with its own audi
   connector is not enabled: the brochure figures are not checked - enable dmx-marketing for them").
 - Every world has `search`, `find_files`, `list_folder`, `read_document`, `find_in_document`,
   `view_page`, `export_image`, `open_document`, `index_status` and `world_map`; Projects also has
-  `list_projects` and `project_card`. **The search filters differ per world**: read the world's
+  `list_projects`, `project_card` and `catalog` (written project cards). **The search filters differ per world**: read the world's
   reference file (table above) before your first search in it.
 - **Start with the map.** Call `world_map` on each world you are going to search, once per
   conversation, before routing: it says what kinds of documents the world holds, in which folders
