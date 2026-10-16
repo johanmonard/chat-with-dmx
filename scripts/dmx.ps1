@@ -13,6 +13,7 @@ Shared folder layout (this script lives in <shared>\app\scripts):
                               with one [worlds.<name>] table per world
   <shared>\thesaurus.toml     search vocabulary shared by every world
   <shared>\maps\<world>.md    world maps (what each world holds, where, what it lacks), copied by pull
+  <shared>\knowledge\         knowledge cards (projects\<PROJECT>.md, vocabulary.md, README.md), mirrored by pull
   <shared>\worlds\<world>\    index.sqlite3 (master), index.prev.sqlite3 (previous), LOCK,
                               register.csv (projects: machine register)
   <shared>\models\            embedding model, copied to each machine once
@@ -485,6 +486,12 @@ try {
             if (Test-Path $maps) {  # world maps, read by the world_map tool next to the local config
                 New-Item -ItemType Directory -Force (Join-Path $Local 'maps') | Out-Null
                 Copy-Item (Join-Path $maps '*.md') (Join-Path $Local 'maps') -Force
+            }
+            $knowledge = Join-Path $Shared 'knowledge'
+            if (Test-Path $knowledge) {  # knowledge cards (catalog / project_card), mirrored so removed cards disappear here too
+                $localKnowledge = Join-Path $Local 'knowledge'
+                if (Test-Path $localKnowledge) { Remove-Item $localKnowledge -Recurse -Force }
+                Copy-Item $knowledge $localKnowledge -Recurse -Force
             }
             $reg = Join-Path $SharedWorld 'register.csv'
             $stale = Join-Path $Shared 'register.csv'   # where the register was before worlds

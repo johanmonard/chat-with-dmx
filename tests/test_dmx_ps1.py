@@ -277,6 +277,24 @@ def test_pull_warns_about_a_register_left_in_the_shared_folder(ready):
     assert stale.exists() and (shared / "worlds" / "projects" / "register.csv").read_bytes() == kept  # nothing was touched
 
 
+def test_pull_mirrors_the_knowledge_cards(ready):
+    shared, local, env = ready
+    cards = shared / "knowledge" / "projects"
+    cards.mkdir(parents=True)
+    (cards / "THOR.md").write_text("card", encoding="utf-8")
+    (cards / "ODIN.md").write_text("card", encoding="utf-8")
+    (shared / "knowledge" / "vocabulary.md").write_text("words", encoding="utf-8")
+    first = run(shared, local, "pull", "-World", "projects", env=env)
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert (local / "knowledge" / "projects" / "THOR.md").exists()
+    assert (local / "knowledge" / "vocabulary.md").read_text(encoding="utf-8") == "words"
+    (cards / "ODIN.md").unlink()                      # a card removed in the shared folder ...
+    again = run(shared, local, "pull", "-World", "projects", env=env)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert not (local / "knowledge" / "projects" / "ODIN.md").exists()   # ... is removed here too
+    assert (local / "knowledge" / "projects" / "THOR.md").exists()
+
+
 def test_language_files_are_copied_to_the_machine(ready):
     shared, local, env = ready
     td = shared / "tools" / "tessdata"
