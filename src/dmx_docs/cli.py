@@ -64,6 +64,8 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("status", help="show index statistics")
     sub.add_parser("map", help="print the world map (map file + live overview), as the world_map tool returns it")
+    p = sub.add_parser("knowledge", help="check the knowledge cards (knowledge\\ next to config.toml)")
+    p.add_argument("action", choices=["check"])
 
     p = sub.add_parser("search", help="try a search from the command line")
     p.add_argument("query")
@@ -149,6 +151,22 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "map":
         from .tools import DocTools
         print(DocTools(cfg).world_map())
+    elif args.command == "knowledge":
+        from .knowledge import check
+        from .tools import DocTools
+        tools = DocTools(cfg)
+        con = tools._con()
+        try:
+            issues = check(tools.knowledge, con)
+        finally:
+            con.close()
+        for i in issues:
+            print(f"{i.file}: {i.level}: {i.message}")
+        errors = sum(i.level == "error" for i in issues)
+        cards = len(tools.knowledge.cards()) + len(tools.knowledge.errors())
+        print(f"{cards} cards, {errors} errors, {len(issues) - errors} warnings ({cfg.knowledge_path})")
+        if errors:
+            sys.exit(1)
     elif args.command == "search":
         from .tools import DocTools
         print(DocTools(cfg).search(args.query, folder=args.folder, limit=args.limit, mode=args.mode))

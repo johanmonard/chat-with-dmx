@@ -3,11 +3,13 @@ documents, served by project_card and catalog, validated by `dmx-docs knowledge 
 
 import os
 import time
+from datetime import date
 from pathlib import Path
 
 import pytest
 
 from conftest import make_pdf
+from dmx_docs import knowledge
 from dmx_docs.config import load_config
 from dmx_docs.indexer import run_index
 from dmx_docs.knowledge import CardError, Knowledge, Vocabulary, form_of, parse_card
@@ -219,6 +221,97 @@ def test_catalog_lists_unreadable_cards(catalogued):
     (Path(catalogued.knowledge_path) / "projects" / "BAD.md").write_text("no header", encoding="utf-8")
     out = DocTools(catalogued).catalog()
     assert "card BAD.md unreadable:" in out and listed(out) == ["ODIN", "THOR"]
+
+
+# --- dmx-docs knowledge check ----------------------------------------------------------------
+
+@pytest.fixture
+def good_card(indexed):
+    """THOR.md rewritten so that it passes every rule; the only card in the folder."""
+    k = Path(indexed.knowledge_path)
+    (k / "projects" / "MOUSQUETAIRES__1_Athos.md").unlink()
+    (k / "vocabulary.md").write_text(VOCAB, encoding="utf-8")
+    pdf = os.path.join(indexed.roots[0], "THOR", "0_Vente", "00_Offres", "Offre THOR.pdf")
+    head = CARD.split("## Summary")[0].replace("written: 2026-10-16", f"written: {date.today().isoformat()}")
+    body = f"""## Summary
+Paloma line for ACME Foods.
+
+## A. Client and machines
+- Client ACME Foods [register]
+- Paloma 4R and Presto, 2019-2020 [register]
+
+## B. The line
+- Infeed: chocolate bars in flowpack, and loose biscuits [{pdf} p.1]
+- Outfeed: wrap-around cases of 24 bars [{pdf} p.1]
+- End effector: suction cups [{pdf} p.1]
+- Speed: 120 products/min [{pdf} p.1]
+
+## C. History
+- Offer 2019 [{pdf} p.1]
+
+## D. Key documents
+- Offer: {pdf}
+
+## Checked, not found
+- SAT report: none indexed
+"""
+    path = k / "projects" / "THOR.md"
+    path.write_text(head + body, encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def indexed_config_file(indexed, tmp_path, monkeypatch):
+    monkeypatch.delenv("DMX_DOCS_WORLD", raising=False)
+    p = tmp_path / "config.toml"
+    p.write_text(f"[index]\ndata_dir = '{Path(indexed.data_dir).as_posix()}'\n"
+                 f"roots = ['{Path(indexed.roots[0]).as_posix()}']\n"
+                 f"[embeddings]\nmodel = 'hash:256'\nquery_prefix = ''\npassage_prefix = ''\n"
+                 f"[search]\nregister = ''\n", encoding="utf-8")
+    return p
+
+
+def issues(cfg):
+    tools = DocTools(cfg)
+    con = tools._con()
+    try:
+        return [(i.file, i.level, i.message) for i in knowledge.check(tools.knowledge, con)]
+    finally:
+        con.close()
+
+
+def test_check_accepts_a_good_card(indexed, good_card):
+    assert issues(indexed) == []
+
+
+@pytest.mark.parametrize("change, level, words", [
+    (lambda t: t.replace(" [register]", "", 1), "error", "no source"),
+    (lambda t: t.replace("speed: 120 products/min", "speed: 90 products/min"), "error", "90 products/min"),
+    (lambda t: t.replace("[suction cups]", "[magnets]"), "error", "word list"),
+    (lambda t: t.replace("p.1]", "p.1] [N:\\nowhere\\x.pdf p.2]", 1), "error", "cited file not in the index"),
+    (lambda t: t.replace("project: THOR", "project: NOBODY"), "error", "not in the index nor the register"),
+    (lambda t: t.replace(f"written: {date.today().isoformat()}", "written: 2000-01-01"), "warning", "older than"),
+])
+def test_check_rules(indexed, good_card, change, level, words):
+    good_card.write_text(change(good_card.read_text(encoding="utf-8")), encoding="utf-8")
+    found = issues(indexed)
+    assert any(lv == level and words in msg for _, lv, msg in found), found
+
+
+def test_check_reports_unreadable_cards(indexed, good_card):
+    good_card.write_text("no header", encoding="utf-8")
+    assert issues(indexed) == [("THOR.md", "error", issues(indexed)[0][2])]
+    assert "header" in issues(indexed)[0][2]
+
+
+def test_cli_knowledge_check_exit_code(indexed_config_file, good_card, capsys):
+    from dmx_docs import cli
+    cli.main(["--config", str(indexed_config_file), "knowledge", "check"])
+    assert "1 cards, 0 errors, 0 warnings" in capsys.readouterr().out
+    good_card.write_text("no header", encoding="utf-8")
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--config", str(indexed_config_file), "knowledge", "check"])
+    assert e.value.code == 1 and "THOR.md: error:" in capsys.readouterr().out
 
 
 def test_project_card_names_an_unreadable_card(indexed):

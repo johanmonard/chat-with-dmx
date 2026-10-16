@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from .register import fold
@@ -198,3 +199,81 @@ class Knowledge:
             if want in (fold(c.project), fold(stem), fold(stem.split("__")[-1])):
                 return c
         return None
+
+
+# ----------------------------------------------------------------------------- check
+
+SOURCE = re.compile(r"(?<!\[)\[(?!\[)([^\[\]]+)\](?!\])")   # [source], not [[link]]
+SOURCED_SECTIONS = ("## A.", "## B.", "## C.")
+BACKED_FIELDS = ("client", "country", "years", "machines", "speed")
+WORD_LIST_FIELDS = (("forms", "infeed"), ("forms", "outfeed"), ("end_effectors", "end_effectors"))
+
+
+@dataclass
+class Issue:
+    file: str
+    level: str      # "error" | "warning"
+    message: str
+
+
+def _sourced_lines(body: str):
+    """The '- ' lines of sections A, B and C."""
+    section = ""
+    for line in body.split("\n"):
+        if line.startswith("## "):
+            section = line
+        elif line.startswith("- ") and section.startswith(SOURCED_SECTIONS):
+            yield line
+
+
+def check(k: Knowledge, con) -> list[Issue]:
+    """Every rule of knowledge\\README.md that a program can verify, per card."""
+    from . import sources, store
+
+    issues = [Issue(file, "error", f"unreadable: {reason}") for file, reason in k.errors().items()]
+    vocab = k.vocabulary
+    names = {fold(r[0]) for r in con.execute(
+        "SELECT project FROM doc_facets WHERE project IS NOT NULL UNION "
+        "SELECT subproject FROM doc_facets WHERE subproject IS NOT NULL UNION "
+        "SELECT name FROM register_machines WHERE name IS NOT NULL UNION "
+        "SELECT project FROM register_machines WHERE project IS NOT NULL")}
+    for card in k.cards():
+        def err(message: str, level: str = "error") -> None:
+            issues.append(Issue(card.file, level, message))
+
+        body = fold(card.body)
+        for line in _sourced_lines(card.body):
+            if not SOURCE.search(line):
+                err(f"no source on: {line[2:].strip()}")
+        for key in BACKED_FIELDS:
+            for value in card.values(key):
+                if fold(value) not in body:
+                    err(f"header {key} '{value}' does not appear in the body")
+        for kind, key in WORD_LIST_FIELDS:
+            for entry in card.values(key):
+                word = form_of(entry)
+                value = vocab.canonical(kind, word)
+                if not value:
+                    err(f"{key} '{word}' is not in the word list (vocabulary.md)")
+                    continue
+                synonyms = [w for w, v in vocab.kinds.get(kind, {}).items() if v == value]
+                if not any(s in body for s in synonyms):
+                    err(f"header {key} '{word}' does not appear in the body")
+        for line in card.body.split("\n"):
+            for src in SOURCE.findall(line):
+                path = re.sub(r"\s+(p\.\s*\d+|slide\s+\d+)$", "", src.strip())
+                if "\\" in path and not con.execute("SELECT 1 FROM docs WHERE path_key = ?",
+                                                    (store.path_key(sources.clean_path(path)),)).fetchone():
+                    err(f"cited file not in the index: {path}")
+        if fold(card.project) not in names:
+            err(f"project {card.project} is not in the index nor the register")
+            continue
+        newest = con.execute("""SELECT max(d.mtime) FROM docs d JOIN doc_facets f ON f.doc_id = d.id
+                                WHERE f.project = ? COLLATE NOCASE OR f.subproject = ? COLLATE NOCASE""",
+                             (card.project, card.project)).fetchone()[0]
+        if newest:
+            newest_day = datetime.fromtimestamp(newest).date().isoformat()
+            if card.written < newest_day:
+                err(f"written {card.written} is older than the newest document ({newest_day}): "
+                    "refresh the card", "warning")
+    return issues
