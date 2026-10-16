@@ -831,6 +831,69 @@ class DocTools:
         return {r[0] for r in con.execute("SELECT project FROM doc_facets WHERE project IS NOT NULL UNION "
                                           "SELECT subproject FROM doc_facets WHERE subproject IS NOT NULL")}
 
+    # --------------------------------------------------------- catalog
+    def catalog(self, infeed: str | None = None, outfeed: str | None = None, end_effector: str | None = None,
+                machine: str | None = None, client: str | None = None, country: str | None = None,
+                year_from: int | None = None, year_to: int | None = None, status: str | None = None,
+                text: str | None = None, limit: int = 100) -> str:
+        """One line per written project card matching the filters, then the coverage."""
+        k = self.knowledge
+        if not k.available:
+            return "No knowledge cards on this machine (run pull)."
+        vocab = k.vocabulary
+        fold = register.fold
+
+        def entry_match(kind: str, entries: list[str], query: str) -> bool:
+            want = vocab.canonical(kind, query)
+            if want:
+                return any(vocab.canonical(kind, knowledge.form_of(e)) == want for e in entries)
+            return any(fold(query) in fold(e) for e in entries)
+
+        def years(card) -> tuple[int, int] | None:
+            got = [int(y) for y in re.findall(r"\d{4}", " ".join(card.values("years")))]
+            return (min(got), max(got)) if got else None
+
+        def keep(card) -> bool:
+            for kind, key, query in (("forms", "infeed", infeed), ("forms", "outfeed", outfeed),
+                                     ("end_effectors", "end_effectors", end_effector)):
+                if query and not entry_match(kind, card.values(key), query):
+                    return False
+            for key, query in (("machines", machine), ("client", client), ("country", country)):
+                if query and not any(fold(query) in fold(v) for v in card.values(key)):
+                    return False
+            if status and fold(status) != fold(card.status):  # "reviewed" is inside "unreviewed"
+                return False
+            if text and fold(text) not in fold(" ".join(" ".join(card.values(f)) for f in card.fields)
+                                              + " " + card.body):
+                return False
+            if year_from or year_to:
+                span = years(card)
+                if not span or (year_from and span[1] < year_from) or (year_to and span[0] > year_to):
+                    return False
+            return True
+
+        def show(values: list[str]) -> str:
+            return ", ".join(values) or "?"
+
+        cards = k.cards()
+        lines = [" · ".join((c.project, show(c.values("client")), show(c.values("years")),
+                             show(c.values("machines")),
+                             f"{show(c.values('infeed'))} -> {show(c.values('outfeed'))}",
+                             show(c.values("end_effectors")), show(c.values("speed")), c.status))
+                 for c in cards if keep(c)]
+        out = lines[:max(1, int(limit))] or ["No card matches these filters."]
+        if len(lines) > len(out):
+            out.append(f"... {len(lines) - len(out)} more (raise limit=)")
+        out += [f"card {file} unreadable: {reason}" for file, reason in k.errors().items()]
+        con = self._con()
+        try:
+            total = con.execute("SELECT count(DISTINCT project) FROM doc_facets").fetchone()[0]
+        finally:
+            con.close()
+        out.append(f"Cards exist for {len(cards)} of {total} projects: for a complete answer, "
+                   "also use search / list_projects.")
+        return "\n".join(out)
+
     # --------------------------------------------------------- find_files
     def find_files(self, name: str, folder: str | None = None, limit: int = 30) -> str:
         limit = max(1, min(int(limit), 100))

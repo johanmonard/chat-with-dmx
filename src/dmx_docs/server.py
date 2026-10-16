@@ -46,7 +46,10 @@ Never answer from the first search alone. Follow this loop for every question:
    mise_en_service, manuel...). If the question is about a machine type (Paloma, Presto,
    Hector, Delfi, Astor, Nestor, FeedPlacer, or a model like "Paloma 4R"), filter with
    machine=; for "which projects ..." questions, get the complete candidate list with
-   list_projects(machine=...) and check them one by one. For questions about a client, a
+   list_projects(machine=...) and check them one by one. For "which projects ..." and "what
+   did we build for ..." questions, start with `catalog` (written project cards: infeed,
+   outfeed, end effector, speed), then check in the documents; mind its coverage line.
+   For questions about a client, a
    country or delivery years ("what did we deliver to client X?", "projects in the UK since
    2015"), use list_projects(client=/country=/year_from=) and filter searches with client= or
    country=; `project_card` gives a project's client, delivered machines (serial numbers,
@@ -257,6 +260,36 @@ def build_server(cfg: Config) -> MCPServer:
         """
         return tools.project_card(project)
 
+    def catalog(infeed: str | None = None, outfeed: str | None = None, end_effector: str | None = None,
+                machine: str | None = None, client: str | None = None, country: str | None = None,
+                year_from: int | None = None, year_to: int | None = None, status: str | None = None,
+                text: str | None = None, limit: int = 100) -> str:
+        """List the written project cards: one line per project with client, years, machines, what
+        goes in -> what comes out (infeed -> outfeed), end effector, speed and the card's status
+        (unreviewed / reviewed). Cards are written by Claude from the documents, with a source on every
+        fact (read one with project_card); where a card and a document disagree, the document wins.
+        Not every project has a card yet: the last line gives the coverage - for a complete answer,
+        also use search / list_projects. Use it first for "which projects ..." and "what did we build
+        for ..." questions.
+
+        Args:
+            infeed: What goes into the line, e.g. "flowpack", "loose", "pouch" (synonyms in any language
+                work: "sachet", "vrac").
+            outfeed: What comes out, e.g. "case", "tray", "wrap-around case".
+            end_effector: e.g. "suction cups", "mechanical gripper" ("ventouse", "pince" work too).
+            machine: Machine family or model, e.g. "Paloma", "Presto 2R".
+            client: Any part of the client's name.
+            country: Country as written on the cards.
+            year_from: First year (order to SAT period overlaps it or later).
+            year_to: Last year.
+            status: "reviewed" (checked by a person) or "unreviewed".
+            text: Free text anywhere in the card.
+            limit: Maximum cards listed (default 100).
+        """
+        return tools.catalog(infeed=infeed, outfeed=outfeed, end_effector=end_effector, machine=machine,
+                             client=client, country=country, year_from=year_from, year_to=year_to,
+                             status=status, text=text, limit=limit)
+
     @mcp.tool(**kw)
     def find_files(name: str, folder: str | None = None, limit: int = 30) -> str:
         """Find indexed documents whose file name or folder path contains all the given words
@@ -451,6 +484,7 @@ def build_server(cfg: Config) -> MCPServer:
         mcp.tool(**kw)(search)
         mcp.tool(**kw)(list_projects)
         mcp.tool(**kw)(project_card)
+        mcp.tool(**kw)(catalog)
     elif cfg.profile == "marketing":
         mcp.tool(name="search", **kw)(marketing_search)
     elif cfg.profile == "documentation":

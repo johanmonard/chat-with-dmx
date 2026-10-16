@@ -153,6 +153,74 @@ def test_project_card_without_card_or_folder(indexed):
     assert "No written card yet." in DocTools(indexed).project_card("THOR")
 
 
+ODIN = """---
+type: project
+project: ODIN
+status: reviewed
+written: 2026-10-16
+client: Globex
+years: 2008
+machines: [Hector]
+infeed: [pouch (coffee)]
+outfeed: [tray]
+end_effectors: [mechanical gripper]
+read: 3
+---
+## Summary
+Coffee pouches into trays.
+"""
+
+
+@pytest.fixture
+def catalogued(indexed):
+    k = Path(indexed.knowledge_path)
+    (k / "projects" / "MOUSQUETAIRES__1_Athos.md").unlink()
+    (k / "projects" / "ODIN.md").write_text(ODIN, encoding="utf-8")
+    (k / "vocabulary.md").write_text(VOCAB, encoding="utf-8")
+    return indexed
+
+
+def listed(out):
+    return [line.split(" · ")[0] for line in out.splitlines() if " · " in line]
+
+
+def test_catalog_lists_every_card_with_coverage(catalogued):
+    out = DocTools(catalogued).catalog()
+    assert "THOR · ACME Foods · 2019-2020 · Paloma 4R, Presto · " in out
+    assert "flowpack (chocolate bar 100 g, 4 formats), loose (biscuit) -> wrap-around case (24 bars)" in out
+    assert "ODIN · Globex · 2008 · Hector · pouch (coffee) -> tray · mechanical gripper · ? · reviewed" in out
+    assert out.rstrip().splitlines()[-1] == ("Cards exist for 2 of 2 projects: for a complete answer, "
+                                            "also use search / list_projects.")
+
+
+@pytest.mark.parametrize("kwargs, expected", [
+    (dict(infeed="Flow-pack"), ["THOR"]),
+    (dict(infeed="sachet"), ["ODIN"]),
+    (dict(outfeed="tray"), ["ODIN"]),
+    (dict(end_effector="ventouses"), ["THOR"]),
+    (dict(machine="presto"), ["THOR"]),
+    (dict(client="globex"), ["ODIN"]),
+    (dict(country="FR"), []),
+    (dict(year_from=2015), ["THOR"]),
+    (dict(year_to=2010), ["ODIN"]),
+    (dict(status="reviewed"), ["ODIN"]),
+    (dict(text="coffee pouches"), ["ODIN"]),
+])
+def test_catalog_filters(catalogued, kwargs, expected):
+    assert listed(DocTools(catalogued).catalog(**kwargs)) == expected
+
+
+def test_catalog_without_cards_on_this_machine(indexed):
+    indexed.knowledge_path = str(Path(indexed.knowledge_path).parent / "nowhere")
+    assert DocTools(indexed).catalog() == "No knowledge cards on this machine (run pull)."
+
+
+def test_catalog_lists_unreadable_cards(catalogued):
+    (Path(catalogued.knowledge_path) / "projects" / "BAD.md").write_text("no header", encoding="utf-8")
+    out = DocTools(catalogued).catalog()
+    assert "card BAD.md unreadable:" in out and listed(out) == ["ODIN", "THOR"]
+
+
 def test_project_card_names_an_unreadable_card(indexed):
     (Path(indexed.knowledge_path) / "projects" / "THOR.md").write_text("---\ntype: project\n", encoding="utf-8")
     out = DocTools(indexed).project_card("THOR")
