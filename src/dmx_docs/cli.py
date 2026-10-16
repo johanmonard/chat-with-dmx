@@ -155,6 +155,10 @@ def main(argv: list[str] | None = None) -> None:
         from .knowledge import check
         from .tools import DocTools
         tools = DocTools(cfg)
+        if not tools.knowledge.cards() and not tools.knowledge.errors():
+            print(f"There are no cards in {cfg.knowledge_path}/projects: nothing was checked. To check the "
+                  "cards on the shared folder, run with --config <shared>\\config.toml.")
+            sys.exit(1)
         con = tools._con()
         try:
             issues = check(tools.knowledge, con)

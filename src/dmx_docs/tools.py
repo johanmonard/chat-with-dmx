@@ -706,8 +706,10 @@ class DocTools:
                 like = con.execute("""SELECT DISTINCT project FROM doc_facets WHERE project LIKE ? UNION
                                       SELECT DISTINCT name FROM register_machines WHERE name LIKE ? LIMIT 10""",
                                    (f"%{project}%", f"%{project}%")).fetchall()
+                written = self._written_card(project)  # a card may outlive its project's documents
                 return (f"No project '{project}' in the index or the machine register."
-                        + (f" Similar names: {', '.join(r[0] for r in like)}" if like else ""))
+                        + (f" Similar names: {', '.join(r[0] for r in like)}" if like else "")
+                        + ("" if written == "No written card yet." else "\n\n" + written))
             lines = []
             if name:
                 n, first, last, coll = con.execute(
@@ -811,19 +813,23 @@ class DocTools:
                      "comes from the indexed documents)")
         return "\n".join(lines)
 
-    def _written_card(self, *names: str | None) -> str:
-        """The project's knowledge card (asked name first, then the indexed project name)."""
-        names = [n for n in names if n]
-        for n in names:
-            card = self.knowledge.card(n)
-            if card:
-                return (f"Written card ({card.status}, {card.written}, built from {card.read} documents):\n"
-                        f"{card.body}")
-        wanted = {register.fold(n) for n in names}
+    def _written_card(self, asked: str, parent: str | None = None) -> str:
+        """The knowledge card of the asked project, else (labelled) the card of its parent project."""
+        def show(card) -> str:
+            return (f"Written card {card.file} ({card.status}, {card.written}, built from {card.read} "
+                    f"documents):\n{card.body}")
+
+        card = self.knowledge.card(asked)
+        if card:
+            return show(card)
         for file, reason in self.knowledge.errors().items():
-            stem = file.rsplit(".", 1)[0]
-            if {register.fold(stem), register.fold(stem.split("__")[-1])} & wanted:
+            stem = knowledge.stem_of(file)
+            if register.fold(asked) in (register.fold(stem), register.fold(stem.split("__")[-1])):
                 return f"card {file} unreadable: {reason}"
+        if parent and register.fold(parent) != register.fold(asked):
+            card = self.knowledge.card(parent)
+            if card:
+                return f"No written card for {asked}; written card of the parent project {parent}:\n" + show(card)
         return "No written card yet."
 
     def _project_names(self, con) -> set[str]:
@@ -845,8 +851,9 @@ class DocTools:
 
         def entry_match(kind: str, entries: list[str], query: str) -> bool:
             want = vocab.canonical(kind, query)
-            if want:
-                return any(vocab.canonical(kind, knowledge.form_of(e)) == want for e in entries)
+            if want:  # the same value, or a narrower one ending with it: a wrap-around case is a case
+                got = [vocab.canonical(kind, knowledge.form_of(e)) or "" for e in entries]
+                return any(g == want or fold(g).endswith(" " + fold(want)) for g in got)
             return any(fold(query) in fold(e) for e in entries)
 
         def years(card) -> tuple[int, int] | None:
@@ -888,9 +895,15 @@ class DocTools:
         con = self._con()
         try:
             total = con.execute("SELECT count(DISTINCT project) FROM doc_facets").fetchone()[0]
+            covered = set()  # indexed projects with a card of their own or of one of their sub-projects
+            for c in cards:
+                hit = con.execute("SELECT project FROM doc_facets WHERE project = ? COLLATE NOCASE "
+                                  "OR subproject = ? COLLATE NOCASE LIMIT 1", (c.project, c.project)).fetchone()
+                if hit:
+                    covered.add(hit[0])
         finally:
             con.close()
-        out.append(f"Cards exist for {len(cards)} of {total} projects: for a complete answer, "
+        out.append(f"Cards exist for {len(covered)} of {total} projects: for a complete answer, "
                    "also use search / list_projects.")
         return "\n".join(out)
 

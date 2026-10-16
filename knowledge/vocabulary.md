@@ -8,7 +8,7 @@ card with a value that is not here. Add a value here first, then use it in the c
 ## forms
 - loose: vrac, en vrac, produit nu, produits nus, lose, unverpackt, bulk, unpacked
 - flowpack: flow-pack, flow pack, flowpacks, sachet flowpack, schlauchbeutel
-- pouch: sachet, sachets, beutel, bag, sac, sachet tenant debout, standbeutel, doypack
+- pouch: sachet, sachets, beutel, sachet tenant debout, standbeutel, doypack
 - tray: barquette, barquettes, plateau, trays, schale, tablett
 - box: boite, boîte, boites, boîtes, etui, étui, etuis, étuis, faltschachtel, carton box, folding box
 - case: carton, cartons, caisse, caisse americaine, caisse américaine, karton, shipping case, rsc
@@ -17,7 +17,7 @@ card with a value that is not here. Add a value here first, then use it in the c
 - can: boite de conserve, boîte de conserve, canette, dose, dosen, tin
 - cup: pot, pots, gobelet, gobelets, becher, cups
 - blister: blisters, plaquette, blisterpackung
-- bag: sac, sacs, sachet vrac, tüte
+- bag: sac, sacs, sachet vrac, tüte, bags
 
 ## end_effectors
 - suction cups: ventouse, ventouses, prehenseur a ventouses, préhenseur à ventouses, sauger, saugnapf, suction cup, vacuum cups

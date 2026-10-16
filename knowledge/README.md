@@ -9,8 +9,11 @@ document disagree, the document wins**.
 Layout of this folder (shared master `U:\DMX-RAG\knowledge\`, mirrored to each machine by
 `dmx.ps1 pull`):
 
-- `projects\<PROJECT>.md` - one card per project, named exactly as `list_projects` names it;
-  a sub-project uses a double underscore (`MOUSQUETAIRES__1_Athos.md`).
+- `projects\<PROJECT>.md` - one card per project, named exactly as `list_projects` names it,
+  with `project: <PROJECT>`. A sub-project's card is `<PARENT>__<SUB>.md` with
+  `project: <SUB>` (`MOUSQUETAIRES__1_Athos.md`, `project: 1_Athos`); `check` refuses a file
+  name that does not match `project:`. A project's card is found by its file name first, so
+  `ORION.md` wins over a sub-project card `PACIFIC__ORION.md`.
 - `vocabulary.md` - the word list: allowed infeed/outfeed forms and end effectors, with synonyms.
 - `README.md` - this file: the format and the procedure.
 
@@ -50,6 +53,7 @@ trays for ACME Foods (France), ordered 2019, accepted on site 2020.
 - Layout: two Paloma cells in line, Presto at the end [N:\THOR\0_Vente\00_Offres\Offre THOR v3.pdf p.5]
 
 ## C. History
+- Project 2019-2020, from the offer to the SAT [N:\THOR\0_Vente\00_Offres\Offre THOR v3.pdf p.1] [N:\THOR\5_Gestion\SAT THOR.pdf p.1]
 - Offer v3 2019-03, order 2019-05 [N:\THOR\0_Vente\00_Offres\Offre THOR v3.pdf p.1]
 - FAT 2020-01: 3 open points, closed before shipping [N:\THOR\5_Gestion\FAT THOR.pdf p.2]
 - SAT 2020-04 [N:\THOR\5_Gestion\SAT THOR.pdf p.1]
@@ -70,7 +74,7 @@ trays for ACME Foods (France), ordered 2019, accepted on site 2020.
 | Field | Content | Required |
 |-------|---------|----------|
 | `type` | `project` | yes |
-| `project` | project name as in `list_projects` / the register | yes |
+| `project` | project name as in `list_projects` / the register; for a sub-project card, the sub-project name | yes |
 | `status` | `unreviewed` (written by Claude) or `reviewed` (checked by a person) | yes |
 | `written` | date the card was written or last refreshed, YYYY-MM-DD | yes |
 | `client`, `country` | from the register, or the documents when they disagree | no |
@@ -110,9 +114,13 @@ rather than guess: the "Checked, not found" section says what was looked for.
    from OCR or a drawing.
 3. **Write the card** to `\\DMX-FS01\Users$\Johan.Monard\DMX-RAG\knowledge\projects\<PROJECT>.md`
    with `status: unreviewed`.
-4. **Check it**: `dmx-docs --world projects knowledge check` (against a pulled index that has
-   the card folder) and fix every error before the next project. A warning "older than the
-   newest document" means the card should be refreshed.
+4. **Check it** on the shared folder, with the shared config (its data_dir is the local index,
+   its knowledge folder is the shared one):
+
+   `C:\dmx-rag\venv\Scripts\python.exe -m dmx_docs.cli --config \\DMX-FS01\Users$\Johan.Monard\DMX-RAG\config.toml --world projects knowledge check`
+
+   Fix every error before the next project. It fails when it finds no card at all (wrong
+   folder). A warning "older than the newest document" means the card should be refreshed.
 
 ## Order of work
 

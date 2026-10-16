@@ -104,10 +104,12 @@ def form_of(entry: str) -> str:
 @dataclass
 class Vocabulary:
     kinds: dict[str, dict[str, str]] = field(default_factory=dict)  # kind -> folded word or synonym -> value
+    duplicates: list[str] = field(default_factory=list)             # words listed under two values
 
     @classmethod
     def parse(cls, text: str) -> Vocabulary:
         kinds: dict[str, dict[str, str]] = {}
+        duplicates = []
         kind = None
         for line in text.lstrip("﻿").splitlines():
             line = line.strip()
@@ -118,12 +120,24 @@ class Vocabulary:
                 value, _, syns = line[2:].partition(":")
                 value = value.strip()
                 for word in [value] + syns.split(","):
-                    if fold(word):
-                        kinds[kind][fold(word)] = value
-        return cls(kinds)
+                    key = fold(word)
+                    if not key:
+                        continue
+                    old = kinds[kind].get(key)
+                    if old and old != value:
+                        duplicates.append(f"{kind}: '{word.strip()}' is listed under {old} and {value}")
+                    else:
+                        kinds[kind][key] = value
+        return cls(kinds, duplicates)
 
     def canonical(self, kind: str, word: str) -> str | None:
-        return self.kinds.get(kind, {}).get(fold(word))
+        """The word list value for a word or synonym; plurals ('cases', 'boxes') find their singular."""
+        words = self.kinds.get(kind, {})
+        key = fold(word)
+        for k in (key, key[:-1] if key.endswith("s") else "", key[:-2] if key.endswith("es") else ""):
+            if k and k in words:
+                return words[k]
+        return None
 
 
 def load_vocabulary(path: str) -> Vocabulary:
@@ -193,12 +207,18 @@ class Knowledge:
         return self._vocab[1]
 
     def card(self, name: str) -> Card | None:
+        """The card named by its file: <name>.md first, else the only <PARENT>__<name>.md."""
         want = fold(name)
-        for c in self.cards():
-            stem = c.file.rsplit(".", 1)[0]
-            if want in (fold(c.project), fold(stem), fold(stem.split("__")[-1])):
-                return c
-        return None
+        cards = self.cards()
+        exact = [c for c in cards if fold(stem_of(c.file)) == want]
+        if exact:
+            return exact[0]
+        subs = [c for c in cards if "__" in c.file and fold(stem_of(c.file).split("__")[-1]) == want]
+        return subs[0] if len(subs) == 1 else None
+
+
+def stem_of(file: str) -> str:
+    return file.rsplit(".", 1)[0]
 
 
 # ----------------------------------------------------------------------------- check
@@ -232,6 +252,7 @@ def check(k: Knowledge, con) -> list[Issue]:
 
     issues = [Issue(file, "error", f"unreadable: {reason}") for file, reason in k.errors().items()]
     vocab = k.vocabulary
+    issues += [Issue("vocabulary.md", "error", d) for d in vocab.duplicates]
     names = {fold(r[0]) for r in con.execute(
         "SELECT project FROM doc_facets WHERE project IS NOT NULL UNION "
         "SELECT subproject FROM doc_facets WHERE subproject IS NOT NULL UNION "
@@ -241,6 +262,10 @@ def check(k: Knowledge, con) -> list[Issue]:
         def err(message: str, level: str = "error") -> None:
             issues.append(Issue(card.file, level, message))
 
+        stem = stem_of(card.file)
+        if fold(card.project) != fold(stem.split("__")[-1]):
+            err(f"file name {card.file} does not match project: {card.project} (a project's card is "
+                "<PROJECT>.md; a sub-project's is <PARENT>__<SUB>.md with project: <SUB>)")
         body = fold(card.body)
         for line in _sourced_lines(card.body):
             if not SOURCE.search(line):
@@ -261,7 +286,7 @@ def check(k: Knowledge, con) -> list[Issue]:
                     err(f"header {key} '{word}' does not appear in the body")
         for line in card.body.split("\n"):
             for src in SOURCE.findall(line):
-                path = re.sub(r"\s+(p\.\s*\d+|slide\s+\d+)$", "", src.strip())
+                path = re.sub(r"\s+(pp?\.|slides?)\s*\d[\d\s,.\-–p]*$", "", src.strip())  # p.2, p.2-3, pp. 1, 3
                 if "\\" in path and not con.execute("SELECT 1 FROM docs WHERE path_key = ?",
                                                     (store.path_key(sources.clean_path(path)),)).fetchone():
                     err(f"cited file not in the index: {path}")
