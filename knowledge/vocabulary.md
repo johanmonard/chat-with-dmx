@@ -36,3 +36,6 @@ Meanings agreed with the user (2026-10-16):
 - magnets: aimant, aimants, prehenseur magnetique, préhenseur magnétique, magnetgreifer, magnetic gripper
 - fork: fourche, fourches, pelle, gabel, shovel
 - bernoulli: prehenseur bernoulli, préhenseur bernoulli, bernoulli-greifer, bernoulli gripper, sans contact, contactless
+
+## machines
+<!-- Old machine names of the offers world, one line per model: "- <model>: <old name>, <old name>". Filled with the user from review.csv (rows "unknown machine name"). -->

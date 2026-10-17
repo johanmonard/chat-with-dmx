@@ -119,10 +119,10 @@ def test_find_files_and_list_folder(indexed):
     assert "budget.xlsx" in out and "not indexed (file type)" in out
     assert "~$" not in out
     # folders given by name only, or relative to the root (as Claude sometimes does)
-    for name in ("P1234_Nestle", "Projets\\P1234_Nestle", root.name + "\\Projets\\P1234_Nestle"):
+    for name in ("P1234_ACME", "Projets\\P1234_ACME", root.name + "\\Projets\\P1234_ACME"):
         assert "Spec_cellule.pdf" in tools.list_folder(name), name
         assert "Rapport_MES.docx" in tools.find_files("rapport", folder=name), name
-    assert "Spec_cellule.pdf" in tools.search("cellule", folder="P1234_Nestle", mode="keyword")
+    assert "Spec_cellule.pdf" in tools.search("cellule", folder="P1234_ACME", mode="keyword")
     with pytest.raises(ValueError, match="No indexed folder named"):
         tools.list_folder("NO_SUCH_PROJECT")
 
@@ -130,7 +130,7 @@ def test_find_files_and_list_folder(indexed):
 def test_read_and_find_in_document(indexed):
     cfg, root = indexed
     tools = DocTools(cfg)
-    spec = str(root / "Projets" / "P1234_Nestle" / "Spec_cellule.pdf")
+    spec = str(root / "Projets" / "P1234_ACME" / "Spec_cellule.pdf")
     out = tools.read_document(spec, start_page=2, end_page=2)
     assert "--- page 2 ---" in out and "MN-114" in out and "--- page 3" not in out
     cfg.max_read_chars = 300

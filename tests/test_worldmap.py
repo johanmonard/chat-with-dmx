@@ -234,3 +234,13 @@ def test_projects_map_never_suggests_a_bare_template_folder():
     filters = [row.split("|")[4] for row in text.splitlines() if row.startswith("| ") and row.count("|") >= 6]
     assert not [f for f in filters if "`folder=`" in f]
     assert "folder=" in text and "one project only" in text.lower()
+
+
+def test_offers_map_names_the_register_tools_and_stays_short():
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "maps" / "offers.md").read_text(encoding="utf-8")
+    assert text.startswith("# Offers - map")
+    for tool in ("offer_lines", "list_offers", "offer_card", "offer_stats"):
+        assert f"`{tool}`" in text, tool
+    assert len(text) < 7000  # the live overview needs the rest of the 15,000 characters

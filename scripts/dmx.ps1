@@ -15,11 +15,11 @@ Shared folder layout (this script lives in <shared>\app\scripts):
   <shared>\maps\<world>.md    world maps (what each world holds, where, what it lacks), copied by pull
   <shared>\knowledge\         knowledge cards (projects\<PROJECT>.md, vocabulary.md, README.md), mirrored by pull
   <shared>\worlds\<world>\    index.sqlite3 (master), index.prev.sqlite3 (previous), LOCK,
-                              register.csv (projects: machine register)
+                              register.csv (projects: machine register), corrections.csv and review.csv (offers)
   <shared>\models\            embedding model, copied to each machine once
   <shared>\tools\uv.exe       builds the local Python environment (no admin rights needed)
   <shared>\tools\tessdata\    OCR language files (copied to each machine)
-  <shared>\logs\              one log per run
+  <shared>\logs\              one log per run (a world of profile offers: <shared>\worlds\<world>\logs\)
 
 Commands. All but setup and migrate work on one world: -World <name>, or the world's name as
 first argument; otherwise the script asks (Enter = projects).
@@ -30,7 +30,10 @@ first argument; otherwise the script asks (Enter = projects).
   ocr [args]     read scanned PDF pages (OCR), e.g. ocr --max-minutes 300 or ocr --retry
   describe [args] describe pictures with the local vision model (Ollama), e.g. describe --max-minutes 600,
                  describe --retry, or describe --compare gemma4:12b,qwen3-vl:8b (side-by-side page, index unchanged)
-  update         index, then OCR, then picture descriptions, then embed: unattended run, e.g. on the GPU machine
+  offers [args]  offers world: read the offers (documents, price pages, register sources), e.g. offers --review writes
+                 review.csv (copied back to the shared folder); corrections.csv in the shared folder is copied down first.
+                 Does nothing for the other worlds.
+  update         index, then OCR, then offers, then picture descriptions, then embed: unattended run, e.g. on the GPU machine
                  (a failing step stops the run, is named in the last message and becomes the exit code)
   pull           refresh this machine's read-only copy for Claude Desktop (no lock)
   status         index statistics of the local copy
@@ -41,7 +44,7 @@ first argument; otherwise the script asks (Enter = projects).
 #>
 param(
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet('setup', 'web', 'index', 'embed', 'ocr', 'describe', 'update', 'pull', 'status', 'map', 'search', 'unlock', 'migrate')]
+    [ValidateSet('setup', 'web', 'index', 'embed', 'ocr', 'describe', 'offers', 'update', 'pull', 'status', 'map', 'search', 'unlock', 'migrate')]
     [string]$Command,
     [string]$World,
     [switch]$Force,
@@ -179,6 +182,13 @@ function Get-Worlds {
     @([regex]::Matches($text, '(?m)^\s*\[worlds\.([a-z0-9_-]+)\]') | ForEach-Object { $_.Groups[1].Value })
 }
 
+function Get-WorldProfile([string]$name) {
+    # The profile of a world, from its [worlds.<name>] table of the shared config ('' when it sets none).
+    $text = Get-Content $SharedConfig -Raw
+    $table = [regex]::Match($text, '(?ms)^\s*\[worlds\.' + [regex]::Escape($name) + '\](.*?)(?=^\s*\[|\z)')
+    if ($table.Success -and $table.Groups[1].Value -match '(?m)^\s*profile\s*=\s*[''"]([^''"]+)[''"]') { $Matches[1] } else { '' }
+}
+
 function Resolve-World {
     $known = @(Get-Worlds)
     if (-not $known) { throw "No [worlds.<name>] table in $SharedConfig" }
@@ -202,6 +212,25 @@ function Set-World {
     $script:LocalWorld = Join-Path $LocalData $World
     $script:LocalDb = Join-Path $LocalWorld 'index.sqlite3'
     $script:WorldArgs = @('--world', $World)
+}
+
+function Stop-NoAccess {
+    Write-Host "No access to the '$World' world in the shared folder (ask for the AD group that can read it). Other worlds are not affected." -ForegroundColor Red
+    $script:ExitCode = 5
+    exit 5   # the finally block of the main code still closes the transcript
+}
+
+function Test-WorldAccess {
+    # False when this user may not read the world's folder on the share (each world has its own AD group).
+    # A folder that does not exist yet is a new world: that is fine. With access-based enumeration (or no
+    # entry for the user) a folder the user may not see looks missing, so it cannot be told apart from a new
+    # world here: Enter-Lock (writing the lock) and pull (no index) name that case too.
+    try {
+        if (Test-Path -LiteralPath $SharedWorld -ErrorAction Stop) {
+            Get-ChildItem -LiteralPath $SharedWorld -Force -ErrorAction Stop | Select-Object -First 1 | Out-Null
+        }
+        return $true
+    } catch [UnauthorizedAccessException] { return $false }
 }
 
 function Get-ServedWorld([string]$commandLine) {
@@ -328,16 +357,19 @@ function Move-LegacyLayout {
 function Get-LockInfo { if (Test-Path $Lock) { (Get-Content $Lock -Raw).Trim() } }
 
 function Enter-Lock([string]$what) {
-    New-Item -ItemType Directory -Force $SharedWorld | Out-Null
     $info = "$env:COMPUTERNAME|$env:USERNAME|$(Get-Date -Format 'yyyy-MM-dd HH:mm')|$what|$PID"
     try {
+        New-Item -ItemType Directory -Force $SharedWorld | Out-Null
         $fs = [IO.File]::Open($Lock, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
         $bytes = [Text.Encoding]::ASCII.GetBytes($info)
         $fs.Write($bytes, 0, $bytes.Length); $fs.Close()
         return $false   # fresh lock: start from the master copy
+    } catch [UnauthorizedAccessException] {
+        Stop-NoAccess   # a world the user cannot even see (access-based enumeration) looks like a new one until the lock is written
     } catch [IO.IOException] {
         $held = Get-LockInfo
-        $fields = if ($held) { $held.Split('|') } else { @() }
+        if (-not $held) { throw }   # no owner: not a lock, a disk or network error, reported as it is
+        $fields = $held.Split('|')
         if ($fields.Count -ge 5 -and $fields[0] -eq $env:COMPUTERNAME -and
             (Get-Process -Id ([int]$fields[4]) -ErrorAction SilentlyContinue | Where-Object ProcessName -match 'powershell')) {
             throw "'$($fields[3])' is still running on this machine for '$World' (started $($fields[2])). Wait for it to finish, or stop it first."
@@ -380,6 +412,12 @@ function Copy-MasterToLocal {
     }
     if (Test-Path $new) { [IO.File]::Move($new, $LocalDb) }
     else { Say "No '$World' index in the shared folder yet: starting a new one." }
+    # The user's corrections of the offers world: the shared file is the one that counts.
+    $corrections = Join-Path $SharedWorld 'corrections.csv'
+    $localCorrections = Join-Path $LocalWorld 'corrections.csv'
+    if (Test-Path $corrections) { Copy-Item $corrections $localCorrections -Force }
+    else { Remove-Item $localCorrections -Force -ErrorAction SilentlyContinue }
+    Remove-Item (Join-Path $LocalWorld 'review.csv') -Force -ErrorAction SilentlyContinue   # only a review written by this run goes back
 }
 
 function Save-LocalToMaster {
@@ -401,6 +439,8 @@ con.close()
     Copy-Item $LocalDb $tmp -Force
     if (Test-Path $Master) { Move-Item $Master (Join-Path $SharedWorld 'index.prev.sqlite3') -Force }
     Move-Item $tmp $Master -Force
+    $review = Join-Path $LocalWorld 'review.csv'   # offers world: the list to check, written by 'offers --review'
+    if (Test-Path $review) { Copy-Item $review (Join-Path $SharedWorld 'review.csv') -Force }
     Copy-Item $SharedConfig $LocalConfig -Force
     return $true
 }
@@ -455,6 +495,15 @@ function Invoke-Locked([string]$what, [object[]]$steps) {
 if (-not (Test-Path $SharedConfig)) { throw "Settings not found: $SharedConfig" }
 $needsWorld = $Command -notin 'setup', 'migrate'
 if ($needsWorld) { Resolve-World; Set-World }
+if ($needsWorld -and (Get-WorldProfile $World) -eq 'offers') {
+    # Offers carry prices and lost deals: their transcripts stay behind the world's own permission.
+    $Logs = Join-Path $SharedWorld 'logs'
+    try { New-Item -ItemType Directory -Force $Logs -ErrorAction Stop | Out-Null }
+    catch {
+        if ($_.Exception -is [UnauthorizedAccessException] -or $_.Exception.InnerException -is [UnauthorizedAccessException]) { Stop-NoAccess }
+        throw
+    }
+}
 New-Item -ItemType Directory -Force $Logs | Out-Null
 $tag = if ($needsWorld) { "$($World)_$Command" } else { $Command }
 $log = Join-Path $Logs ("{0}_{1}_{2}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $env:COMPUTERNAME, $tag)
@@ -462,6 +511,10 @@ Start-Transcript -Path $log -Append | Out-Null
 try {
     # unlock must work even while the layout cannot be moved (a lock of the old layout is why).
     if ($Command -ne 'unlock') { Move-LegacyLayout }
+    # Before any lock or copy: a world the user may not read stops here, the other worlds are not affected.
+    if ($Command -in 'web', 'index', 'embed', 'ocr', 'describe', 'offers', 'update', 'pull' -and -not (Test-WorldAccess)) {
+        Stop-NoAccess
+    }
     switch ($Command) {
         'setup' { Install-Env; Sync-Models; Sync-Tessdata }
         'migrate' { Say 'The layout is up to date.' }
@@ -470,14 +523,15 @@ try {
         'embed' { Invoke-Locked 'embed' @(, (@('embed') + $Rest)) }
         'ocr' { Invoke-Locked 'ocr' @(, (@('ocr') + $Rest)) }
         'describe' { Invoke-Locked 'describe' @(, (@('describe') + $Rest)) }
-        'update' { Invoke-Locked 'update' @(@('index'), @('ocr'), @('describe'), @('embed')) }
+        'offers' { Invoke-Locked 'offers' @(, (@('offers') + $Rest)) }
+        'update' { Invoke-Locked 'update' @(@('index'), @('ocr'), @('offers'), @('describe'), @('embed')) }   # offers does nothing in the other worlds
         'pull' {
             Assert-Env
             Sync-Models
             $held = Get-LockInfo
             if ($held -and $held.Split('|')[0] -eq $env:COMPUTERNAME) { throw "This machine holds the lock of '$World' with unsaved work ($held): run the interrupted command again first." }
             if ($held) { Say "Note: $($held.Split('|')[0]) is working on '$World' right now; you get the last saved version." }
-            if (-not (Test-Path $Master)) { throw "World '$World' has no index in the shared folder yet: index it first (launcher 3 or 7)." }
+            if (-not (Test-Path $Master)) { throw "World '$World' has no index in the shared folder yet (index it first: launcher 3 or 7), or you have no access to it (ask for the AD group that can read it)." }
             Copy-MasterToLocal
             Copy-Item $SharedConfig $LocalConfig -Force
             $th = Join-Path $Shared 'thesaurus.toml'

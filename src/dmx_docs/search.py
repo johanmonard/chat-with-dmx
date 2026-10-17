@@ -287,16 +287,49 @@ class Searcher:
             return self._embedder
 
     @staticmethod
+    def _offer_filter(col: str, values: list, marks: str, has_register: bool) -> tuple[str, list]:
+        """Offers world facets that are not exact doc_facets values: machine (an element of the '|' list),
+        client and country (parts of the name). Those read through the offer register (year_from, year_to,
+        status) match nothing when the register has not been built."""
+        offer_docs = "d.id IN (SELECT doc_id FROM doc_facets WHERE offer IN (SELECT offer_key FROM offers WHERE {}))"
+        if col == "machine":  # '|Paloma|Paloma 3R|': a family or a model
+            return ("d.id IN (SELECT doc_id FROM doc_facets WHERE "
+                    + " OR ".join("machine LIKE ?" for _ in values) + ")", [f"%|{v}|%" for v in values])
+        if col in ("client", "country"):  # part of the name (case ignored, comma = or)
+            likes = [f"%{v}%" for v in values]
+
+            def any_like(column: str) -> str:
+                return "(" + " OR ".join(f"{column} LIKE ?" for _ in values) + ")"
+            clause, args = f"d.id IN (SELECT doc_id FROM doc_facets WHERE {any_like(col)}", list(likes)
+            if col == "country" and has_register:  # the folder's country, or the offer's in the register
+                clause += f" OR offer IN (SELECT offer_key FROM offers WHERE {any_like('country')})"
+                args += likes
+            return clause + ")", args
+        if not has_register:
+            return "0", []
+        if col == "status":
+            return offer_docs.format(f"status COLLATE NOCASE IN ({marks})"), values
+        return offer_docs.format("year >= ?" if col == "year_from" else "year <= ?"), [int(values[0])]
+
+    @staticmethod
     def _filters(folder: str | None, file_type: str | None, modified_after: str | None,
-                 facets: dict | None = None):
+                 facets: dict | None = None, profile: str = "projects", offer_register: bool = False):
         clauses, params = [], []
         # Facet filters (project, collection, section, doc_type): comma-separated values,
         # case-insensitive. Documents without that facet are excluded by the filter.
         for col, value in (facets or {}).items():
             values = [v.strip() for v in str(value).split(",") if v.strip()] if value else []
+            if col == "offer":  # as folders and files write it: B-250306 V1, 3002113_02, Offer - 3001234_00.pdf
+                from . import offerkeys
+                values = [offerkeys.offer_key(v) or v for v in values]
             if values:
                 marks = ",".join("?" * len(values))
-                if col == "machine":  # documents of projects with that machine family or model
+                if profile != "projects" and col in ("machine", "client", "country", "status", "year_from",
+                                                     "year_to"):
+                    clause, args = Searcher._offer_filter(col, values, marks, offer_register)
+                    clauses.append(clause)
+                    params += args
+                elif col == "machine":  # documents of projects with that machine family or model
                     from .machines import confirmed_sql
                     clauses.append(
                         "d.id IN (SELECT doc_id FROM doc_facets WHERE project IN (SELECT project FROM "
@@ -305,7 +338,7 @@ class Searcher:
                         f"register_machines WHERE family_ok = 1 AND (family COLLATE NOCASE IN ({marks}) "
                         f"OR (model_ok = 1 AND model COLLATE NOCASE IN ({marks})))))")
                     params += values * 4
-                elif col in ("client", "country"):  # projects of that client / installed in that country
+                elif profile == "projects" and col in ("client", "country"):  # projects of that client / country
                     from . import register
                     cond, args = (register.client_clause if col == "client" else register.country_clause)(str(value))
                     clauses.append("d.id IN (SELECT doc_id FROM doc_facets WHERE project IN "
@@ -361,8 +394,9 @@ class Searcher:
     def search(self, con, query: str, limit: int = 10, folder: str | None = None,
                file_type: str | None = None, modified_after: str | None = None,
                mode: str = "hybrid", allowed=None, facets: dict | None = None,
-               expand: bool | None = None, pictures_only: bool = False) -> list[Hit]:
-        clauses, params = self._filters(folder, file_type, modified_after, facets)
+               expand: bool | None = None, pictures_only: bool = False, profile: str = "projects") -> list[Hit]:
+        offer_register = profile != "projects" and store.has_table(con, "offers")
+        clauses, params = self._filters(folder, file_type, modified_after, facets, profile, offer_register)
         if pictures_only:  # passages written from pictures by the vision model (describe.py)
             clauses.append("c.id IN (SELECT chunk_id FROM picture_uses WHERE chunk_id IS NOT NULL)")
         filtered = bool(clauses)

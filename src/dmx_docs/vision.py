@@ -26,6 +26,8 @@ MAX_DESCRIPTION = 1000
 MAX_VISIBLE = 500
 MAX_KEYWORDS = 12
 MAX_KEYWORD_CHARS = 40
+NUM_PREDICT = 2048             # answer tokens of chat_json
+MIN_CTX, MAX_CTX = 8192, 16384  # context window of chat_json, between these by prompt length
 
 SCHEMA = {
     "type": "object",
@@ -122,24 +124,19 @@ def parse(content: str) -> Description:
     return Description(kind, _cut(d["description"], MAX_DESCRIPTION), visible, keywords[:MAX_KEYWORDS])
 
 
-def describe_image(url: str, model: str, image: bytes, context: str, timeout: float) -> Description:
-    """One picture described by the model. Raises VisionError (timeout=True for a timeout)."""
-    body = {"model": model, "stream": False, "think": False, "format": SCHEMA, "keep_alive": "10m",
-            "options": {"temperature": 0, "num_ctx": 8192},
-            "messages": [{"role": "system", "content": SYSTEM_PROMPT},
-                         {"role": "user", "content": f"Contexte :\n{context}\n\nDécris l'image.",
-                          "images": [base64.b64encode(image).decode("ascii")]}]}
+def _chat(url: str, body: dict, timeout: float) -> dict:
+    """One /api/chat call; a model without a thinking switch is asked again without `think`.
+    Raises VisionError (timeout=True for a timeout) on HTTP error, timeout, Ollama gone, invalid body."""
     endpoint = url.rstrip("/") + "/api/chat"
-    started = time.perf_counter()
     try:
         try:
-            out = _post(endpoint, body, timeout)
+            return _post(endpoint, body, timeout)
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")
             if e.code != 400 or "think" not in detail.lower():
                 raise VisionError(f"HTTP {e.code}: {detail[:200]}") from None
             body.pop("think")  # a model without a thinking switch
-            out = _post(endpoint, body, timeout)
+            return _post(endpoint, body, timeout)
     except VisionError:
         raise
     except urllib.error.HTTPError as e:
@@ -152,10 +149,46 @@ def describe_image(url: str, model: str, image: bytes, context: str, timeout: fl
         raise VisionError(f"Ollama not reachable at {url}: {e.reason}") from None
     except (OSError, ValueError, http.client.HTTPException) as e:  # e.g. IncompleteRead, invalid JSON body
         raise VisionError(f"{type(e).__name__}: {e}"[:200]) from None
+
+
+def _content(out: dict) -> str:
     message = out.get("message") if isinstance(out, dict) else None
     if not isinstance(message, dict):
         raise VisionError("unexpected answer from Ollama: " + json.dumps(out)[:200])
-    desc = parse(message.get("content") or "")
+    return message.get("content") or ""
+
+
+def chat_json(url: str, model: str, prompt: str, timeout: float) -> dict:
+    """One text prompt answered as a JSON object. The context window follows the prompt's length; a prompt
+    that filled it is an error (Ollama would cut its start silently). Raises VisionError on HTTP error,
+    timeout, a cut prompt or invalid JSON."""
+    num_ctx = min(max(len(prompt) // 3 + NUM_PREDICT, MIN_CTX), MAX_CTX)
+    body = {"model": model, "stream": False, "think": False, "format": "json", "keep_alive": "10m",
+            "options": {"temperature": 0, "num_predict": NUM_PREDICT, "num_ctx": num_ctx},
+            "messages": [{"role": "user", "content": prompt}]}
+    out = _chat(url, body, timeout)
+    used = out.get("prompt_eval_count") if isinstance(out, dict) else None
+    if isinstance(used, int) and used >= num_ctx - NUM_PREDICT:
+        raise VisionError(f"prompt cut: {used} tokens read of a {num_ctx} token window")
+    content = _content(out)
+    try:
+        answer = json.loads(content)
+    except ValueError:
+        raise VisionError("invalid JSON answer: " + content[:200]) from None
+    if not isinstance(answer, dict):
+        raise VisionError("answer is not a JSON object: " + content[:200])
+    return answer
+
+
+def describe_image(url: str, model: str, image: bytes, context: str, timeout: float) -> Description:
+    """One picture described by the model. Raises VisionError (timeout=True for a timeout)."""
+    body = {"model": model, "stream": False, "think": False, "format": SCHEMA, "keep_alive": "10m",
+            "options": {"temperature": 0, "num_ctx": 8192},
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT},
+                         {"role": "user", "content": f"Contexte :\n{context}\n\nDécris l'image.",
+                          "images": [base64.b64encode(image).decode("ascii")]}]}
+    started = time.perf_counter()
+    desc = parse(_content(_chat(url, body, timeout)))
     desc.seconds = time.perf_counter() - started
     return desc
 

@@ -1,3 +1,5 @@
+import contextlib
+import getpass
 import os
 import shutil
 import sqlite3
@@ -9,7 +11,7 @@ import pytest
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell launcher")
 SCRIPT = Path(__file__).parents[1] / "scripts" / "dmx.ps1"
-CONFIG = "[index]\ndata_dir = 'x'\n\n[worlds.projects]\nprofile = 'projects'\n\n[worlds.marketing]\nprofile = 'marketing'\n"
+CONFIG = "[index]\ndata_dir = 'x'\n\n[worlds.projects]\nprofile = 'projects'\n\n[worlds.marketing]\nprofile = 'marketing'\n\n[worlds.offers]\nprofile = 'offers'\n"
 
 
 def run(shared, local, *args, env=None):
@@ -81,7 +83,7 @@ def test_local_index_in_use_is_left_untouched(layout):
 def test_unknown_world_is_refused(layout):
     shared, local = layout
     r = run(shared, local, "unlock", "-World", "nope")
-    assert r.returncode != 0 and "Configured worlds: projects, marketing" in r.stdout + r.stderr
+    assert r.returncode != 0 and "Configured worlds: projects, marketing, offers" in r.stdout + r.stderr
 
 
 def test_world_as_first_argument_and_per_world_lock(layout):
@@ -194,7 +196,23 @@ def test_unlock_launcher_takes_the_world(layout, args):
 # ---- dmx_docs.cli, so that no uv, no packages and no real index are involved.
 
 STUB_CLI = """import os, sys
+from pathlib import Path
 # Stands in for dmx_docs.cli: the index step ends with FAKE_DMX_EXIT, every other step succeeds.
+# FAKE_DMX_LOG (a file) receives the step names. The offers step reports the corrections.csv it finds
+# in the local copy of the world and, with --review, writes a review.csv there.
+log = os.environ.get("FAKE_DMX_LOG")
+if "--world" in sys.argv:
+    world = sys.argv[sys.argv.index("--world") + 1]
+    step = sys.argv[sys.argv.index("--world") + 2]
+    if log:
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(step + "\\n")
+            if step == "offers":
+                mine = Path(os.environ["DMX_RAG_LOCAL"]) / "data" / world
+                corrections = mine / "corrections.csv"
+                f.write("corrections: " + (corrections.read_text(encoding="utf-8") if corrections.exists() else "none") + "\\n")
+                if "--review" in sys.argv:
+                    (mine / "review.csv").write_text("offer;reason\\n3001234;no CHF amount\\n", encoding="utf-8")
 sys.exit(int(os.environ.get("FAKE_DMX_EXIT", "0")) if "index" in sys.argv else 0)
 """
 STAMP_NS = 1_700_000_000_000_000_000  # a multiple of 100 ns (the NTFS resolution)
@@ -208,10 +226,13 @@ def ready(layout, tmp_path):
     assert run(shared, local, "migrate").returncode == 0
     master = shared / "worlds" / "projects" / "index.sqlite3"
     master.unlink()
-    con = sqlite3.connect(master)  # the copy back runs an integrity check on a real database
-    con.execute("CREATE TABLE t (x)")
-    con.commit()
-    con.close()
+    offers = shared / "worlds" / "offers"
+    offers.mkdir(parents=True)
+    for index in (master, offers / "index.sqlite3"):
+        con = sqlite3.connect(index)  # the copy back runs an integrity check on a real database
+        con.execute("CREATE TABLE t (x)")
+        con.commit()
+        con.close()
     app = shared / "app"
     (app / "src").mkdir()
     (app / "pyproject.toml").write_text("[project]\n", encoding="ascii")
@@ -341,3 +362,130 @@ def test_describe_command_runs_locked_for_one_world(ready):
     assert r.returncode == 0, r.stdout + r.stderr
     assert "Running: dmx-docs --world projects describe --max-minutes 5" in r.stdout
     assert not (shared / "worlds" / "projects" / "LOCK").exists()
+
+
+def steps_of(log):
+    return [line for line in log.read_text(encoding="utf-8").splitlines() if not line.startswith("corrections:")]
+
+
+def test_update_runs_the_offers_step(ready, tmp_path):
+    shared, local, env = ready
+    log = tmp_path / "steps.log"
+    env = dict(env, FAKE_DMX_LOG=str(log))
+    r = run(shared, local, "update", "-World", "offers", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert steps_of(log) == ["index", "ocr", "offers", "describe", "embed"]
+    log.unlink()
+    r = run(shared, local, "update", "-World", "projects", env=env)   # the step is a no-op there, but it is run
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert steps_of(log) == ["index", "ocr", "offers", "describe", "embed"]
+
+
+def test_corrections_down_review_up(ready, tmp_path):
+    shared, local, env = ready
+    log = tmp_path / "steps.log"
+    env = dict(env, FAKE_DMX_LOG=str(log))
+    world = shared / "worlds" / "offers"
+    (world / "corrections.csv").write_text("offer;status\n3001234;won\n", encoding="utf-8")
+    r = run(shared, local, "offers", "-World", "offers", "--review", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Running: dmx-docs --world offers offers --review" in r.stdout
+    assert log.read_text(encoding="utf-8") == "offers\ncorrections: offer;status\n3001234;won\n\n"   # down, before the run
+    assert (local / "data" / "offers" / "corrections.csv").exists()
+    assert (world / "review.csv").read_text(encoding="utf-8") == "offer;reason\n3001234;no CHF amount\n"   # up, after it
+    assert not (world / "LOCK").exists()
+    # A world without corrections.csv or review.csv still runs.
+    (world / "corrections.csv").unlink()
+    (world / "review.csv").unlink()
+    log.unlink()
+    again = run(shared, local, "offers", "-World", "offers", env=env)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert "corrections: none" in log.read_text(encoding="utf-8") and not (world / "review.csv").exists()
+
+
+def test_pull_copies_the_corrections(ready):
+    shared, local, env = ready
+    (shared / "worlds" / "offers" / "corrections.csv").write_text("offer;status\n", encoding="utf-8")
+    r = run(shared, local, "pull", "-World", "offers", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (local / "data" / "offers" / "corrections.csv").exists()
+
+
+NO_ACCESS = ("No access to the 'offers' world in the shared folder (ask for the AD group that can read it). "
+             "Other worlds are not affected.")
+
+
+@contextlib.contextmanager
+def denied(folder, rights):
+    """Deny `rights` (icacls letters) to the current user on `folder`, and always give them back: pytest could
+    not delete the folder otherwise. Rights are never (R): that also denies reading the permissions, and then
+    icacls cannot undo it in a folder that pytest created (the owner has only what OWNER RIGHTS says)."""
+    icacls = shutil.which("icacls")
+    if not icacls:
+        pytest.skip("icacls is not available")
+    name = os.environ.get("USERNAME") or getpass.getuser()
+    user = f"{os.environ['USERDOMAIN']}\\{name}" if os.environ.get("USERDOMAIN") else name
+    subprocess.run([icacls, str(folder), "/deny", f"{user}:({rights})"], check=True, capture_output=True)
+    try:
+        yield
+    finally:
+        subprocess.run([icacls, str(folder), "/remove:d", user], check=True, capture_output=True)
+
+
+@pytest.mark.parametrize("command", ["web", "index", "embed", "ocr", "describe", "offers", "update", "pull"])
+def test_no_access_message(ready, command):
+    shared, local, env = ready
+    folder = shared / "worlds" / "offers"
+    with denied(folder, "RD"):   # RD: list the folder
+        r = run(shared, local, command, "-World", "offers", env=env)
+    assert r.returncode == 5 and NO_ACCESS in text(r), r.stdout + r.stderr
+    assert not (folder / "LOCK").exists() and not (local / "data" / "offers").exists()
+
+
+def test_no_access_to_one_world_does_not_affect_the_others(ready):
+    shared, local, env = ready
+    with denied(shared / "worlds" / "offers", "RD"):
+        other = run(shared, local, "pull", "-World", "projects", env=env)
+    assert other.returncode == 0, other.stdout + other.stderr
+
+
+def test_a_world_that_cannot_be_locked_is_a_no_access(ready):
+    # Access-based enumeration: the folder looks missing or unwritable, so the check up front passes and the
+    # lock is what fails.
+    shared, local, env = ready
+    folder = shared / "worlds" / "offers"
+    with denied(folder, "WD,AD"):   # WD, AD: create files and folders
+        r = run(shared, local, "index", "-World", "offers", env=env)
+    assert r.returncode == 5 and NO_ACCESS in text(r), r.stdout + r.stderr
+    assert not (folder / "LOCK").exists() and not (local / "data" / "offers").exists()
+
+
+def test_pull_of_a_world_without_a_folder_names_both_causes(ready):
+    shared, local, env = ready
+    shutil.rmtree(shared / "worlds" / "offers")
+    r = run(shared, local, "pull", "-World", "offers", env=env)
+    assert r.returncode != 0 and r.returncode != 5
+    assert ("World 'offers' has no index in the shared folder yet (index it first: launcher 3 or 7), or you have no "
+            "access to it (ask for the AD group that can read it).") in text(r), r.stdout + r.stderr
+
+
+def test_offers_transcripts_stay_in_the_world_folder(ready):
+    # Offers carry prices and lost deals: their logs stay behind the world's own permission, not in <shared>\logs.
+    shared, local, env = ready
+    config = shared / "config.toml"
+    config.write_text(config.read_text(encoding="utf-8") + '\n[worlds.sales]\ntitle = "Sales"\nprofile = "offers"\n',
+                      encoding="utf-8")
+    for world in ("offers", "sales", "marketing"):
+        r = run(shared, local, "unlock", "-World", world, env=env)
+        assert r.returncode == 0, r.stdout + r.stderr
+    assert len(list((shared / "worlds" / "offers" / "logs").glob("*_offers_unlock.log"))) == 1
+    assert len(list((shared / "worlds" / "sales" / "logs").glob("*_sales_unlock.log"))) == 1   # profile offers
+    assert [p.name.split("_", 2)[2] for p in (shared / "logs").glob("*_unlock.log")] == ["marketing_unlock.log"]
+
+
+def test_a_lock_error_without_an_owner_is_reported_as_it_is(ready):
+    shared, local, env = ready
+    (shared / "worlds" / "marketing").write_text("a file where the world's folder should be")
+    r = run(shared, local, "index", "-World", "marketing", env=env)
+    assert r.returncode != 0 and "in use by another machine" not in text(r), r.stdout + r.stderr
+    assert "Could not find a part of the path" in text(r), r.stdout + r.stderr   # the error itself

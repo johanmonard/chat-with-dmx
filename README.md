@@ -240,23 +240,24 @@ U:\DMX-RAG\
   3 - Index new and changed files.cmd
   4 - Compute embeddings.cmd           from a cmd prompt you can add e.g. --max-minutes 300
   5 - Update Claude Desktop copy.cmd   local copy for Claude Desktop + the configuration to paste
-  7 - Update a world (index + embeddings).cmd   unattended: index, OCR of scanned pages, picture descriptions, embeddings
+  7 - Update a world (index + embeddings).cmd   unattended: index, OCR of scanned pages, offers (register), picture descriptions, embeddings
   Unlock after a crash.cmd
   config.toml      settings for all machines (data_dir = 'C:\dmx-rag\data') + [worlds.<name>]
   thesaurus.toml   search vocabulary shared by every world
   app\             this repository (git pull here to update; machines reinstall automatically)
-  worlds\<name>\   index.sqlite3, index.prev.sqlite3 (previous version), LOCK, register.csv (projects)
+  worlds\<name>\   index.sqlite3, index.prev.sqlite3 (previous version), LOCK, register.csv (projects),
+                   corrections.csv, review.csv and logs\ (offers)
   models\          embedding model, copied to each machine once
   tools\uv.exe     installs Python and the packages without admin rights
   tools\tessdata   OCR language files, copied to each machine
-  logs\            one log per run
+  logs\            one log per run (the offers world's runs log to worlds\offers\logs\)
 ```
 
 * Every launcher asks for the world (Enter = projects); from a cmd prompt give it as first
   argument, e.g. `"7 - Update a world (index + embeddings).cmd" marketing`.
 * One machine at a time works on a world; two machines can work on two different worlds.
 * Local copies are in `C:\dmx-rag\data\<world>`. Claude Desktop gets one server per world:
-  `dmx-<world>` (`dmx-projects`, `dmx-marketing`, `dmx-documentation`; launcher 5 prints the
+  `dmx-<world>` (`dmx-projects`, `dmx-marketing`, `dmx-documentation`, `dmx-offers`; launcher 5 prints the
   entry). The projects entry was called `dmx-docs` before: rename that key in
   `claude_desktop_config.json` (with Claude Desktop closed, or restart it right away).
 * The skill `skills\dmx-research` teaches Claude how to search the worlds, together or alone.
@@ -271,6 +272,77 @@ U:\DMX-RAG\
   from its local copy. From another machine, *Unlock after a crash* releases the lock (the
   unsaved work of the crashed run is then lost).
 
+### The worlds
+
+| World (server) | Holds | Profile |
+|---|---|---|
+| Projects (`dmx-projects`) | one folder per client project: offers won, specifications, design, FAT/SAT, manuals, after-sales | `projects` |
+| Marketing (`dmx-marketing`) | brochures, datasheets, presentations, competition, exhibitions, picture files | `marketing` |
+| Documentation (`dmx-documentation`) | the standard machine manual in FR/DE/EN | `documentation` |
+| Offers (`dmx-offers`) | every offer sent to clients, won or not, all revisions, with a register of priced lines | `offers` |
+
+### The offers world (sales and management only)
+
+The sales folder (`\\DMX-FS01.rotzingerag.local\Daten$\RMA_ORG\SAL\Clients`: client folders, the
+`01_Historique` archive, partner offers, market studies, NDAs; PDF, Word, PowerPoint and Outlook
+`.msg` mails) is indexed like the other worlds and, in addition, read into an **offer register**:
+every offer, its revisions and variants, and one row per priced line with the amounts in each
+currency exactly as printed, its source file and page, and whether the offer was won (an offer
+number quoted by a project of the projects world) or not. Claude answers price trends, client
+histories and counts from the register with `list_offers`, `offer_card`, `offer_lines` and
+`offer_stats`, always with a line saying how many offers were covered and which were left out.
+Currencies are never converted. The seed `[worlds.offers]` is in `config.example.toml`.
+
+**Launcher 7** (`7 - Update a world (index + embeddings).cmd offers`, run on the machine that builds
+worlds, with Ollama running and a pulled copy of the projects world) does, in order: index the
+files, read scanned pages (OCR), **the offers step** (reads the price pages with rules, the local
+model for the pages the rules cannot read, links the offers to the projects, applies the
+corrections), then embeddings. The offers step alone, with the list to check:
+
+```powershell
+dmx.ps1 offers -World offers --review
+```
+
+Two files in the world's shared folder `worlds\offers\`. Only `corrections.csv` is copied down (to
+`C:\dmx-rag\data\offers\`, by the launchers before the offers step and by pull); only `review.csv`
+goes up (written by `offers --review` on the machine that builds the world, copied back to the
+shared folder):
+
+* `corrections.csv`: **edited by the user** (sales or management) in Excel or a text editor, **in
+  the shared folder `worlds\offers\`**: a copy edited under `C:\dmx-rag\data\offers\` is overwritten
+  by the next launcher run or pull. Applied after every rebuild, so a correction survives
+  re-indexing and beats the documents. Columns `offer;revision;line;field;value;note;who;date`
+  (`;` or `,`, UTF-8 or ANSI). A row corrects the offer (`revision` and `line` empty or `-`), one
+  revision (`03`, or `03/<variant>` when it has variants, e.g. `03/Vandelay`) or one line (its
+  position on the price page, from `offer_card`). Fields: offer `status` (`won`, `won_unconfirmed`,
+  `lost`, `cancelled`, `no_order_found`, `open`, `unknown`), `project`, `client`, `country`,
+  `offer_type` (`firm` or `budget`), `title`; revision `date` (`2020-03-05` or `05.03.2020`),
+  `variant`, `ignore` (`yes`); line `text`, `kind`, `model`, `quantity`, `amount:CHF` (or another
+  currency; an empty value removes that currency from the line), `delete` (`yes`). A correction
+  whose target no longer exists is listed in `review.csv`, not dropped.
+* `review.csv`: **written by the machine** (`offers --review`), read by the user, not edited. UTF-8
+  with BOM, `;`-separated, for Excel. Columns `offer;revision;client;issue;detail;path;page`; the
+  issues to check are: unread document, model not asked (time limit: run again), no price section,
+  prompt too long for the model, model unavailable, sum mismatch, low confidence, unknown machine
+  name, offer document without number (no document of the revision carries the offer number: is
+  it ours?), duplicate offer number, several projects, unconfirmed project link, no offer document,
+  unknown offer folder, stale correction. Fix what is wrong in `corrections.csv`; add the old names
+  of machines to the `## machines` section of `knowledge\vocabulary.md`.
+
+**Won or not.** An offer is `won` when a project of the projects world carries its number in a path
+(a file or folder name), or in its text when the project's client (machine register) or machine
+family is the offer's. A number found only in the text of another client's project with another
+machine (a comparison, a reference) gives `won_unconfirmed`: shown apart from won and listed in
+`review.csv` (unconfirmed project link); confirm or correct it with a `status` row.
+
+**Access.** Offers carry prices and lost deals: `worlds\offers\` is on a team share with an NTFS
+permission for one AD group (sales and management). Only people in that group can pull the world.
+For anyone else `dmx.ps1 pull -World offers` (and every command that works on the world) stops
+with "No access to the 'offers' world in the shared folder" and exit code 5, without touching
+the other worlds; the account of the machine that builds the world must be in the group too.
+The world's text, prices and mails never go into `knowledge\`, the maps or the skill, and the
+launchers' logs of the world stay in `worlds\offers\logs\` (not in the shared `logs\`).
+
 ## Reference
 
 | Command | What it does |
@@ -278,6 +350,7 @@ U:\DMX-RAG\
 | `dmx-docs web [--port 8765]` | Configuration page: folders, exclusions, scans, status |
 | `dmx-docs index [--retry-errors]` | Crawl roots, extract text, update the keyword index |
 | `dmx-docs ocr [--max-minutes N] [--retry]` | Read scanned PDF pages (OCR) and add their text; run before embed |
+| `dmx-docs offers [--review] [--max-minutes N]` | Offers world: read the price pages into the offer register, link won offers, apply `corrections.csv`; `--review` also writes `review.csv`; after N minutes the model is no longer asked (the register is still written; run again for the rest) |
 | `dmx-docs describe [--max-minutes N] [--retry]` | Describe pictures with the local vision model (Ollama); run before embed |
 | `dmx-docs describe --compare MODEL1,MODEL2 [--sample 25] [--out DIR]` | Side-by-side HTML page of models on a sample (index unchanged) |
 | `dmx-docs embed [--max-minutes N] [--reset]` | Add embeddings to new chunks (`--reset` after changing model) |

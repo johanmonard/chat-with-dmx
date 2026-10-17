@@ -16,7 +16,7 @@ def test_split_text_is_contiguous_and_bounded():
 
 
 def test_pdf_pages(corpus):
-    r = extract_file(str(corpus / "Projets" / "P1234_Nestle" / "Spec_cellule.pdf"))
+    r = extract_file(str(corpus / "Projets" / "P1234_ACME" / "Spec_cellule.pdf"))
     assert r.status == "ok"
     assert r.n_pages == 3
     assert [p for p, _ in r.pages] == [1, 2, 3]
@@ -25,7 +25,7 @@ def test_pdf_pages(corpus):
 
 
 def test_docx_headings_and_tables(corpus):
-    r = extract_file(str(corpus / "Projets" / "P1234_Nestle" / "Rapport_MES.docx"))
+    r = extract_file(str(corpus / "Projets" / "P1234_ACME" / "Rapport_MES.docx"))
     assert r.status == "ok"
     text = "\n".join(t for _, t in r.pages)
     assert "# Rapport de mise en service" in text
@@ -59,7 +59,7 @@ def test_doc_conversion_with_word(corpus, tmp_path):
     word = win32com.client.DispatchEx("Word.Application")
     try:
         word.Visible = False
-        doc = word.Documents.Open(str(corpus / "Projets" / "P1234_Nestle" / "Rapport_MES.docx"), False, True)
+        doc = word.Documents.Open(str(corpus / "Projets" / "P1234_ACME" / "Rapport_MES.docx"), False, True)
         doc.SaveAs2(doc_path, FileFormat=0)  # wdFormatDocument (Word 97-2003)
         doc.Close(False)
     finally:

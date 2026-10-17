@@ -185,8 +185,116 @@ def compute_documentation(path: str, root: str) -> dict:
     return out
 
 
-RULES = {"projects": compute, "marketing": compute_marketing, "documentation": compute_documentation}
-PROFILE_VERSIONS = {"marketing": MARKETING_FACETS_VERSION, "documentation": 1}
+# Offers world: kinds of document by folder name (folded) and by file-name words, first match wins.
+_OFFER_FOLDER_KINDS = {"specification": "specification", "specifications": "specification",
+                       "cahier des charges": "specification", "mail": "mail", "mails": "mail",
+                       "layout": "layout", "layouts": "layout", "history": "history"}
+_OFFER_NAME_KINDS = [
+    ("offer",              ["angebot", "offre", "offer", "quotation", "devis"]),
+    ("technical_solution", ["solution technique"]),
+    ("visit_report",       ["besuchsbericht", "visit report", "rapport de visite"]),
+    ("proforma",           ["proforma"]),
+]
+_OFFER_PARTNERS = {"06 offres ipso": "IPSO", "07 offres wyzo": "Wyzo"}
+_ARCHIVE_ANCHORS = ("prospect", "prospects", "client", "clients")
+_VERSION_LABEL = re.compile(r"(?<![A-Za-z0-9])V(\d+)(?!\w)", re.I)
+_NAME_REVISION = re.compile(r"(?:[ _]V(\d+)|_(\d{2}))$", re.I)
+
+
+def _offer_structural(folder: str) -> bool:
+    """A folder that is neither a client nor a site: 'Offres', a revision, a kind of document."""
+    from . import offerkeys, register
+
+    return (register.fold(folder) == "offres" or offerkeys.revision_of(folder) is not None
+            or register.fold(folder) in _OFFER_FOLDER_KINDS)
+
+
+def compute_offers(path: str, root: str) -> dict:
+    """Offers world, from the path below the root: category (client, archive, partner, unknown_client,
+    market_study, nda, sales_info), client, site, country (archive only), partner, offer key, revision
+    label, document kind and machines. facet_source is 'name' when the kind comes from the file name,
+    else 'folder'. A document under no configured root, or directly in it, has no facets."""
+    from . import machines, offerkeys, register
+
+    if not root:
+        return {}
+    rel = os.path.relpath(path, root)
+    parts = [p for p in rel.replace("/", "\\").split("\\") if p and p != "."]
+    if len(parts) < 2:
+        return {}
+    folders, name = parts[:-1], parts[-1]
+    stem = os.path.splitext(name)[0]
+    category = offerkeys.SPECIAL_FOLDED.get(register.fold(folders[0]), "client")
+    out = {"category": category, "client": None, "site": None, "country": None, "partner": None,
+           "offer": None, "revision": None, "doc_type": None, "machine": None, "facet_source": "folder"}
+    found = machines.models_in("|".join(parts))
+    names = sorted({fam for fam, _ in found} | {model for _, model in found if model})
+    out["machine"] = "|" + "|".join(names) + "|" if names else None
+    if category in ("market_study", "nda", "sales_info"):
+        out["doc_type"] = category
+        return out
+
+    # Offer: the first folder below the top one that carries an offer number, else the file name.
+    offer_idx = next((i for i in range(1, len(folders)) if offerkeys.offer_key(folders[i])), None)
+    key = offerkeys.offer_key(folders[offer_idx] if offer_idx is not None else name)
+    out["offer"] = key
+    limit = offer_idx if offer_idx is not None else len(folders)
+
+    if category == "archive":
+        # 01_Historique\PROSPECT\<country>\<client>\<offer>: the client is the folder under the country, also
+        # under a country folder the table does not know ('Scandinavia'): the country stays None then.
+        anchor = next((i for i in range(1, limit) if offerkeys.country_en(folders[i])), None)
+        if anchor is not None:
+            out["country"] = offerkeys.country_en(folders[anchor])
+        else:
+            top = next((i for i in range(1, limit) if register.fold(folders[i]) in _ARCHIVE_ANCHORS), None)
+            anchor = top + 1 if top is not None else None  # the country folder
+        if anchor is not None and anchor + 1 < limit and not _offer_structural(folders[anchor + 1]):
+            out["client"] = folders[anchor + 1]
+    elif category != "unknown_client":
+        out["partner"] = _OFFER_PARTNERS.get(register.fold(folders[0])) if category == "partner" else None
+        chain = [f for f in folders[0 if category == "client" else 1:limit] if not _offer_structural(f)]
+        out["client"] = chain[0] if chain else None
+        out["site"] = chain[1] if len(chain) > 1 else None
+
+    # Revision: the folder under the offer folder, else a version in the offer folder name or file name.
+    rev = None
+    candidates = folders[offer_idx + 1:offer_idx + 2] if offer_idx is not None else folders[1:]
+    for folder in candidates:
+        r = offerkeys.revision_of(folder)
+        if r:
+            rev = r[0]
+            break
+    if rev is None and offer_idx is not None:
+        m = _VERSION_LABEL.search(folders[offer_idx])
+        rev = f"V{m.group(1)}" if m else None
+    if rev is None and key and offerkeys.offer_key(stem) == key:  # the offer's own file: Angebot - 3002113_02.pdf
+        m = _NAME_REVISION.search(stem)
+        rev = (f"V{m.group(1)}" if m.group(1) else m.group(2)) if m else None
+    out["revision"] = rev
+
+    # Kind of document: the deepest kind folder, then words of the file name, then the extension.
+    for folder in reversed(folders[1:]):
+        kind = _OFFER_FOLDER_KINDS.get(register.fold(folder))
+        if kind:
+            out["doc_type"] = kind
+            return out
+    words = " " + register.fold(stem) + " "
+    kind = next((k for k, phrases in _OFFER_NAME_KINDS if any(f" {p} " in words for p in phrases)), None)
+    if kind is None and name.lower().endswith(".msg"):
+        kind = "mail"
+    if kind is None:
+        directly_in_offer = offer_idx == len(folders) - 1 or offerkeys.revision_of(folders[-1]) is not None
+        kind = "offer" if key and directly_in_offer and key.lower() in stem.lower() else "other"
+    out["doc_type"] = kind
+    out["facet_source"] = None if kind == "other" else "name"  # no evidence for the kind: None, as in the projects rules
+    return out
+
+
+RULES = {"projects": compute, "marketing": compute_marketing, "documentation": compute_documentation,
+         "offers": compute_offers}
+# offers 2: the archive client by its position under the country folder.
+PROFILE_VERSIONS = {"marketing": MARKETING_FACETS_VERSION, "documentation": 1, "offers": 2}
 
 
 def _version(profile: str) -> str:
@@ -206,12 +314,22 @@ CREATE TABLE IF NOT EXISTS doc_facets (
     facet_source  TEXT,
     subproject    TEXT,
     category      TEXT,
-    language      TEXT
+    language      TEXT,
+    client        TEXT,
+    site          TEXT,
+    country       TEXT,
+    partner       TEXT,
+    offer         TEXT,
+    revision      TEXT,
+    machine       TEXT
 );
 CREATE INDEX IF NOT EXISTS doc_facets_project ON doc_facets(project COLLATE NOCASE);
 """
 COLUMNS = ("doc_id", "project", "collection", "section", "doc_type", "facet_source", "subproject", "category",
-           "language")
+           "language", "client", "site", "country", "partner", "offer", "revision", "machine")
+# Columns added after the first tables were created (ALTER TABLE on an older database).
+_ADDED_COLUMNS = ("subproject", "category", "language", "client", "site", "country", "partner", "offer",
+                  "revision", "machine")
 
 
 def refresh(con, roots: list[str], profile: str = "projects") -> int:
@@ -221,12 +339,9 @@ def refresh(con, roots: list[str], profile: str = "projects") -> int:
 
     con.executescript(TABLE)
     cols = {r[1] for r in con.execute("PRAGMA table_info(doc_facets)")}
-    if "subproject" not in cols:
-        con.execute("ALTER TABLE doc_facets ADD COLUMN subproject TEXT")  # tables from version 1
-    if "category" not in cols:
-        con.execute("ALTER TABLE doc_facets ADD COLUMN category TEXT")  # tables from before worlds
-    if "language" not in cols:
-        con.execute("ALTER TABLE doc_facets ADD COLUMN language TEXT")  # tables from before documentation
+    for column in _ADDED_COLUMNS:  # tables from before sub-projects, worlds, documentation and offers
+        if column not in cols:
+            con.execute(f"ALTER TABLE doc_facets ADD COLUMN {column} TEXT")
     if store.get_meta(con, "facets_version") != _version(profile):
         con.execute("DELETE FROM doc_facets")
         store.set_meta(con, "facets_version", _version(profile))

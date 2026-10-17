@@ -12,7 +12,7 @@ from pathlib import Path
 DEFAULT_EXCLUDES = ["~$*", ".*", "$RECYCLE.BIN", "System Volume Information"]
 WORLD_NAME = re.compile(r"[a-z0-9_-]+")
 # Facet rules, MCP tools and server instructions of a world (see facets.py and server.py).
-PROFILES = ("projects", "marketing", "documentation", "none")
+PROFILES = ("projects", "marketing", "documentation", "offers", "none")
 
 
 def _default_workers() -> int:
@@ -49,6 +49,7 @@ class Config:
     thesaurus_path: str | None = None   # thesaurus.toml next to config.toml by default
     expand_synonyms: bool = False       # expand keyword searches with the thesaurus
     register_path: str | None = None    # register.csv (installed machines) next to config.toml by default
+    corrections_path: str | None = None  # corrections.csv (offers world: the user's own statuses and amounts)
     map_path: str | None = None         # world map text (maps\<world>.md next to config.toml), see worldmap.py
     knowledge_path: str | None = None   # knowledge cards (knowledge\ next to config.toml), see knowledge.py
     export_dir: str | None = None  # where export_image saves files (default: ~\Claude\dmx-images)
@@ -220,6 +221,11 @@ def load_config(path: str | os.PathLike, world: str | None = None) -> Config:
         if register:
             rp = Path(os.path.expandvars(str(register)))
             kwargs["register_path"] = str(rp if rp.is_absolute() else data_dir / name / rp)
+        if kwargs["profile"] == "offers":  # the user's corrections to the offer register, kept with the index
+            corrections = w.get("corrections", "corrections.csv")
+            if corrections:
+                cp = Path(os.path.expandvars(str(corrections)))
+                kwargs["corrections_path"] = str(cp if cp.is_absolute() else data_dir / name / cp)
     else:
         register = srch.get("register", "register.csv")
         if register:

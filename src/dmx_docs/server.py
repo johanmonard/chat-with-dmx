@@ -150,6 +150,54 @@ check codes, numbers and names with view_page before quoting them.
 """
 
 
+OFFERS_INSTRUCTIONS = """\
+Read-only access to every offer Demaurex sent to clients (robotic packaging lines), won or not,
+from the 1999 archive to today: each offer's revisions and variants, its specifications, mails,
+layouts and visit reports (PDF, Word, PowerPoint, Outlook mails; French, English, German).
+For sales and management only: never pass its content to anyone else. Each search hit shows the
+client (and site), the offer number and revision (variant), the kind of document and the country.
+
+Besides the documents, an OFFER REGISTER lists every offer with each revision's priced lines, read
+from the offer documents (amounts per currency exactly as printed, source path and page), whether it
+was won (and by which project of the projects world) and the user's corrections. Use it:
+- charts and price trends ("Paloma 3R prices over the years") -> `offer_lines` (rows for the chart);
+- counts ("offers per year, per country") -> `offer_stats` (group_by= one or two keys);
+- a client's history -> `list_offers(client=...)`, then `offer_card` for the offers that matter;
+- one offer -> `offer_card` (revisions, lines, rates, status evidence, other documents).
+Rules for every answer built from the register:
+- One currency per chart (CHF by default); never convert amounts, not even with a rate printed in
+  the offer. An offer without that currency is left out and named in the coverage line.
+- Always show the coverage line (offers matched, with readable prices, left out and why).
+- Show the line text of each point, so that different scopes (with or without vision, conveyors,
+  installation...) are visible; never compare totals of different scopes as if they were the same.
+- Mark won and not won offers differently (e.g. filled and hollow points); a won offer's final
+  negotiated price is in the project's 0_Vente in the projects world, not here. won_unconfirmed (the
+  number only in the text of another client's project with another machine) is shown apart from won,
+  never counted as won without checking the evidence (`offer_card`).
+- Defaults: last revision of each offer (every variant of it is one point), firm offers, client
+  and archive folders; budget and partner offers are counted in the coverage line and included with
+  offer_type= / category=. Use revisions="all" for the history of one offer or client.
+- Cite path and page for every value; check a surprising value on the page with `view_page`.
+
+""" + WORLD_MAP_LINE + "\n\n" + """\
+Never answer from the first search alone. Follow this loop for every question:
+
+1. REFORMULATE the question into 2-4 search queries (French, English and German terms, machine
+   names, exact offer numbers in "double quotes"); filter with client=, country=, offer=,
+   doc_type=, year_from= / year_to= or status= when the question names them.
+2. RETRIEVE with the register tools above and with `search`; browse an offer folder with
+   `list_folder`.
+3. EVALUATE: does each hit or row answer the question? Read the offer around the price page with
+   `read_document`; look at the page with `view_page` when a value matters or looks wrong.
+4. RETRY with other words, another language or other filters if coverage is thin, at most 3 rounds.
+5. SYNTHESIZE in the user's language, only from what you read, citing full path + page, with the
+   coverage line for every chart or count. State clearly what was not found.
+
+Hits marked (OCR) come from scanned pages read by OCR: the text can contain recognition errors -
+check codes, numbers and names with view_page before quoting them.
+"""
+
+
 PICTURES_NOTE = """\
 Passages marked "picture N" or "whole-page picture" in search results were written by a vision model
 from the pictures (photos, schemas, screenshots, picture pages). Use them to find and choose pictures
@@ -167,6 +215,8 @@ def instructions_for(cfg: Config) -> str:
         base = MARKETING_INSTRUCTIONS
     elif cfg.profile == "documentation":
         base = DOCUMENTATION_INSTRUCTIONS
+    elif cfg.profile == "offers":
+        base = OFFERS_INSTRUCTIONS
     else:
         base = GENERIC_INSTRUCTIONS.format(title=cfg.world_title or cfg.world)
     return base + "\n" + PICTURES_NOTE
@@ -480,6 +530,144 @@ def build_server(cfg: Config) -> MCPServer:
                             limit=limit, mode=mode, category=category, language=language, expand=expand,
                             pictures=pictures)
 
+    def offers_search(query: str, folder: str | None = None, file_type: str | None = None,
+                      modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
+                      client: str | None = None, country: str | None = None, offer: str | None = None,
+                      revision: str | None = None, doc_type: str | None = None, category: str | None = None,
+                      partner: str | None = None, machine: str | None = None, year_from: int | None = None,
+                      year_to: int | None = None, status: str | None = None, expand: bool | None = None,
+                      pictures: bool = False) -> str:
+        """Search the offer documents (offers, specifications, mails, layouts, visit reports) by meaning
+        and keywords. Returns excerpts with file path and page, how each one matched and its meaning
+        similarity to the query (strong >= 0.86, medium 0.83-0.86, weak < 0.83 = often off topic), and each
+        document's client, offer number, revision, kind and country. For prices, counts and histories use
+        offer_lines / offer_stats / list_offers instead: search returns only the best excerpts.
+
+        Args:
+            query: What to look for (any language). "double quotes" for exact phrases or numbers, word* for prefixes.
+            folder: Optional folder path to restrict the search to (includes subfolders).
+            file_type: Optional 'pdf', 'docx', 'doc', 'pptx', 'ppt' or 'msg'.
+            modified_after: Optional date (YYYY, YYYY-MM or YYYY-MM-DD) - only files modified since then.
+            limit: Number of results (1-30, default 10). At most 3 excerpts per document.
+            mode: 'hybrid' (default), 'keyword' (exact words, numbers, names) or 'semantic' (by meaning).
+            client: Optional part of the client folder's name (case ignored; comma = or), e.g. "acme".
+            country: Optional part of the country in English (case ignored; comma = or), e.g. "Germany":
+                the archive folder's or the register's.
+            offer: Optional offer number(s), comma-separated, e.g. "3001234", "B-250306".
+            revision: Optional revision label(s), e.g. "02", "V1".
+            doc_type: Optional kind(s) of document: offer, specification, mail, layout, history,
+                technical_solution, visit_report, proforma, market_study, nda, sales_info, other.
+            category: Optional top-level category: client, archive, partner, unknown_client,
+                market_study, nda, sales_info.
+            partner: Optional partner of a partner offer: the partner name, as in the partner folders.
+            machine: Optional machine family or model named in the path, e.g. "Paloma", "Paloma 3R".
+            year_from: Optional first year of the offer (its last revision), from the register.
+            year_to: Optional last year of the offer, from the register.
+            status: Optional status(es) from the register: won, won_unconfirmed, no_order_found, open, unknown,
+                lost, cancelled.
+            expand: Widen the keyword part with the company thesaurus. Default: as configured.
+            pictures: True to search only the descriptions of pictures.
+            Facet filters leave out documents whose facet is unknown: search again without them when
+            results are thin.
+        """
+        return tools.search(query, folder=folder, file_type=file_type, modified_after=modified_after,
+                            limit=limit, mode=mode, client=client, country=country, offer=offer, revision=revision,
+                            doc_type=doc_type, category=category, partner=partner, machine=machine,
+                            year_from=year_from, year_to=year_to, status=status, expand=expand, pictures=pictures)
+
+    def list_offers(client: str | None = None, country: str | None = None, machine: str | None = None,
+                    status: str | None = None, year_from: int | None = None, year_to: int | None = None,
+                    text: str | None = None, limit: int = 100) -> str:
+        """List the offers of the register, newest first, one line each: offer number, client (/ site),
+        country, first..last revision date, number of revisions, machine lines of the last revision, its
+        total (all currencies; variants side by side), status (-> won project), and the last revision's
+        document path and pages. Ends with the coverage line.
+        Use it for a client's history, then offer_card for the offers that matter.
+
+        Args:
+            client: Optional part of the client's name (case and accents ignored; comma = or), e.g. "acme".
+            country: Optional part of the country in English (comma = or), e.g. "Germany".
+            machine: Optional machine family or model of a priced line (or named in the paths), e.g.
+                "Paloma", "Paloma 3R".
+            status: Optional status(es): won, won_unconfirmed, no_order_found, open, unknown, lost, cancelled.
+            year_from: Optional first year (of the offer's last revision).
+            year_to: Optional last year.
+            text: Optional words anywhere in the number, title, client, folder or line texts.
+            limit: Maximum offers listed (default 100).
+        """
+        return tools.list_offers(client=client, country=country, machine=machine, status=status,
+                                 year_from=year_from, year_to=year_to, text=text, limit=limit)
+
+    def offer_card(offer: str) -> str:
+        """Everything the register knows about one offer: client, country, dates, type, status with its
+        evidence (the project that quotes it), every revision oldest first (variant, date and its source,
+        document path and pages, totals, confidence, how it was read) with its priced lines (text, kind,
+        machine, quantity, amounts per currency, page), exchange rates printed, translations, the user's
+        corrections, and the offer's other documents (specifications, mails, layouts).
+
+        Args:
+            offer: Offer number, e.g. "3001234" or "B-250306".
+        """
+        return tools.offer_card(offer)
+
+    def offer_lines(machine: str | None = None, kind: str | None = None, client: str | None = None,
+                    country: str | None = None, status: str | None = None, offer_type: str | None = "firm",
+                    category: str | None = "client,archive", year_from: int | None = None,
+                    year_to: int | None = None, currency: str = "CHF", revisions: str = "last",
+                    limit: int = 500) -> str:
+        """The rows for a price chart or table, ';'-separated with a header: date, offer, revision,
+        variant, kind, client, country, status, quantity, amount, unit_price (amount / quantity, only when
+        the quantity is printed), currency, line (the text as written), path, page, confidence; one row per
+        priced line with an amount in the chosen currency, never converted. Ends with the coverage line:
+        offers matched, with readable prices, left out and why (budget, category, no CHF amount, no
+        readable prices, ignored by correction, no date), naming them. With machine=, it also names the
+        offers without readable prices, which could not be checked for that machine.
+
+        Args:
+            machine: Optional machine family or model of the line (case ignored; comma = or), e.g. "Paloma 3R".
+                With machine= and no kind=, only machine lines (kind machine): the coverage line says so.
+            kind: Optional kind(s) of line: machine, option, service, discount, other; empty for every kind.
+            client: Optional part of the client's name (comma = or).
+            country: Optional part of the country in English (comma = or).
+            status: Optional status(es): won, won_unconfirmed, no_order_found, open, unknown, lost, cancelled.
+            offer_type: firm (default), budget, or "firm,budget"; empty for all.
+            category: Folder categories, default "client,archive" (partner offers' prices may be to the
+                partner: add "partner" to include them); empty for all.
+            year_from: Optional first year of the revision's date.
+            year_to: Optional last year.
+            currency: The one currency of the chart, default CHF (EUR, USD...).
+            revisions: "last" (default: the last revision of each offer, every variant of it) or "all".
+            limit: Maximum rows (default 500).
+        """
+        return tools.offer_lines(machine=machine, kind=kind, client=client, country=country, status=status,
+                                 offer_type=offer_type, category=category, year_from=year_from, year_to=year_to,
+                                 currency=currency, revisions=revisions, limit=limit)
+
+    def offer_stats(group_by: str, client: str | None = None, country: str | None = None,
+                    machine: str | None = None, status: str | None = None, offer_type: str | None = None,
+                    category: str | None = None, year_from: int | None = None, year_to: int | None = None) -> str:
+        """Count offers and their revisions grouped by one or two keys, ';'-separated with a header
+        (<keys>;offers;revisions), sorted by keys; offers with an unknown value are counted under
+        "unknown". Every offer counts (firm and budget, every category) unless filtered. Ends with the
+        coverage line.
+
+        Args:
+            group_by: One or two of year, country, client, machine, status, author, partner, offer_type,
+                category, comma-separated, e.g. "year" or "year,country". machine = the machines of the
+                last revision (an offer with several counts under each).
+            client: Optional part of the client's name (comma = or).
+            country: Optional part of the country in English (comma = or).
+            machine: Optional machine family or model of a priced line (or named in the paths); the offers
+                without readable prices, which could not be checked for it, are named in the coverage line.
+            status: Optional status(es): won, won_unconfirmed, no_order_found, open, unknown, lost, cancelled.
+            offer_type: Optional firm or budget.
+            category: Optional folder categories, e.g. "client,archive".
+            year_from: Optional first year (of the offer's last revision).
+            year_to: Optional last year.
+        """
+        return tools.offer_stats(group_by, client=client, country=country, machine=machine, status=status,
+                                 offer_type=offer_type, category=category, year_from=year_from, year_to=year_to)
+
     # Tools that depend on the world's profile.
     if cfg.profile == "projects":
         mcp.tool(**kw)(search)
@@ -490,6 +678,12 @@ def build_server(cfg: Config) -> MCPServer:
         mcp.tool(name="search", **kw)(marketing_search)
     elif cfg.profile == "documentation":
         mcp.tool(name="search", **kw)(documentation_search)
+    elif cfg.profile == "offers":
+        mcp.tool(name="search", **kw)(offers_search)
+        mcp.tool(**kw)(list_offers)
+        mcp.tool(**kw)(offer_card)
+        mcp.tool(**kw)(offer_lines)
+        mcp.tool(**kw)(offer_stats)
     else:
         mcp.tool(name="search", **kw)(plain_search)
 

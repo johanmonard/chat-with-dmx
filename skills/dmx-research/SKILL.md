@@ -1,6 +1,6 @@
 ---
 name: dmx-research
-description: Research method for the Demaurex company documents behind the DMX connectors - dmx-projects (project folders - offers, specifications, FAT/SAT, manuals, schematics, after-sales; formerly called dmx-docs), dmx-marketing (brochures, datasheets, presentations, competition, exhibitions, picture files) and dmx-documentation (the standard machine manual in FR/DE/EN). Use it for EVERY question that internal documents can answer - projects (THOR, YAKUMA...), machines (Paloma, Presto, Hector...), clients, product claims, how a machine works or is maintained, pictures for a presentation - with whichever of these connectors are enabled, one or several.
+description: Research method for the Demaurex company documents behind the DMX connectors - dmx-projects (project folders - offers, specifications, FAT/SAT, manuals, schematics, after-sales; formerly called dmx-docs), dmx-marketing (brochures, datasheets, presentations, competition, exhibitions, picture files), dmx-documentation (the standard machine manual in FR/DE/EN) and dmx-offers (every offer sent to clients with its register of priced lines - sales and management only). Use it for EVERY question that internal documents can answer - projects (THOR, YAKUMA...), machines (Paloma, Presto, Hector...), clients, product claims, how a machine works or is maintained, pictures for a presentation - with whichever of these connectors are enabled, one or several.
 ---
 
 # DMX research
@@ -17,6 +17,7 @@ Each connector is one **world**, a separate index of documents with its own audi
 | `dmx-projects` (older name `dmx-docs`) | Projects | one folder per client project: offers, specifications, orders, electrical and mechanical design, FAT/SAT, commissioning, project manuals, after-sales | `references/projects.md` |
 | `dmx-marketing` | Marketing | brochures, datasheets, sales and training presentations, competition analyses, exhibitions, publications, picture files (photos, graphics) | `references/marketing.md` |
 | `dmx-documentation` | Documentation | the STANDARD machine manual (Paloma, Presto, Hector, Delfi, Astor, Nestor, conveyors, vision, HMI), chapters 0000-7000, in French, German and English | `references/documentation.md` |
+| `dmx-offers` | Offers (sales and management only) | every offer sent to clients, won or not, all revisions, from the 1999 archive: offer documents, specifications, mails, layouts, and a register of priced lines for price trends, client histories and counts | `references/offers.md` |
 
 - **Look at the tools you actually have.** Their names start with the connector, e.g.
   `dmx-marketing` → its `search`. A connector that is not enabled has no tools: never pretend to
@@ -26,7 +27,8 @@ Each connector is one **world**, a separate index of documents with its own audi
   connector is not enabled: the brochure figures are not checked - enable dmx-marketing for them").
 - Every world has `search`, `find_files`, `list_folder`, `read_document`, `find_in_document`,
   `view_page`, `export_image`, `open_document`, `index_status` and `world_map`; Projects also has
-  `list_projects`, `project_card` and `catalog` (written project cards). **The search filters differ per world**: read the world's
+  `list_projects`, `project_card` and `catalog` (written project cards); Offers also has `list_offers`,
+  `offer_card`, `offer_lines` and `offer_stats` (the offer register). **The search filters differ per world**: read the world's
   reference file (table above) before your first search in it.
 - **Start with the map.** Call `world_map` on each world you are going to search, once per
   conversation, before routing: it says what kinds of documents the world holds, in which folders
@@ -42,6 +44,7 @@ Each connector is one **world**, a separate index of documents with its own audi
 | a client project: what was offered, agreed, ordered, built, measured (FAT/SAT), delivered, fixed (SAV); a client, a country, a period | Projects |
 | what we say about a product: features, performance claims, datasheet values, references, sales decks, trainings, competitors, exhibitions | Marketing |
 | how the standard machine works, safety, operation, HMI screens, maintenance intervals and procedures, spare parts of the standard design | Documentation |
+| price trends, price history of a machine, history of the offers to a client, offers lost or not won, counts of offers per year/country/client | Offers (register tools `offer_lines`, `list_offers`, `offer_stats` first, then `offer_card` and the documents), if enabled |
 | a project's own, customised manual | Projects (`8_Documentation` of that project), then Documentation for the standard part |
 | a photo, schema or screenshot to show or to put on a slide | Marketing first (picture files, brochures, decks), then Documentation, then Projects |
 | "promised vs delivered vs standard", a comparison across sources | every relevant world, one after the other |
@@ -51,6 +54,7 @@ Each connector is one **world**, a separate index of documents with its own audi
 | Kind | World | Where |
 |---|---|---|
 | real offers, reference offers for a new one | Projects | `0_Vente\00_Offres`, `doc_type="offre"` + `machine=` |
+| every revision of an offer, offers not won, prices over the years, sales history per client | Offers | `offer_lines`, `list_offers`, `offer_card`, `offer_stats`; always state the coverage line |
 | offer templates (3-page standard offers) | Marketing | `Brochures\Marketing\Quotations` |
 | client specifications, orders, modifications | Projects | `0_Vente`, `doc_type="cahier_des_charges,commande,modification"` |
 | third-party equipment (supplier docs and offers) | Projects | `*_Materiel_Tiers` folders, `doc_type="doc_fournisseur"` |
@@ -68,6 +72,9 @@ Each connector is one **world**, a separate index of documents with its own audi
 then compare. When they disagree:
 - for a given project, the **project documents win** (offer < specification < modification < FAT <
   SAT < SAV, the most recent first);
+- the Offers world stops at the last revision in the sales folder: a won offer's final negotiated
+  price is in the project's `0_Vente` (Projects). Offers content is for sales and management only:
+  do not put it into answers meant for others;
 - Marketing material is promotional: present its figures as claims ("according to the brochure");
 - the Documentation manual is the generic reference: a project may differ from it.
 Say which world each fact comes from.

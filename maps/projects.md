@@ -45,6 +45,7 @@ yet), and verify in the documents.
   (`4_Soft`, `2_Electrique`, `8_Documentation`). Say so when asked for the standard version.
 - Excel files (costing, spare-part lists, register), CAD and videos are not indexed: browse the folder
   with `list_folder` and open the file with `open_document`.
+- All revisions of the offers, offers not won and the sales history per client -> Offers world (sales and management only).
 - Machines of the register without any document folder: `list_projects` shows them, searches cannot.
 
 ## Pitfalls

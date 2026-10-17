@@ -58,7 +58,7 @@ def test_root_management(corpus_copy, make_cfg, tmp_path):
         sources.add_root(con, str(tmp_path / "nope"))
     with pytest.raises(ValueError, match="cannot be excluded"):
         sources.set_excluded(con, str(corpus_copy), True)
-    sources.set_excluded(con, str(corpus_copy / "Projets" / "P1234_Nestle"), True)
+    sources.set_excluded(con, str(corpus_copy / "Projets" / "P1234_ACME"), True)
     sources.set_excluded(con, str(corpus_copy / "Projets"), True)  # replaces the nested exclusion
     assert [r[0] for r in con.execute("SELECT path FROM excluded_dirs")] == [str(corpus_copy / "Projets")]
     sources.remove_root(con, str(corpus_copy))

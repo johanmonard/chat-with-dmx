@@ -84,7 +84,8 @@ max_read_chars = 40000
 # (the shared-folder launchers, dmx.ps1, still need at least a [worlds.projects] table).
 # profile: 'projects' (project folders, machine register), 'marketing' (category = first
 # folder), 'documentation' (category = chapter folder, language from _FR/_DE/_EN in the file
-# name) or 'none'. A world may set its own extensions, exclude and roots (first-run seed).
+# name), 'offers' (client offers: facets from the folder names, register of priced offer lines)
+# or 'none'. A world may set its own extensions, exclude and roots (first-run seed).
 # [worlds.projects]
 # title = "Projects"
 # profile = "projects"
@@ -103,6 +104,16 @@ max_read_chars = 40000
 # extensions = ['.md', '.pdf', '.docx', '.doc']
 # exclude = ['~$*', '.*', 'OldVersions', 'VersionPrécédente*', 'PourDémonstrationMarkdown']
 # roots = ['\\server\share\DOC_Machines\Source']
+#
+# [worlds.offers]
+# title = "Offers"
+# profile = "offers"
+# vision = false   # picture descriptions off (the register step still uses [vision] for price pages)
+# extensions = ['.pdf', '.docx', '.doc', '.pptx', '.ppt', '.msg']
+# exclude = ['~$*', '.*', '$RECYCLE.BIN', 'Thumbs.db', '- Client modèle', 'NNNNNNN-DESCRIPTION', 'YYMMNNN', '3_Modèles', '02_Liste adresse client']
+# roots = ['\\DMX-FS01.rotzingerag.local\Daten$\RMA_ORG\SAL\Clients']
+# # The user's own statuses and amounts for the offer register (default: data_dir\offers\corrections.csv):
+# # corrections = 'C:\dmx-rag\data\offers\corrections.csv'
 
 # OCR of scanned PDF pages (`dmx-docs ocr`, part of launcher 7). Uses the Tesseract engine built
 # into PyMuPDF; only the language files are needed (tessdata_best from

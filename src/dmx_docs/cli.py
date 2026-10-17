@@ -1,4 +1,4 @@
-"""Command line: dmx-docs web | index | ocr | describe | embed | status | search | read | serve."""
+"""Command line: dmx-docs web | index | ocr | describe | embed | offers | status | search | read | serve."""
 
 from __future__ import annotations
 
@@ -61,6 +61,13 @@ def main(argv: list[str] | None = None) -> None:
                         "HTML page (the index is not changed)")
     p.add_argument("--sample", type=int, default=25, help="pictures in the --compare sample (default 25)")
     p.add_argument("--out", help="folder for the --compare page (default: the world's logs folder)")
+
+    p = sub.add_parser("offers", help="rebuild the offer register (offers world): revisions, priced lines, dates")
+    p.add_argument("--review", action="store_true", help="also write the review list (review.csv)")
+    p.add_argument("--projects-db", metavar="PATH",
+                   help="projects index used for won / not won (default: the config's projects world)")
+    p.add_argument("--max-minutes", type=float,
+                   help="stop asking the model after this many minutes (the register is still written; run again)")
 
     sub.add_parser("status", help="show index statistics")
     sub.add_parser("map", help="print the world map (map file + live overview), as the world_map tool returns it")
@@ -145,6 +152,25 @@ def main(argv: list[str] | None = None) -> None:
         except KeyboardInterrupt:
             print("Stopped. Run `dmx-docs describe` again to continue.")
             sys.exit(130)
+    elif args.command == "offers":
+        if cfg.profile != "offers":
+            print("Not an offers world: nothing to do.")
+            return
+        from .offers import run_offers
+        _setup_logging(cfg, "offers")
+        projects_db = args.projects_db
+        if projects_db is None:
+            try:
+                projects_db = str(load_config(cfg.config_path, world="projects").db_path)
+            except ValueError:  # no projects world in this config
+                projects_db = None
+        started = time.monotonic()
+        try:
+            stats = run_offers(cfg, projects_db=projects_db, review=args.review, max_minutes=args.max_minutes)
+        except KeyboardInterrupt:
+            print("Stopped. Run `dmx-docs offers` again (the model answers read so far are kept).")
+            sys.exit(130)
+        print(f"Done in {(time.monotonic() - started) / 60:.1f} min: {stats.summary()}")
     elif args.command == "status":
         from .tools import DocTools
         print(DocTools(cfg).index_status())

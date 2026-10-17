@@ -86,6 +86,8 @@ def extract_file(path: str, options: dict | None = None) -> Extracted:
             return extract_pptx(fs)
         if ext == ".ppt":
             return extract_ppt(path, options.get("doc_converter", "auto"), options.get("libreoffice_path"))
+        if ext == ".msg":
+            return extract_msg(fs)
         if ext == ".md":
             return extract_md(fs)
         if ext in PICTURE_EXTS:
@@ -229,6 +231,85 @@ def extract_docx(path: str) -> Extracted:
     if not pages:
         return Extracted(status="empty", n_pages=len(page_texts), title=title)
     return Extracted(status="ok", pages=pages, n_pages=len(page_texts), title=title)
+
+
+# --------------------------------------------------------------------- MSG
+# Outlook mails are OLE containers; their text properties are streams named
+# __substg1.0_<tag:4 hex><type:4 hex> (type 001F = UTF-16-LE, 001E = ANSI).
+
+_MSG_ATTACH = "__attach_version1.0_#"
+_MSG_ATTACH_NAMES = ("__substg1.0_3707", "__substg1.0_3704")  # long and short file name of an attachment
+
+
+def _read_msg_streams(path: str) -> dict[str, bytes]:
+    """Streams of the message itself and the name streams of its attachments (name -> bytes).
+
+    Names of attachment streams are prefixed with their storage and a "/". Of an attachment only its
+    long and short file names are read, never its content (37010102 can be megabytes); embedded
+    messages (a storage inside an attachment storage) are not read."""
+    import olefile
+    with olefile.OleFileIO(path) as ole:
+        streams: dict[str, bytes] = {}
+        for entry in ole.listdir(streams=True, storages=False):
+            if len(entry) == 1 or (len(entry) == 2 and entry[0].startswith(_MSG_ATTACH)
+                                   and entry[1].startswith(_MSG_ATTACH_NAMES)):
+                streams["/".join(entry)] = ole.openstream(entry).read()
+        return streams
+
+
+def _msg_text(streams: dict[str, bytes], tag: str, prefix: str = "") -> str:
+    data = streams.get(f"{prefix}__substg1.0_{tag}001F")
+    if data is not None:
+        return data.decode("utf-16-le", errors="replace").replace("\x00", "").strip()
+    data = streams.get(f"{prefix}__substg1.0_{tag}001E")
+    if data is not None:
+        return data.decode("cp1252", errors="replace").replace("\x00", "").strip()
+    return ""
+
+
+def _msg_time(streams: dict[str, bytes], prop_id: int) -> str:
+    """A PT_SYSTIME property of the top-level property stream as 'YYYY-MM-DD HH:MM'."""
+    from datetime import datetime, timedelta
+    data = streams.get("__properties_version1.0", b"")
+    # 32-byte header, then 16-byte entries: tag (4), flags (4), value (8).
+    for off in range(32, len(data) - 15, 16):
+        tag = int.from_bytes(data[off:off + 4], "little")
+        if tag == (prop_id << 16) | 0x0040:
+            ticks = int.from_bytes(data[off + 8:off + 16], "little")  # 100 ns since 1601-01-01
+            try:
+                return (datetime(1601, 1, 1) + timedelta(microseconds=ticks // 10)).strftime("%Y-%m-%d %H:%M")
+            except (OverflowError, ValueError):
+                return ""
+    return ""
+
+
+def msg_fields(streams: dict[str, bytes]) -> dict:
+    """Subject, sender, recipients, date, body and attachment names of a .msg's OLE streams."""
+    attachments = []
+    for storage in sorted({name.split("/")[0] for name in streams
+                           if "/" in name and name.startswith(_MSG_ATTACH)}):
+        prefix = storage + "/"
+        name = _msg_text(streams, "3707", prefix) or _msg_text(streams, "3704", prefix)
+        if name:
+            attachments.append(name)
+    return {
+        "subject": _msg_text(streams, "0037"),
+        "sender": _msg_text(streams, "0C1A"),
+        "to": _msg_text(streams, "0E04"),
+        "date": _msg_time(streams, 0x0039) or _msg_time(streams, 0x0E06),
+        "body": _msg_text(streams, "1000"),
+        "attachments": attachments,
+    }
+
+
+def extract_msg(path: str) -> Extracted:
+    m = msg_fields(_read_msg_streams(path))
+    if not m["subject"] and not m["body"]:
+        return Extracted(status="empty")
+    head = [f"Subject: {m['subject']}", f"From: {m['sender']}", f"To: {m['to']}",
+            f"Date: {m['date']}", f"Attachments: {', '.join(m['attachments'])}"]
+    text = clean_text("\n".join(head) + "\n\n" + m["body"])
+    return Extracted(status="ok", pages=[(1, text)], n_pages=1, title=m["subject"] or None)
 
 
 # --------------------------------------------------------------------- DOC

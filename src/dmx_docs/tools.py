@@ -13,7 +13,7 @@ import time
 import urllib.request
 from datetime import datetime
 
-from . import facets, knowledge, machines, register, sources, store, worldmap
+from . import facets, knowledge, machines, offer_tools, register, sources, store, worldmap
 from .config import Config
 from .extract import PICTURE_EXTS, docx_picture_names, extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
@@ -401,13 +401,19 @@ class DocTools:
                project: str | None = None, doc_type: str | None = None, section: str | None = None,
                collection: str | None = None, machine: str | None = None, expand: bool | None = None,
                client: str | None = None, country: str | None = None, category: str | None = None,
-               language: str | None = None, pictures: bool = False) -> str:
+               language: str | None = None, pictures: bool = False, offer: str | None = None,
+               revision: str | None = None, partner: str | None = None, year_from: int | None = None,
+               year_to: int | None = None, status: str | None = None) -> str:
         if mode not in ("hybrid", "keyword", "semantic"):
             raise ValueError("mode must be 'hybrid', 'keyword' or 'semantic'")
         limit = max(1, min(int(limit), 30))
+        offers = self.cfg.profile == "offers"  # the filters of the offers world, None for the others
         facet_filter = {"project": project, "doc_type": doc_type, "section": section, "collection": collection,
                         "machine": machine, "client": client, "country": country, "category": category,
-                        "language": language}
+                        "language": language, "offer": offer if offers else None,
+                        "revision": revision if offers else None, "partner": partner if offers else None,
+                        "year_from": year_from if offers else None, "year_to": year_to if offers else None,
+                        "status": status if offers else None}
         con = self._con()
         try:
             if pictures and not _has_descriptions(con):
@@ -417,7 +423,7 @@ class DocTools:
             hits = self.searcher.search(con, query, limit=limit, folder=folder, file_type=file_type,
                                         modified_after=modified_after, mode=mode,
                                         allowed=self.cfg.allows, facets=facet_filter, expand=expand,
-                                        pictures_only=bool(pictures))
+                                        pictures_only=bool(pictures), profile=self.cfg.profile)
             doc_facets = self._facets(con, {h.doc_id for h in hits})
             ocr_pages = _ocr_text_pages(con, {h.doc_id for h in hits})
             picture_hits = _picture_chunks(con, [h.chunk_id for h in hits])
@@ -463,10 +469,12 @@ class DocTools:
 
     def _facets(self, con, doc_ids: set[int]) -> dict[int, str]:
         """One line per document: project / collection / section / type (projects), category
-        (marketing), category and language (documentation)."""
+        (marketing), category and language (documentation), client / offer / type / country (offers)."""
         if not doc_ids or self.cfg.profile == "none":
             return {}
         ids = list(doc_ids)
+        if self.cfg.profile == "offers":
+            return self._offer_facets(con, ids)
         if self.cfg.profile in ("marketing", "documentation"):
             out = {}
             for r in con.execute(f"SELECT * FROM doc_facets WHERE doc_id IN ({','.join('?' * len(ids))})", ids):
@@ -495,6 +503,63 @@ class DocTools:
                      if r["doc_type"] else "type unknown"]
             out[r["doc_id"]] = " · ".join(p for p in parts if p)
         return out
+
+    @staticmethod
+    def _offer_facets(con, ids: list[int]) -> dict[int, str]:
+        """'client ACME Foods · offer 3001234 rev 03 (Vandelay) · offer · Germany · partner Initech': the variant
+        (or translation) and, when the folder has none, the country come from the offer register."""
+        marks = ",".join("?" * len(ids))
+        variants, countries = {}, {}
+        if store.has_table(con, "offer_revisions"):
+            for doc_id, variant, twin in con.execute(f"SELECT doc_id, variant, translation_of FROM offer_revisions "
+                                                     f"WHERE doc_id IN ({marks})", ids):
+                label = ", ".join(v for v in (variant, "translation" if twin else None) if v)
+                if label:
+                    variants[doc_id] = label
+        if store.has_table(con, "offers"):
+            countries = dict(con.execute(f"SELECT offer_key, country FROM offers WHERE offer_key IN "
+                                         f"(SELECT offer FROM doc_facets WHERE doc_id IN ({marks}))", ids).fetchall())
+        out = {}
+        for r in con.execute(f"SELECT * FROM doc_facets WHERE doc_id IN ({marks})", ids):
+            who = (f"client {r['client']}" + (f" / {r['site']}" if r["site"] else "") if r["client"]
+                   else f"category {r['category'] or 'unknown'}")
+            offer = (f"offer {r['offer']}" + (f" rev {r['revision']}" if r["revision"] else "")
+                     + (f" ({variants[r['doc_id']]})" if r["doc_id"] in variants else "")) if r["offer"] else None
+            parts = [who, offer, r["doc_type"] or "type unknown", r["country"] or countries.get(r["offer"]),
+                     f"partner {r['partner']}" if r["partner"] else None]
+            out[r["doc_id"]] = " · ".join(p for p in parts if p)
+        return out
+
+    # ---------------------------------------------------------- offers world
+    # The register keeps rows of folders excluded since it was built: cfg.allows hides them (after
+    # _con() has loaded the current root and excluded folders).
+    def list_offers(self, **filters) -> str:
+        con = self._con()
+        try:
+            return offer_tools.list_offers(con, **filters, allows=self.cfg.allows)
+        finally:
+            con.close()
+
+    def offer_card(self, offer: str) -> str:
+        con = self._con()
+        try:
+            return offer_tools.offer_card(con, offer, allows=self.cfg.allows)
+        finally:
+            con.close()
+
+    def offer_lines(self, **filters) -> str:
+        con = self._con()
+        try:
+            return offer_tools.offer_lines(con, **filters, allows=self.cfg.allows)
+        finally:
+            con.close()
+
+    def offer_stats(self, group_by: str, **filters) -> str:
+        con = self._con()
+        try:
+            return offer_tools.offer_stats(con, group_by, **filters, allows=self.cfg.allows)
+        finally:
+            con.close()
 
     # ----------------------------------------------------------- view_page
     def view_page(self, path: str, page: int = 1, region: str | None = None,

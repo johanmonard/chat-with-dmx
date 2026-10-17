@@ -8,7 +8,7 @@ from dmx_docs.config import Config
 from dmx_docs.extract import find_libreoffice, pymupdf
 
 SPEC_PAGES = [
-    "Spécification de la cellule robotisée Delta\nClient : Nestlé — projet P1234\n"
+    "Spécification de la cellule robotisée Delta\nClient : ACME Foods — projet P1234\n"
     "La cellule assure le conditionnement de barres chocolatées en flow-pack.",
     "Système de préhension\nLe préhenseur à ventouses saisit quatre produits par cycle. "
     "Suite à des défauts de prise, la note de modification MN-114 remplace les ventouses "
@@ -74,7 +74,7 @@ def make_pptx(path, pictures=()):
 @pytest.fixture(scope="session")
 def corpus(tmp_path_factory):
     root = tmp_path_factory.mktemp("corpus")
-    proj = root / "Projets" / "P1234_Nestle"
+    proj = root / "Projets" / "P1234_ACME"
     proj.mkdir(parents=True)
     make_pdf(str(proj / "Spec_cellule.pdf"), SPEC_PAGES)
     make_docx(str(proj / "Rapport_MES.docx"))

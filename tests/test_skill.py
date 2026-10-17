@@ -10,7 +10,7 @@ import pytest
 
 SKILL = Path(__file__).resolve().parents[1] / "skills" / "dmx-research"
 WORLD_FILES = {"projects": "references/projects.md", "marketing": "references/marketing.md",
-               "documentation": "references/documentation.md"}
+               "documentation": "references/documentation.md", "offers": "references/offers.md"}
 
 
 @pytest.fixture(scope="module")
@@ -72,7 +72,7 @@ def test_skill_frontmatter_and_files():
     meta = frontmatter(text)
     assert meta["name"] == "dmx-research"
     assert 100 < len(meta["description"]) <= 1024
-    for name in ("dmx-projects", "dmx-marketing", "dmx-documentation", "dmx-docs"):
+    for name in ("dmx-projects", "dmx-marketing", "dmx-documentation", "dmx-offers", "dmx-docs"):
         assert name in text, name
     for ref in WORLD_FILES.values():
         assert (SKILL / ref).is_file() and ref in text, ref
@@ -99,6 +99,15 @@ def test_pictures_option_is_taught_where_every_search_has_it(schemas):
     assert "pictures=true" in (SKILL / "SKILL.md").read_text(encoding="utf-8")
 
 
+def test_offers_reference_teaches_the_register_tools(schemas):
+    text = (SKILL / "references/offers.md").read_text(encoding="utf-8")
+    skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    for tool in ("list_offers", "offer_card", "offer_lines", "offer_stats"):
+        assert tool in schemas["offers"] and tool in text and tool in skill, tool
+        assert all(tool not in tools for world, tools in schemas.items() if world != "offers"), tool
+    assert "coverage line" in text.lower()
+
+
 def test_build_skill_zip_uses_forward_slashes(tmp_path):
     import subprocess
     import sys
@@ -109,4 +118,5 @@ def test_build_skill_zip_uses_forward_slashes(tmp_path):
     with zipfile.ZipFile(tmp_path / "dmx-research.zip") as z:
         names = z.namelist()
     assert "dmx-research/SKILL.md" in names and "dmx-research/references/projects.md" in names
+    assert "dmx-research/references/offers.md" in names
     assert not any("\\" in n for n in names)
