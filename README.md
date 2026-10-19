@@ -291,7 +291,8 @@ currency exactly as printed, its source file and page, and whether the offer was
 number quoted by a project of the projects world) or not. Claude answers price trends, client
 histories and counts from the register with `list_offers`, `offer_card`, `offer_lines` and
 `offer_stats`, always with a line saying how many offers were covered and which were left out.
-Currencies are never converted. The seed `[worlds.offers]` is in `config.example.toml`.
+Currencies are never converted. Budget offers are included and marked (an `offer_type` column in
+the chart rows); filter `offer_type='firm'` to exclude them. The seed `[worlds.offers]` is in `config.example.toml`.
 
 **Launcher 7** (`7 - Update a world (index + embeddings).cmd offers`, run on the machine that builds
 worlds, with Ollama running and a pulled copy of the projects world) does, in order: index the

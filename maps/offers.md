@@ -56,9 +56,10 @@ whose facet is unknown: search again without them when results are thin.
 ## Pitfalls
 - **Scope differs between offers**: "Paloma 3R" may include grippers, vision, conveyors, installation
   or not. Show the line text with each price; never compare totals of different scopes as the same.
-- **Budget vs firm**: "Richtpreis", "budget", "indicative" offers are budget prices. Charts use firm
-  offers of the client and archive folders; budget and partner offers (prices may be to the partner)
-  are counted in the coverage line and added with `offer_type=` / `category=`.
+- **Budget vs firm**: "Richtpreis", "budget", "indicative" offers are budget prices. Charts use the
+  offers of the client and archive folders; budget offers are included and marked (`offer_type`
+  column: mark them on the chart); filter `offer_type="firm"` to exclude them. Partner offers (prices
+  may be to the partner) are counted in the coverage line and added with `category=`.
 - **Variants and revisions**: variants (two totals for one revision, e.g. per supplier) are separate
   points, never summed; translations of an offer are one offer. "Last revision" is the default.
 - **Status**: "no_order_found" is not "lost" (the project may not be indexed, or quote another

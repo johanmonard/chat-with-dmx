@@ -174,9 +174,10 @@ Rules for every answer built from the register:
   negotiated price is in the project's 0_Vente in the projects world, not here. won_unconfirmed (the
   number only in the text of another client's project with another machine) is shown apart from won,
   never counted as won without checking the evidence (`offer_card`).
-- Defaults: last revision of each offer (every variant of it is one point), firm offers, client
-  and archive folders; budget and partner offers are counted in the coverage line and included with
-  offer_type= / category=. Use revisions="all" for the history of one offer or client.
+- Defaults: last revision of each offer (every variant of it is one point), client and archive
+  folders. Budget offers are included and marked (offer_type column: mark them on the chart);
+  filter offer_type="firm" to exclude them. Partner offers are counted in the coverage line and
+  included with category=. Use revisions="all" for the history of one offer or client.
 - Cite path and page for every value; check a surprising value on the page with `view_page`.
 
 """ + WORLD_MAP_LINE + "\n\n" + """\
@@ -611,17 +612,19 @@ def build_server(cfg: Config) -> MCPServer:
         return tools.offer_card(offer)
 
     def offer_lines(machine: str | None = None, kind: str | None = None, client: str | None = None,
-                    country: str | None = None, status: str | None = None, offer_type: str | None = "firm",
+                    country: str | None = None, status: str | None = None, offer_type: str | None = None,
                     category: str | None = "client,archive", year_from: int | None = None,
                     year_to: int | None = None, currency: str = "CHF", revisions: str = "last",
                     limit: int = 500) -> str:
         """The rows for a price chart or table, ';'-separated with a header: date, offer, revision,
-        variant, kind, client, country, status, quantity, amount, unit_price (amount / quantity, only when
-        the quantity is printed), currency, line (the text as written), path, page, confidence; one row per
-        priced line with an amount in the chosen currency, never converted. Ends with the coverage line:
-        offers matched, with readable prices, left out and why (budget, category, no CHF amount, no
-        readable prices, ignored by correction, no date), naming them. With machine=, it also names the
-        offers without readable prices, which could not be checked for that machine.
+        variant, kind, client, country, status, offer_type (firm or budget), quantity, amount, unit_price
+        (amount / quantity, only when the quantity is printed), currency, line (the text as written), path,
+        page, confidence; one row per priced line with an amount in the chosen currency, never converted.
+        Budget offers are included and marked: mark them on the chart, or filter offer_type="firm" to
+        exclude them. Ends with the coverage line: offers matched, with readable prices, left out and why
+        (category, no CHF amount, no readable prices, ignored by correction, no date), naming them. With
+        machine=, it also names the offers without readable prices, which could not be checked for that
+        machine.
 
         Args:
             machine: Optional machine family or model of the line (case ignored; comma = or), e.g. "Paloma 3R".
@@ -630,7 +633,7 @@ def build_server(cfg: Config) -> MCPServer:
             client: Optional part of the client's name (comma = or).
             country: Optional part of the country in English (comma = or).
             status: Optional status(es): won, won_unconfirmed, no_order_found, open, unknown, lost, cancelled.
-            offer_type: firm (default), budget, or "firm,budget"; empty for all.
+            offer_type: Optional firm or budget; every offer by default (firm and budget, marked).
             category: Folder categories, default "client,archive" (partner offers' prices may be to the
                 partner: add "partner" to include them); empty for all.
             year_from: Optional first year of the revision's date.

@@ -61,15 +61,18 @@ def tool_names(srv):
 def test_offer_lines_chart_rows(offers_world_linked):
     _, con = offers_world_linked
     out = offer_tools.offer_lines(con, machine="Paloma")
-    assert all(r.split(";")[11] == "CHF" for r in rows(out)) and len(rows(out)) == 5
-    assert out.splitlines()[0] == ("date;offer;revision;variant;kind;client;country;status;quantity;amount;unit_price;"
-                                   "currency;line;path;page;confidence")
-    assert "Coverage: 5 offers matched; 5 with readable prices; left out: 2 (1 budget, 1 no readable prices)" in out
-    assert "B-250306 (budget)" in out  # the archive offer is a budget offer
+    assert all(r.split(";")[12] == "CHF" for r in rows(out)) and len(rows(out)) == 6
+    assert out.splitlines()[0] == ("date;offer;revision;variant;kind;client;country;status;offer_type;quantity;amount;"
+                                   "unit_price;currency;line;path;page;confidence")
+    assert "Coverage: 5 offers matched; 5 with readable prices; left out: 1 (1 no readable prices)" in out
+    assert rows(out, "B-250306")[0].split(";")[8] == "budget"  # budget offers are in, and marked
     assert "3002222/00 annex (no readable prices)" in out  # an unread document of the last revision
     won = rows(out, "3001234")[0].split(";")
-    assert won[:10] == ["2020-05-14", "3001234", "03", "Vandelay", "machine", "ACME Foods", "", "won", "", "180000"]
-    assert won[12].startswith("A Paloma 2R Top Loader") and won[13].endswith("Vandelay.pdf") and won[14:] == ["2", "high"]
+    assert won[:11] == ["2020-05-14", "3001234", "03", "Vandelay", "machine", "ACME Foods", "", "won", "firm", "",
+                        "180000"]
+    assert won[13].startswith("A Paloma 2R Top Loader") and won[14].endswith("Vandelay.pdf") and won[15:] == ["2", "high"]
+    firm = offer_tools.offer_lines(con, machine="Paloma", offer_type="firm")
+    assert len(rows(firm)) == 5 and "B-250306 (budget)" in firm
 
 
 def test_last_revision_default_and_all(offers_world_linked):
@@ -84,16 +87,16 @@ def test_last_revision_default_and_all(offers_world_linked):
 
 def test_unit_price_quantity_and_kinds(offers_world_linked):
     _, con = offers_world_linked
-    out = offer_tools.offer_lines(con, machine="paloma 3r", offer_type="firm,budget")
+    out = offer_tools.offer_lines(con, machine="paloma 3r")
     row = rows(out, "B-250306")[0].split(";")
-    assert (row[0], row[6], row[8], row[9], row[10], row[11]) == ("2006-03-25", "Germany", "2", "410000", "205000", "CHF")
+    assert (row[0], row[6], row[9], row[10], row[11], row[12]) == ("2006-03-25", "Germany", "2", "410000", "205000", "CHF")
     discounts = rows(offer_tools.offer_lines(con, kind="discount", client="acme"))
-    assert discounts and all(r.split(";")[9].startswith("-") and r.split(";")[10] == "" for r in discounts)
+    assert discounts and all(r.split(";")[10].startswith("-") and r.split(";")[11] == "" for r in discounts)
 
 
 def test_currency_never_converted(offers_world_linked):
     _, con = offers_world_linked
-    out = offer_tools.offer_lines(con, currency="EUR", offer_type="firm,budget")
+    out = offer_tools.offer_lines(con, currency="EUR")
     assert "B-250306" in out and "no EUR amount" in out  # the EN offer has CHF only: left out, named
     assert {r.split(";")[1] for r in rows(out)} == {"B-250306"}
     assert ";2;400000;200000;EUR;" in rows(out, "B-250306")[0]
@@ -107,9 +110,8 @@ def test_offer_lines_left_out_reasons(offers_world_linked):
     out = offer_tools.offer_lines(con, year_from=2019, year_to=2019)
     assert {r.split(";")[1] for r in rows(out)} == {"3002222"} and "Coverage: 1 offers matched" in out
     out = offer_tools.offer_lines(con, country="germany", category="client")
-    assert "B-250306 (budget)" in out
-    assert "B-250306 (category archive)" in offer_tools.offer_lines(con, country="Germany", offer_type="budget",
-                                                                   category="client")
+    assert "B-250306 (category archive)" in out
+    assert "B-250306 (budget)" in offer_tools.offer_lines(con, country="Germany", offer_type="firm")
 
 
 def test_ignored_revisions(offers_world_linked, tmp_path):
@@ -175,7 +177,7 @@ def test_table_cells_are_safe(offers_world_linked):
     con.execute("UPDATE offer_lines SET text = '=cmd|x; type\nX' WHERE kind = 'machine' AND revision_id = "
                 "(SELECT id FROM offer_revisions WHERE offer_key = '0904099')")
     row = rows(offer_tools.offer_lines(con, client="ACME", kind="machine"), "0904099")[0]
-    assert ";'=cmd|x, type X;" in row and len(row.split(";")) == 16
+    assert ";'=cmd|x, type X;" in row and len(row.split(";")) == 17
 
 
 def test_machine_charts_show_machine_lines_unless_a_kind_is_asked(offers_world_linked):
@@ -285,10 +287,12 @@ def test_offers_server_calls(offers_world_linked):
         async with _client(server.build_server(cfg)) as client:
             stats = await client.call_tool("offer_stats", {"group_by": "status"})
             hits = await client.call_tool("search", {"query": "Paloma", "status": "won", "mode": "keyword"})
-            return stats.content[0].text, hits.content[0].text
+            chart = await client.call_tool("offer_lines", {"machine": "Paloma"})
+            return stats.content[0].text, hits.content[0].text, chart.content[0].text
 
-    stats, hits = asyncio.run(run())
+    stats, hits, chart = asyncio.run(run())
     assert stats.startswith("status;offers;revisions") and "won;1;4" in stats
+    assert ";B-250306;" in chart and ";budget;" in chart  # budget offers are in the charts by default
     assert "3001234" in hits and "3002222" not in hits and "Dupont" not in hits
 
 

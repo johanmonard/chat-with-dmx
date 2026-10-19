@@ -24,8 +24,8 @@ from .register import fold
 
 EMPTY_REGISTER = ("The offer register is empty on this index: run the offers step (dmx-docs offers, "
                   "or launcher 7 for the offers world).")
-LINE_COLUMNS = ("date", "offer", "revision", "variant", "kind", "client", "country", "status", "quantity", "amount",
-                "unit_price", "currency", "line", "path", "page", "confidence")
+LINE_COLUMNS = ("date", "offer", "revision", "variant", "kind", "client", "country", "status", "offer_type", "quantity",
+                "amount", "unit_price", "currency", "line", "path", "page", "confidence")
 DEFAULT_KIND_NOTE = "kind machine (default with machine=)"
 UNCHECKED = "{} offers in scope have no readable prices and could not be checked for this machine"
 GROUP_KEYS = ("year", "country", "client", "machine", "status", "author", "partner", "offer_type", "category")
@@ -437,11 +437,12 @@ def _parts_left_out(o: _Offer, chosen: list, undated: list, wanted, cur: str, la
 
 
 def offer_lines(con, machine: str | None = None, kind: str | None = None, client: str | None = None,
-                country: str | None = None, status: str | None = None, offer_type: str | None = "firm",
+                country: str | None = None, status: str | None = None, offer_type: str | None = None,
                 category: str | None = "client,archive", year_from: int | None = None, year_to: int | None = None,
                 currency: str = "CHF", revisions: str = "last", limit: int = 500, allows=None) -> str:
     """The rows of a price chart: one per priced line with an amount in `currency` (never converted), of
-    the last revision of each offer (every variant of it) or of every revision; then the coverage line,
+    the last revision of each offer (every variant of it) or of every revision, firm and budget offers
+    (the offer_type column marks them; offer_type='firm' leaves budget offers out); then the coverage line,
     which names whole offers left out and the parts left out of the offers shown (a variant not read,
     without a date or without an amount in `currency`, a line without that amount, an ignored revision).
     With `machine` and no `kind` (None), only machine lines (kind machine), said in the coverage line; an
@@ -516,7 +517,8 @@ def offer_lines(con, machine: str | None = None, kind: str | None = None, client
             q = l["quantity"]
             rows.append(((r["date"] or "9999", o.key, r["rev_order"], r["id"], l["position"]),
                          [r["date"], o.key, r["revision"], r["variant"], l["kind"], o.row["client"], o.row["country"],
-                          o.row["status"], _num(q), _num(amount), _num(round(amount / q, 2)) if q else "", cur,
+                          o.row["status"], o.row["offer_type"], _num(q), _num(amount),
+                          _num(round(amount / q, 2)) if q else "", cur,
                           " ".join((l["text"] or "").split()), r["path"], _num(l["page"]), l["confidence"]]))
     rows.sort(key=lambda kr: kr[0])
     limit = max(1, int(limit))

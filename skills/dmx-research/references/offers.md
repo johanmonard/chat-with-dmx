@@ -34,9 +34,11 @@ model), `status=`, `year_from=`, `year_to=`. `offer_lines` also has `kind=`, `of
 `list_offers` has `text=`.
 
 - **Defaults of `offer_lines`**: currency CHF, the last revision of each offer (every variant of it
-  is one point), `offer_type="firm"`, `category="client,archive"`. Budget and partner offers are
-  counted in the coverage line and added with `offer_type="firm,budget"` or `category=""`.
-  `revisions="all"` gives every revision (the history of one offer or client).
+  is one point), every offer type, `category="client,archive"`. Budget offers are included and
+  marked: each row has an `offer_type` column (firm or budget) - mark budget points differently on
+  the chart; filter `offer_type="firm"` to exclude them. Partner offers are counted in the coverage
+  line and added with `category=""`. `revisions="all"` gives every revision (the history of one offer
+  or client).
 - **Kinds of line**: each row has a `kind` column (machine, option, service, discount, other). With
   `machine=` and no `kind=`, only machine lines are returned (the coverage line says
   "kind machine (default with machine=)"): a training or installation line naming the machine is not
@@ -79,14 +81,16 @@ For an exact offer number use the number in "double quotes" with `mode="keyword"
    around the price page, `search` with `offer=` for mails and specifications that explain a price.
    Old archive offers are OCR text ("(OCR)"): check amounts with `view_page`.
 6. **Always state the coverage line under a chart or a count**, with the currency, the revisions
-   (last or all) and the scope (firm offers of client and archive folders unless widened).
+   (last or all) and the scope (firm and budget offers of client and archive folders unless
+   narrowed or widened).
    Cite path and page for every value you quote.
 
 ## Pitfalls
 
 - Variants of one revision are separate points, never summed. Translations are one offer.
-- Budget offers ("Richtpreis", "budget", "indicative") and partner offers (prices may be to the
-  partner) are not in default price trends.
+- Budget offers ("Richtpreis", "budget", "indicative") are in default price trends, marked by the
+  `offer_type` column: show them as budget points (or filter `offer_type="firm"` to exclude them).
+  Partner offers (prices may be to the partner) are not in default price trends.
 - A machine name the register does not know is kept as written: the same model can appear under an
   old name. Search the line text (`list_offers text="..."`) when `machine=` finds too little.
 - Confidence `low` or `medium`: check the page. The user's corrections (shown in `offer_card`) beat
