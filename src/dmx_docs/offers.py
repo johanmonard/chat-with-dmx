@@ -103,13 +103,14 @@ def _cell_text(v) -> str | None:
 
 
 def _cell_date(v) -> str | None:
-    """YYYY-MM-DD of an Excel serial date (39842.0), a date or a written date ('29.01.2009', '2009-01-29')."""
+    """YYYY-MM-DD of an Excel serial date (39842.0), a date or a written date ('29.01.2009', '2009-01-29');
+    None for an empty or zero cell and a date prices.plausible_date refuses (before 1990, far ahead)."""
     if isinstance(v, datetime):
-        return v.date().isoformat()
-    if isinstance(v, date):
-        return v.isoformat()
+        v = v.date()
     if isinstance(v, (int, float)) and not isinstance(v, bool):
-        return (_EXCEL_EPOCH + timedelta(days=int(v))).isoformat() if 1 <= v < 2958466 else None
+        v = _EXCEL_EPOCH + timedelta(days=int(v)) if 1 <= v < 2958466 else None
+    if isinstance(v, date):
+        return v.isoformat() if prices.plausible_date(v.isoformat()) else None
     found = prices.offer_date({1: v}) if isinstance(v, str) else None
     return found[0] if found else None
 
@@ -409,7 +410,8 @@ def _country_in(text: str) -> str | None:
 
 
 def _mtime_date(doc) -> str | None:
-    return datetime.fromtimestamp(doc["mtime"]).date().isoformat() if doc["mtime"] else None
+    day = datetime.fromtimestamp(doc["mtime"]).date().isoformat() if doc["mtime"] else None
+    return day if day and prices.plausible_date(day) else None
 
 
 @dataclass

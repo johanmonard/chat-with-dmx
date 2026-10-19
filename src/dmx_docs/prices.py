@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 
 from . import machines, vision
 
@@ -47,6 +47,8 @@ class PriceSection:
 
 MAX_PAGES = 3
 MODEL_PAGES = 6  # pages sent to the model when the rules found no price section
+MIN_AMOUNT = 50  # a smaller printed value is a section number or a rate, never a price (0 is kept: "included")
+FIRST_DATE = date(1990, 1, 1)  # an earlier offer date is an empty date cell or a misread
 
 _SP = " " + chr(0xA0) + chr(0x202F)  # space, no-break space, narrow no-break space
 _DASH = "-" + chr(0x2013) + chr(0x2212)  # hyphen, en dash, minus
@@ -86,7 +88,30 @@ _RUNNING = re.compile(r"(?=.*\b(?:offer|offre|angebot))(?=.*\d{5})", re.I)  # "O
 _PAGE_NO = re.compile(r"^\s*(?:page|seite)\s+\d+(?:\s*(?:/|of|von|sur|de)\s*\d+)?\s*$", re.I)
 _DESCRIPTION = re.compile(r"[-•*–]|(?:including|inkl|einschliesslich|einschließlich|y compris|comprenant)\b",
                           re.I)
-_QUANTITY = re.compile(r"^\s*(\d+)\s*[x×]\s")
+_QUANTITY = re.compile(r"^\s*(\d+)\s*[x×](?=\s|[^\W\d_])")  # "2x Paloma", "2 x Paloma", "2xPaloma"
+# A page header repeated on each page: an offer number and a date ("ACME 3001234 - 02 04.11.2024").
+_OFFER_NO = re.compile(r"(?<!\d)\d{7}(?!\d)|(?<![A-Za-z0-9])[BFE]-\d{6,7}(?!\d)")
+_NUM_DATE = re.compile(r"(?<![\d.])(?:\d{1,2}\.\d{1,2}\.\d{4}|\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2})(?!\d)")
+# A numbered section heading ("2. Proposal", "2. Proposition Equipement"), short and without amounts.
+_SECTION = re.compile(r"^\d+(?:\.\d+)*\.?\s*(?:proposal|proposition|angebot|offer|offre|equipment|équipement"
+                      r"|equipement|ausrüstung|prix|price|preis)\b", re.I)
+# The company's footer and letterhead: name, group, address with a CH- postcode, web site, phone.
+_STREET = (r"(?:\b(?:route|rue|chemin|avenue|place|via|street|road)\b|\b(?:rte|ch|av)\."
+           r"|(?:strasse|straße|weg|gasse|platz)\b)")
+_FOOTER = re.compile(
+    r"^\W*(?:demaurex(?:\s+sa)?|(?:an?\s+|member\s+of\s+the\s+)?rotzinger(?:\s+(?:ag|sa|group|gruppe|groupe))?"
+    r"(?:\s+company)?)\W*$"
+    r"|a\s+bosch\s+packaging\s+technology\s+company|\bwww\.\w"
+    r"|\b(?:tel|tél|phone|fax)\b\.?\s*:?\s*\+?\s*\(?\d[\d\s()./-]{5,}"
+    rf"|\bCH-\d{{4}}\b.*{_STREET}|{_STREET}.*\bCH-\d{{4}}\b", re.I)
+# A delivered price: an Incoterm with 'Incoterms' or a place ('CIP Berlin (INCOTERMS 2010)', 'DAP Madrid').
+_INCOTERM_CODES = r"(?:EXW|FCA|FAS|FOB|CFR|CIF|CPT|CIP|DAP|DPU|DAT|DDP|DDU)"
+_INCOTERM = re.compile(rf"(?<![\w-]){_INCOTERM_CODES}(?![\w-])")
+_INCOTERM_PLACE = re.compile(rf"(?<![\w-]){_INCOTERM_CODES}[{_SP}]+[A-ZÀ-Ý]")
+_INCOTERMS_WORD = re.compile(r"\bincoterms?\b", re.I)
+# The introduction of the offered items ("In this quotation, we kindly offer you:").
+_INTRO = re.compile(r"we kindly offer you|nous avons le plaisir de vous propos|wir freuen uns|nous vous proposons"
+                    r"|we are pleased to offer", re.I)
 
 _DISCOUNT = re.compile(r"\b(?:remise|rabais|rabatt|discount|nachlass)", re.I)
 _OPTION = re.compile(r"\boption", re.I)
@@ -161,8 +186,8 @@ def _amount_spans(text: str) -> list[tuple[int, int, str, float, bool]]:
             continue  # a rate per day or hour, not a price
         raw = m.group("v1") or m.group("v2")
         value = parse_number(raw)
-        if value is None:
-            continue
+        if value is None or 0 < value < MIN_AMOUNT:
+            continue  # a section number or a rate ('USD 2.1'), not a price
         before = text[text.rfind("\n", 0, m.start()) + 1:m.start()]
         ambiguous = bool(m.group("v2") and _FUSED.match(raw) and re.search(r"\w", before))
         neg = m.group("n1") or m.group("n2") or m.group("n3")
@@ -305,12 +330,16 @@ class _Block:
 
 
 def _is_heading(words: str, line: str, text_follows: bool) -> bool:
-    """'PRICE', '3. PRIX', 'Prix / Price', an all-caps line without digits ('PRICES AND OPTIONS'), or a
-    price intro ending with ':' and followed by text, not amounts ('The price for the equipment described
-    in this offer is:' but not 'Installation price:' + 'CHF 25,000'). Never a total or a subtotal."""
+    """'PRICE', '3. PRIX', 'Prix / Price', an all-caps line without digits ('PRICES AND OPTIONS'), a short
+    numbered section heading followed by text ('2. Proposal', '2. Proposition Equipement'), or a price intro
+    ending with ':' and followed by text, not amounts ('The price for the equipment described in this offer
+    is:' but not 'Installation price:' + 'CHF 25,000'). Never a total or a subtotal."""
     if _total_strength(line) or _SUBTOTAL.search(line):
         return False
     if _HEADING.fullmatch(words):
+        return True
+    if (_SECTION.match(line) and len(line.split()) <= 6 and text_follows and not machines.models_in(line)
+            and not _QUANTITY.match(_NUMBERING.sub("", line))):
         return True
     if line.endswith(":") and text_follows and _PRICE_WORD.search(line) and not machines.models_in(line):
         return True
@@ -319,6 +348,75 @@ def _is_heading(words: str, line: str, text_follows: bool) -> bool:
 
 def _is_description(line: str) -> bool:
     return line[:1].islower() or bool(_DESCRIPTION.match(line))
+
+
+def _is_page_header(line: str) -> bool:
+    """A running header: an offer number and a date on one line ('ACME 3001234 - 02 04.11.2024')."""
+    return bool(_OFFER_NO.search(line) and _NUM_DATE.search(line))
+
+
+def _item_name(line: str) -> str:
+    """The line with a space after a quantity glued to the name ('2xPaloma 3R' -> '2x Paloma 3R'), so that
+    the machine is found in it."""
+    return re.sub(r"^(\s*\d+\s*[x×])(?=[^\W\d_])", r"\1 ", line)
+
+
+def _has_item(line: str) -> bool:
+    """A quantity ('2x') or a machine family on the line."""
+    return bool(_QUANTITY.match(line) or machines.models_in(_item_name(line)))
+
+
+def _is_intro(line: str, following: str | None) -> bool:
+    """An introduction of the items ('In this quotation, we kindly offer you:'): it ends with ':' or uses an
+    intro phrase, names no quantity and no machine, and text follows in the label. A line ending with ':'
+    before a description ('Training includes:' + '- 2 days on site') is the item itself."""
+    if following is None or _has_item(line):
+        return False
+    return bool(_INTRO.search(line)) or (line.endswith(":") and not _is_description(following))
+
+
+def _is_incoterm(line: str) -> bool:
+    """An Incoterm code with 'Incoterms' or a place, or at the start of the line; never in a description."""
+    if _is_description(line) or not _INCOTERM.search(line):
+        return False
+    return bool(_INCOTERMS_WORD.search(line) or _INCOTERM_PLACE.search(line)
+                or re.match(rf"^\W*(?:\d+(?:\.\d+)*\.?\s+)?{_INCOTERM_CODES}(?![\w-])", line))
+
+
+def _delivered(label: list[str]) -> bool:
+    """A delivered price ('CIP Berlin (INCOTERMS 2010) EUR ... CHF ...'): its last label line holds the
+    Incoterm, or 'Incoterms' under a line that holds the code ('FCA Ecublens' + '(Incoterms 2010)')."""
+    if not label:
+        return False
+    if _is_incoterm(label[-1]):
+        return True
+    return (len(label) > 1 and bool(_INCOTERMS_WORD.search(label[-1])) and not _is_description(label[-2])
+            and bool(_INCOTERM.search(label[-2])))
+
+
+def _item(label: list[str]) -> tuple[list[str], bool]:
+    """(the block's label from its item line on, True when a left-out introduction announces options).
+
+    Introductions and Incoterm captions above the item are left out ('2. Proposal' and the page header are
+    no label lines). The item line is the first line with a quantity or a machine family, else the first
+    line; never a description line, and never past a line that names a kind of its own ('Option dismantling
+    of the hood' before 'Access to the Delfi ...', 'Commissioning' before 'For the 2 Delfi cells'). Kind,
+    quantity, family and model come from it."""
+    lines, option_intro = [], False
+    for i, line in enumerate(label):
+        following = label[i + 1] if i + 1 < len(label) else None
+        if _is_intro(line, following):
+            option_intro |= bool(_OPTION.search(line))  # "The following options are also possible:"
+        elif not (following is not None and _is_incoterm(line)):  # the caption of the total above
+            lines.append(line)
+    start = 0
+    for i, line in enumerate(lines):
+        if _is_description(line) or line.startswith("("):
+            continue
+        if _has_item(line) or _DISCOUNT.search(line) or _OPTION.search(line) or _SERVICE.search(line):
+            start = i  # a kind word: an item name of its own
+            break
+    return lines[start:], option_intro
 
 
 def _blocks(pages: dict[int, str], nums: list[int]) -> list[_Block]:
@@ -354,9 +452,10 @@ def _blocks(pages: dict[int, str], nums: list[int]) -> list[_Block]:
             if not stripped:
                 continue
             amts, text, words = _split(line)
-            if not amts and (_PAGE_NO.match(stripped) or (first and _RUNNING.search(stripped))):
+            if not amts and (_PAGE_NO.match(stripped) or (first and _RUNNING.search(stripped))
+                             or _is_page_header(stripped) or _FOOTER.search(stripped)):
                 first = False
-                continue  # running header or page number
+                continue  # running header, page number or the company's footer
             first = False
             rows.append((p, stripped, amts, text, words))
 
@@ -422,7 +521,8 @@ def parse_section(pages: dict[int, str]) -> PriceSection | None:
 
     sum_ok is False (unreadable) when amounts have no label, a line with amounts mentions a total
     without being a total label, priced lines follow the total, or (without a total) an amount may hold
-    a fused quantity. Kind, family and model come from the item's first label line."""
+    a fused quantity. Kind, quantity, family and model come from the item line (_item); the line's text
+    starts there."""
     nums = price_pages(pages)
     if not nums:
         return None
@@ -431,6 +531,7 @@ def parse_section(pages: dict[int, str]) -> PriceSection | None:
         return None
     lines: list[PriceLine] = []
     totals: dict[str, float] = {}
+    delivered: dict[str, float] = {}
     total_at, strength, unreadable, ambiguous = 0, 0, False, False
     for b in blocks:
         s = _total_strength(b.label[-1]) if b.label else 0
@@ -440,27 +541,41 @@ def parse_section(pages: dict[int, str]) -> PriceSection | None:
             continue
         if b.label and _SUBTOTAL.search(b.label[-1]):
             continue  # a subtotal: the lines already hold its amounts
+        if _delivered(b.label):  # never a line; the total only when no total is printed
+            delivered = delivered or dict(b.amounts)
+            continue
         if not b.label or (b.inline and _TOTAL_WORD.search(b.label[-1])):
             unreadable = True  # amounts without a label, or "Total 4 cells CHF ...": never an ordinary line
             continue
-        label = "\n".join(b.label)
-        text = " ".join(" ".join(b.label + b.description).split())
-        q = _QUANTITY.match(text)
-        family, model = _machine(b.label[0])
+        item, option_intro = _item(b.label)
+        text = " ".join(" ".join(item + b.description).split())
+        q = _QUANTITY.match(item[0])
+        family, model = _machine(_item_name(item[0]))
+        kind = classify(_item_name("\n".join(item)), b.amounts)
         ambiguous |= b.ambiguous
-        lines.append(PriceLine(len(lines) + 1, text, classify(label, b.amounts), int(q.group(1)) if q else None,
-                               dict(b.amounts), b.page, family, model))
+        lines.append(PriceLine(len(lines) + 1, text, "option" if option_intro and kind != "discount" else kind,
+                               int(q.group(1)) if q else None, dict(b.amounts), b.page, family, model))
     text = "\n".join(pages[p] for p in nums)
     if totals:
         sum_ok = _sums_match(lines[:total_at], totals, text) and not unreadable and total_at == len(lines)
+    elif delivered:  # the delivered price is the total; it may follow or precede the lines
+        totals = delivered
+        sum_ok = _sums_match(lines, totals, text) and not unreadable
     else:
         sum_ok = False if unreadable or ambiguous else None
     rates = _rates(text)
     return PriceSection(lines, totals, rates, nums, sum_ok)
 
 
+def plausible_date(iso: str) -> bool:
+    """An offer date: from 1990-01-01 to one year after today (an empty Excel date cell reads 1899-12-31 or
+    1900-01-01; a validity date may lie ahead)."""
+    return FIRST_DATE <= date.fromisoformat(iso) <= date.today() + timedelta(days=365)
+
+
 def offer_date(pages: dict[int, str]) -> tuple[str, str] | None:
-    """(YYYY-MM-DD, as written) of the first date on pages 1-2 outside an exchange-rate sentence.
+    """(YYYY-MM-DD, as written) of the first plausible date (plausible_date) on pages 1-2 outside an
+    exchange-rate sentence.
 
     A date in parentheses is a rate date also when its sentence hints at a rate ('actual rate',
     'cours du jour') or the next line holds the rate (a rate sentence wrapped over two lines)."""
@@ -472,6 +587,8 @@ def offer_date(pages: dict[int, str]) -> tuple[str, str] | None:
                 if _RATE.search(sentence) or _RATE_WORDS.search(sentence):
                     continue
                 for iso, written, start, end in _dates(sentence):
+                    if not plausible_date(iso):
+                        continue
                     in_parens = sentence.rfind("(", 0, start) > sentence.rfind(")", 0, start) and ")" in sentence[end:]
                     if in_parens and (rate_next or _RATE_HINT.search(sentence)):
                         continue
@@ -585,8 +702,9 @@ def parse_with_model(url: str, model: str, pages: dict[int, str], timeout: float
         if not label or not amounts:
             continue
         page = item.get("page")
-        family, model_name = _machine(name)
-        lines.append(PriceLine(len(lines) + 1, label, classify(name, amounts), _model_quantity(item.get("quantity")),
+        family, model_name = _machine(_item_name(name))
+        lines.append(PriceLine(len(lines) + 1, label, classify(_item_name(name), amounts),
+                               _model_quantity(item.get("quantity")),
                                amounts, page if type(page) is int and page in nums else nums[0],
                                family, model_name))
     if not lines:

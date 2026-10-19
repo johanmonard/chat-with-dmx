@@ -1,4 +1,5 @@
 import json
+from datetime import date, timedelta
 
 import pytest
 
@@ -75,7 +76,7 @@ ITEMS = "PRICE\nPaloma 4R cell CHF 300,000.00\nOption: vision system CHF 25,000.
 
 @pytest.mark.parametrize("s, expected", [
     ("US$ 1,000.00", [("USD", 1000.0)]), ("$ 1,000.00", [("USD", 1000.0)]), ("€ 500.-", [("EUR", 500.0)]),
-    ("£ 20", [("GBP", 20.0)]), ("Fr. 1'000.-", [("CHF", 1000.0)]), ("SFr. 1'000.-", [("CHF", 1000.0)]),
+    ("£ 200", [("GBP", 200.0)]), ("Fr. 1'000.-", [("CHF", 1000.0)]), ("SFr. 1'000.-", [("CHF", 1000.0)]),
     ("Preis: 1 200.- CHF", [("CHF", 1200.0)]), ("25 000,00 EUR", [("EUR", 25000.0)]),
     ("- CHF 5 000.-", [("CHF", 5000.0)]),  # a bullet, not a minus sign
     ("CHF 1 100.- par jour", []), ("EUR 95.-/h", []), ("Fr. 12.05.2020", []),
@@ -469,6 +470,106 @@ def test_conversion_currency_in_brackets_keeps_its_rounding_tolerance():
     off = {4: DE[4].replace("CHF 410 000.-", "CHF 410 010.-"), 5: DE[5]}  # the main currency: a few units only
     assert prices.parse_section(off).sum_ok is False
     assert prices.parse_section({1: ITEMS + "TOTAL CHF 325,002.00"}).sum_ok is True  # 2 lines: 2 units of rounding
+
+
+# --- fixes from the first real run (2026-10-19) ---
+
+@pytest.mark.parametrize("page, model, quantity, start", [
+    ("ACME 3001234 - 02 04.11.2024\n2. Proposal\nIn this quotation, we kindly offer you:\n"
+     "2x Paloma 4R Dense each including:\n- 4 Delta robots\nCHF 771 100.-\nInstallation and commissioning\n"
+     "CHF 28 900.-\nPRICE, net, without taxes, CHF 800 000.-", "Paloma 4R", 2, "2x Paloma 4R"),
+    ("DUPONT F-0908021 V3 08.02.2010\n2. Proposition Equipement\n"
+     "Nous avons le plaisir de vous proposer les équipements suivants :\n1x Paloma 3R comprenant :\n"
+     "- 3 robots Delta\nEUR 410 000.-\nMise en service\nEUR 20 000.-\nPrix total net HT EUR 430 000.-",
+     "Paloma 3R", 1, "1x Paloma 3R"),
+    ("GLOBEX 3005678 - 01 15/03/2021\n2. Angebot\nGerne unterbreiten wir Ihnen das folgende Angebot:\n"
+     "2xPresto 2R einschliesslich:\n- 2 Delta Roboter\nCHF 500 000.-\nInbetriebnahme\nCHF 30 000.-\n"
+     "PREIS, netto, ohne Steuern, CHF 530 000.-", "Presto 2R", 2, "2xPresto 2R"),
+])
+def test_page_header_heading_and_intro_are_not_the_item(page, model, quantity, start):
+    s = prices.parse_section({4: page})
+    first = s.lines[0]
+    assert first.text.startswith(start) and (first.kind, first.quantity, first.model) == ("machine", quantity, model)
+    assert s.lines[1].kind == "service" and len(s.lines) == 2 and s.sum_ok is True
+
+
+def test_item_line_is_the_first_with_a_quantity_or_a_machine():
+    s = prices.parse_section({1: "PRICE\nPaloma 4R cell CHF 300,000.00\nAs agreed during our visit\n"
+                                 "1x Paloma 3R second cell\nCHF 250,000.00\nPRICE, net, without taxes, CHF 550,000.00"})
+    second = s.lines[1]
+    assert (second.text, second.kind, second.quantity, second.model) == ("1x Paloma 3R second cell", "machine", 1,
+                                                                         "Paloma 3R")
+    assert s.sum_ok is True
+
+
+def test_a_label_ending_with_a_colon_before_its_description_is_the_item():
+    s = prices.parse_section({1: "PRICE\nPaloma 4R cell CHF 300,000.00\nTraining includes:\n- 2 days on site\n"
+                                 "CHF 4,000.00\nPRICE, net, without taxes, CHF 304,000.00"})
+    assert (s.lines[1].text, s.lines[1].kind) == ("Training includes: - 2 days on site", "service")
+
+
+def test_options_announced_by_an_introduction_stay_options():
+    s = prices.parse_section({1: "PRICE\nPaloma 4R cell CHF 300,000.00\nThe following option is also possible:\n"
+                                 "1 Spreader CHF 5,000.00\nPRICE, net, without taxes, CHF 305,000.00"})
+    assert [(l.text, l.kind) for l in s.lines] == [("Paloma 4R cell", "machine"), ("1 Spreader", "option")]
+    assert s.sum_ok is True
+
+
+@pytest.mark.parametrize("delivered", ["CIP Berlin (INCOTERMS 2010) EUR 290 000.- CHF 340 000.-",
+                                       "Berlin (Germany) CIP Berlin, Germany (INCOTERMS 2000)\nCHF 340 000.-",
+                                       "DAP Madrid CHF 340 000.-"])
+def test_delivered_price_after_the_net_total_is_neither_a_line_nor_a_late_line(delivered):
+    s = prices.parse_section({1: ITEMS + "PRICE, net, without taxes, CHF 325,000.00\n" + delivered})
+    assert len(s.lines) == 2 and s.totals == {"CHF": 325000.0} and s.sum_ok is True
+
+
+def test_delivered_price_is_the_total_when_no_net_total_is_printed():
+    s = prices.parse_section({1: ITEMS + "FCA Ecublens (Incoterms 2010) CHF 325,000.00"})
+    assert len(s.lines) == 2 and s.totals == {"CHF": 325000.0} and s.sum_ok is True
+    wrong = prices.parse_section({1: ITEMS + "FCA Ecublens (Incoterms 2010) CHF 340,000.00"})
+    assert wrong.totals == {"CHF": 340000.0} and wrong.sum_ok is False
+
+
+def test_an_incoterm_caption_before_an_item_is_not_the_item():
+    s = prices.parse_section({1: "PRICE\nPaloma 4R cell CHF 300,000.00\nPRICE, net, without taxes, CHF 300,000.00\n"
+                                 "FCA Ecublens (Incoterms 2010)\nThe following option is also possible:\n"
+                                 "1 Spreader CHF 5,000.00"})
+    assert [(l.text, l.kind) for l in s.lines] == [("Paloma 4R cell", "machine"), ("1 Spreader", "option")]
+
+
+@pytest.mark.parametrize("footer", ["Demaurex SA\nA Bosch Packaging Technology Company",
+                                    "Demaurex SA A Bosch Packaging Technology Company", "ROTZINGER Group",
+                                    "Route de Crissier 4, CH-1030 Bussigny", "www.example.ch",
+                                    "Tel +41 21 123 45 67 Fax +41 21 123 45 68"])
+def test_company_footers_are_no_label_lines(footer):
+    s = prices.parse_section({1: f"PRICE\nPaloma 4R cell CHF 300,000.00\n{footer}\nSpare parts kit\n"
+                                 "CHF 25,000.00\nPRICE, net, without taxes, CHF 325,000.00"})
+    assert [(l.text, l.kind) for l in s.lines] == [("Paloma 4R cell", "machine"), ("Spare parts kit", "other")]
+    assert s.sum_ok is True
+
+
+def test_a_line_naming_the_company_is_not_a_footer():
+    s = prices.parse_section({1: "PRICE\nPaloma 4R cell CHF 300,000.00\nAcceptance test at Demaurex SA before delivery\n"
+                                 "CHF 8,000.00\nPRICE, net, without taxes, CHF 308,000.00"})
+    assert s.lines[1].text == "Acceptance test at Demaurex SA before delivery" and s.sum_ok is True
+
+
+def test_values_below_50_are_not_amounts():
+    assert prices.amounts_in("Services included in the equipment price USD 2.1") == []
+    assert prices.amounts_in("Option CHF 50.-, Discount -CHF 49.-, CHF 0.-") == [("CHF", 50.0), ("CHF", 0.0)]
+    s = prices.parse_section({1: ITEMS + "9.1. Services included in the equipment price USD 2.1\n"
+                                         "PRICE, net, without taxes, CHF 325,000.00"})
+    assert len(s.lines) == 2 and s.sum_ok is True
+
+
+def test_offer_date_before_1990_or_far_ahead_is_no_date():
+    far = (date.today() + timedelta(days=400)).strftime("%d.%m.%Y")
+    near = (date.today() + timedelta(days=300)).strftime("%d.%m.%Y")
+    assert prices.offer_date({1: f"Printed 01.01.1900, valid until {far}\nLausanne, 23.06.2025"}) == (
+        "2025-06-23", "23.06.2025")
+    assert prices.offer_date({1: "Date: 1899-12-31\nLausanne, 31.12.1989"}) is None
+    assert prices.offer_date({1: f"Lausanne, {near}"})[1] == near
+    assert prices.plausible_date("1990-01-01") and not prices.plausible_date("1989-12-31")
 
 
 def test_model_sum_uses_the_same_tolerance(fake_ollama):

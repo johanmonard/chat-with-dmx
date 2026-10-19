@@ -1,6 +1,6 @@
 import json
 import os
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -264,6 +264,32 @@ def test_history_and_quotation_rows():
                                    "Running", "ACME"]])
     assert rows[0]["offer"] == "0905020" and rows[0]["date"] == "2009-05-27" and rows[0]["status"] == "Running"
     assert rows[0]["country"] == "France" and rows[0]["final_customer"] is None
+
+
+def test_history_dates_before_1990_or_empty_are_no_dates():
+    # Empty or zero date cells come out of xlrd as 1899-12-31 / 1900-01-01, or as serials 0 and 1.
+    rows = [["Date", "Rédacteur", "Action"], ["1899-12-31", "CHL", "a"], ["1900-01-01", "CHL", "b"], [0.0, "CHL", "c"],
+            [1.0, "CHL", "d"], [2958000.0, "CHL", "e"], ["", "CHL", "f"], [date(1985, 3, 1), "CHL", "g"],
+            [39842.0, "CHL", "Première offre"]]
+    assert offers.history_rows(rows) == [("2009-01-29", "CHL", "Première offre")]
+    assert offers.quotation_rows([[], [], ["France", "Lyon", "Line", "1900-01-01", "", 905021.0]])[0]["date"] is None
+    assert offers._mtime_date({"mtime": datetime(1985, 1, 1).timestamp()}) is None  # a file date of an old copy
+    assert offers._mtime_date({"mtime": datetime(2009, 1, 29, 12).timestamp()}) == "2009-01-29"
+
+
+def test_a_history_without_a_real_date_falls_back_to_the_file_date(offers_world, monkeypatch):
+    cfg, con = offers_world
+
+    def sheet(path, sheet="Quotations"):
+        if not path.endswith("History.xls"):
+            raise ValueError("not a workbook")
+        return [["Date", "Rédacteur", "Action"], ["1900-01-01", "CHL", "Première offre"], [0.0, "CHL", "Offre V2"]]
+
+    monkeypatch.setattr(offers, "_sheet_rows", sheet)
+    offers.run_offers(cfg, progress=quiet)
+    r = con.execute("SELECT date, date_source FROM offer_revisions WHERE offer_key='0904099'").fetchone()
+    assert r["date_source"] == "file" and r["date"] > "1990"
+    assert con.execute("SELECT count(*) FROM offers WHERE year < 1990").fetchone()[0] == 0
 
 
 def test_quotation_rows_details():
