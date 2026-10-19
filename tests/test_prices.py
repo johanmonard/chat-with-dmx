@@ -648,6 +648,49 @@ def test_a_delivered_total_opening_the_list_counts_its_options():
     assert len(s.lines) == 2 and s.totals == {"CHF": 325000.0} and s.sum_ok is True
 
 
+# --- fix round 3 of the real-data fixes ---
+
+@pytest.mark.parametrize("label, kind", [
+    ("Installation and commissioning\nPaloma 4R cell, 3 days on site", "service"),
+    ("Commissioning\nFor the Delfi cells", "service"),
+    ("Formation\nOpérateurs Paloma 4R, 2 jours", "service"),
+    ("SAT\nPaloma 4R cell at customer site", "service"),
+    ("Option\nPaloma 2R second cell", "option"),
+])
+def test_a_kind_line_keeps_its_kind_above_a_machine_line(label, kind):
+    s = prices.parse_section({1: f"PRICE\nPaloma 4R cell CHF 300,000.00\n{label}\nCHF 20,000.00\n"
+                                 "PRICE, net, without taxes, CHF 320,000.00"})
+    line = s.lines[1]
+    assert line.kind == kind and line.text == " ".join(label.split()) and s.sum_ok is True
+
+
+def test_a_variant_line_takes_the_kind_of_the_machine_below_and_keeps_its_name():
+    s = prices.parse_section({1: "PRICE\nPaloma 4R cell CHF 300,000.00\nVariante avec option nettoyage\n1x Paloma 4R\n"
+                                 "CHF 340,000.00\nPRICE, net, without taxes, CHF 640,000.00"})
+    line = s.lines[1]
+    assert (line.kind, line.quantity, line.model) == ("machine", 1, "Paloma 4R")
+    assert line.text == "Variante avec option nettoyage 1x Paloma 4R" and s.sum_ok is True
+
+
+def test_an_incoterm_line_naming_transport_first_is_a_service_line():
+    s = prices.parse_section({1: "PRICE\nPaloma 4R cell CHF 300,000.00\nTransport and insurance CIP Berlin CHF 8,000.00"})
+    assert [l.kind for l in s.lines] == ["machine", "service"] and s.totals == {} and s.sum_ok is None
+    s = prices.parse_section({1: "PRICE\nPaloma 4R cell CHF 300,000.00\nTransport and insurance CIP Berlin CHF 8,000.00\n"
+                                 "CIP Berlin (Incoterms 2010) CHF 308,000.00"})
+    assert [l.kind for l in s.lines] == ["machine", "service"] and s.totals == {"CHF": 308000.0} and s.sum_ok is True
+
+
+def test_the_largest_delivered_price_is_the_total():
+    s = prices.parse_section({1: ITEMS + "EXW Ecublens CHF 320,000.00\nCIP Berlin (Incoterms 2010) CHF 325,000.00"})
+    assert s.totals == {"CHF": 325000.0} and [l.text for l in s.lines][-1] == "EXW Ecublens" and s.sum_ok is False
+
+
+def test_an_intro_phrase_offering_options_announces_options():
+    s = prices.parse_section({1: ITEMS + "PRICE, net, without taxes, CHF 325,000.00\n"
+                                         "We are pleased to offer the following options:\nSecond infeed CHF 40,000.00"})
+    assert (s.lines[2].text, s.lines[2].kind) == ("Second infeed", "option") and s.sum_ok is True
+
+
 def test_footer_and_header_shapes_in_a_description_are_kept():
     s = prices.parse_section({1: "PRICE\nVision system CHF 25,000.00\n- see www.example.com for specs\n"
                                  "- Delivery 12.03.2025 per order 3001234\nPRICE, net, without taxes, CHF 25,000.00"})
