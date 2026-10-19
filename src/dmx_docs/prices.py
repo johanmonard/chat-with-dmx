@@ -111,11 +111,16 @@ _INCOTERM_CODES = (rf"(?:EXW|FCA|FAS|FOB|CFR|CIF|CPT|DAP|DPU|DAT|DDP|DDU"
 _INCOTERM = re.compile(rf"(?<![\w-]){_INCOTERM_CODES}(?![\w-])")
 _INCOTERM_PLACE = re.compile(rf"(?<![\w-]){_INCOTERM_CODES}[{_SP}]+[A-ZÀ-Ý]")
 _INCOTERMS_WORD = re.compile(r"\bincoterms?\b", re.I)
-# The introduction of the offered items ("In this quotation, we kindly offer you:"), also of options
+# The introduction of the offered items ("In this quotation, we kindly offer you:") and of options
 # ("The following options are also possible:"): left out of the item's label.
 _INTRO = re.compile(r"we kindly offer you|nous avons le plaisir de vous propos|wir freuen uns|nous vous proposons"
-                    r"|we are pleased to offer|following options? (?:is|are) (?:also )?possible"
-                    r"|les options suivantes|l.option suivante|folgenden? optionen?", re.I)
+                    r"|we are pleased to offer", re.I)
+_OPTION_INTRO = re.compile(r"following options? (?:is|are) (?:also )?possible|les options suivantes|l.option suivante"
+                           r"|folgenden? optionen?", re.I)
+# An item line that is an option by its first word ("Option: ...", "Optional ...", "En option ..."): with
+# an option introduction, the only lines after the net total that are extras out of the sum (R35).
+_OPTION_START = re.compile(r"^\W*(?:\d+(?:\.\d+)*\.?\s+)?"
+                           r"(?:options?|optional|optionen|en\s+option|variante\s+option)\b", re.I)
 
 _DISCOUNT = re.compile(r"\b(?:remise|rabais|rabatt|discount|nachlass)", re.I)
 _OPTION = re.compile(r"\boption", re.I)
@@ -271,13 +276,16 @@ def classify(text: str, amounts: dict[str, float]) -> str:
     """machine | option | service | discount | other. `text` is the item's label; its first line
     (the item's own name) decides, so a description never turns a machine into a service. A service word
     before the machine name wins ('Training for the Paloma 3R operators'), after it the machine does
-    ('Paloma 3R cell including installation')."""
+    ('Paloma 3R cell including installation'). An option word wins unless a machine or a service word comes
+    before it ('Option: Paloma 2R second cell' but '1x Paloma 3R cell with optional vision', 'Installation
+    incl. options')."""
     first = text.split("\n", 1)[0]
     if any(v < 0 for v in amounts.values()) or _DISCOUNT.search(first):
         return "discount"
-    if _OPTION.search(first):
-        return "option"
     family, service = machines._FAMILY.search(first), _SERVICE.search(first)  # _FAMILY: what models_in finds
+    option = _OPTION.search(first)
+    if option and not any(m and m.start() < option.start() for m in (family, service)):
+        return "option"
     if family and not (service and service.start() < family.start()):
         return "machine"
     if service:
@@ -382,13 +390,15 @@ def _is_intro(line: str, following: str | None) -> bool:
     """An introduction of the items, with a label line after it: an intro phrase ('In this quotation, we
     kindly offer you:', 'The following options are also possible:'), or a line ending with ':' right above an
     item with a quantity or a machine ('Gerne unterbreiten wir Ihnen das folgende Angebot:' + '2x Presto 2R').
-    Never a line with a quantity or a machine itself; a line ending with ':' that names a kind ('Training:',
-    'Option N°2 au choix:') is the item."""
+    Never a line with a quantity or a machine itself; a line that names a kind ('Training:', 'Option N°2 au
+    choix:', 'Nous vous proposons la formation suivante:') is the item, unless it introduces options."""
     if following is None or _has_item(line):
         return False
-    if _INTRO.search(line):
+    if _OPTION_INTRO.search(line):
         return True
-    return line.endswith(":") and not _names_kind(line) and _has_item(following)
+    if _names_kind(line):
+        return False
+    return bool(_INTRO.search(line)) or (line.endswith(":") and _has_item(following))
 
 
 def _is_incoterm(line: str) -> bool:
@@ -401,15 +411,21 @@ def _is_incoterm(line: str) -> bool:
 
 def _delivered(label: list[str]) -> bool:
     """A delivered price ('CIP Berlin (INCOTERMS 2010) EUR ... CHF ...'): its last label line holds the
-    Incoterm, or 'Incoterms' under a line that holds the code ('FCA Ecublens' + '(Incoterms 2010)'), and no
-    label line names an item (quantity, machine, kind word): '1x Paloma 3R, livré DAP Lyon' and 'Transport
-    and insurance CIP Berlin' are ordinary lines that state their delivery term."""
-    if not label or any(_has_item(line) or _names_kind(line) for line in label if not _is_description(line)):
+    Incoterm, or 'Incoterms' under a line that holds the code ('FCA Ecublens' + '(Incoterms 2010)'). No label
+    line has a quantity or a machine ('1x Paloma 3R, livré DAP Lyon' is a line that states its delivery
+    term), and no other label line names a kind ('Transport and insurance' above 'CIP Berlin ...'); the
+    Incoterm line itself may ('Prix rendu DAP Lyon, transport et assurance compris')."""
+    if not label:
         return False
     if _is_incoterm(label[-1]):
-        return True
-    return (len(label) > 1 and bool(_INCOTERMS_WORD.search(label[-1])) and not _is_description(label[-2])
-            and bool(_INCOTERM.search(label[-2])))
+        at = len(label) - 1
+    elif (len(label) > 1 and _INCOTERMS_WORD.search(label[-1]) and not _is_description(label[-2])
+          and _INCOTERM.search(label[-2])):
+        at = len(label) - 2
+    else:
+        return False
+    return not any(_has_item(line) or (i != at and _names_kind(line))
+                   for i, line in enumerate(label) if not _is_description(line))
 
 
 def _item(label: list[str]) -> tuple[list[str], bool]:
@@ -427,14 +443,20 @@ def _item(label: list[str]) -> tuple[list[str], bool]:
             option_intro |= bool(_OPTION.search(line))  # "The following options are also possible:"
         elif not (following is not None and _is_incoterm(line) and not _has_item(line) and not _names_kind(line)):
             lines.append(line)  # else the Incoterm caption of the total above
-    start = 0
-    for i, line in enumerate(lines):
-        if _is_description(line) or line.startswith("("):
-            continue
-        if _has_item(line) or _names_kind(line):
-            start = i  # a kind word: an item name of its own
-            break
+    named = [i for i, line in enumerate(lines) if not _is_description(line) and not line.startswith("(")]
+    start = next((i for i in named if _has_item(lines[i]) or _names_kind(lines[i])), 0)
+    if not _has_item(lines[start]):  # a kind word yields to an item named below it ('Variante avec option
+        start = next((i for i in named if i > start and _starts_item(lines[i])), start)  # ...' + '1x Paloma 4R')
     return lines[start:], option_intro
+
+
+def _starts_item(line: str) -> bool:
+    """An item name: a quantity first, or a machine family among the first three words ('1x Paloma 4R',
+    'A Paloma D2 cell', 'Equipement 1 Presto DC'), not a sentence that mentions one ('Access to the Delfi')."""
+    if _QUANTITY.match(line):
+        return True
+    m = machines._FAMILY.search(_item_name(line))
+    return bool(m) and len(_item_name(line)[:m.start()].split()) <= 2
 
 
 def _blocks(pages: dict[int, str], nums: list[int]) -> list[_Block]:
@@ -540,8 +562,9 @@ def parse_section(pages: dict[int, str]) -> PriceSection | None:
     """The offer's price section: lines, totals per currency, sum check, exchange rates. None when not found.
 
     sum_ok is False (unreadable) when amounts have no label, a line with amounts mentions a total
-    without being a total label, priced lines other than options follow the total (options listed after
-    it are extras: kept, out of the sum, R35), or (without a total) an amount may hold a fused quantity.
+    without being a total label, priced lines other than extras follow the total (options listed after it,
+    _OPTION_START or an option introduction: kept, out of the sum, R35), or (without a total) an amount may
+    hold a fused quantity.
     A delivered price ('CIP Berlin (INCOTERMS 2010) ...') is the total when none is printed; after a
     printed total it is left out when it reaches that total, else it is a late line. Kind, quantity,
     family and model come from the item line (_item); the line's text starts there."""
@@ -558,6 +581,7 @@ def parse_section(pages: dict[int, str]) -> PriceSection | None:
             total_block, strength = b, s
     printed = dict(total_block.amounts) if total_block else {}
     lines: list[PriceLine] = []
+    extras: list[bool] = []  # per line: an option that may follow the total, out of the sum (R35)
     totals: dict[str, float] = {}
     delivered: dict[str, float] = {}
     total_at, delivered_at, unreadable, ambiguous = 0, 0, False, False
@@ -588,14 +612,18 @@ def parse_section(pages: dict[int, str]) -> PriceSection | None:
         ambiguous |= b.ambiguous
         lines.append(PriceLine(len(lines) + 1, text, "option" if option_intro and kind != "discount" else kind,
                                int(q.group(1)) if q else None, dict(b.amounts), b.page, family, model))
+        # R35: an extra after the total is announced by an option introduction, or its item line starts with
+        # an option word and has no quantity, machine or service word ('Option: vision system').
+        extras.append(option_intro and kind != "discount"
+                      or (kind == "option" and bool(_OPTION_START.match(item[0])) and not _has_item(item[0])
+                          and not _SERVICE.search(item[0])))
     text = "\n".join(pages[p] for p in nums)
-    if totals:
-        late = lines[total_at:]  # R13: a late line makes the sum unchecked, unless it is an option (R35)
-        sum_ok = (_sums_match(lines[:total_at], totals, text) and not unreadable
-                  and all(l.kind == "option" for l in late))
+    if totals:  # R13: a late line makes the sum unchecked, unless it is an extra (R35)
+        sum_ok = _sums_match(lines[:total_at], totals, text) and not unreadable and all(extras[total_at:])
     elif delivered:  # the delivered price is the total; it may follow or precede the lines
         totals = delivered
-        counted = lines[:delivered_at] + [l for l in lines[delivered_at:] if l.kind != "option"]
+        counted = lines if not delivered_at else lines[:delivered_at] + [  # extras after it: out of the sum
+            l for l, extra in zip(lines[delivered_at:], extras[delivered_at:]) if not extra]
         sum_ok = _sums_match(counted, totals, text) and not unreadable
     else:
         sum_ok = False if unreadable or ambiguous else None

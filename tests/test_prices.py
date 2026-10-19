@@ -609,6 +609,45 @@ def test_options_after_the_net_total_are_kept_out_of_the_sum():  # R35
     assert len(s.lines) == 3 and s.sum_ok is False  # R13: any other late line
 
 
+# --- fix round 2 of the real-data fixes ---
+
+@pytest.mark.parametrize("late, kind", [
+    ("1x Paloma 3R cell with optional vision CHF 280,000.00", "machine"),
+    ("Paloma 3R cell, options as described in chapter 4 CHF 350,000.00", "machine"),
+    ("Installation and commissioning incl. options CHF 20,000.00", "service"),
+    ("Variante avec option nettoyage\n1x Paloma 4R\nCHF 340,000.00", "machine"),
+])
+def test_a_stray_option_word_never_makes_a_late_line_an_extra(late, kind):
+    s = prices.parse_section({1: ITEMS + "PRICE, net, without taxes, CHF 325,000.00\n" + late})
+    assert len(s.lines) == 3 and s.lines[2].kind == kind and s.sum_ok is False
+
+
+@pytest.mark.parametrize("intro", ["Les options suivantes sont également possibles :",
+                                   "L'option suivante est également possible :", "Folgende Optionen sind möglich:",
+                                   "The following options are also possible:"])
+def test_option_introductions_in_three_languages(intro):
+    s = prices.parse_section({1: ITEMS + f"PRICE, net, without taxes, CHF 325,000.00\n{intro}\n1 Spreader CHF 5,000.00"})
+    assert (s.lines[2].text, s.lines[2].kind) == ("1 Spreader", "option") and s.sum_ok is True
+
+
+def test_an_intro_phrase_naming_a_service_is_the_item():
+    s = prices.parse_section({1: "PRIX\nCellule Paloma 4R EUR 300 000.-\nNous vous proposons la formation suivante:\n"
+                                 "2 jours sur site\nEUR 6 000.-\nPrix total net HT EUR 306 000.-"})
+    assert (s.lines[1].kind, s.lines[1].text) == ("service", "Nous vous proposons la formation suivante: 2 jours sur site")
+
+
+def test_a_delivered_total_naming_transport_stays_the_total():
+    s = prices.parse_section({1: ITEMS.replace("CHF", "EUR") + "Prix rendu DAP Lyon, transport et assurance compris "
+                                                               "EUR 325,000.00"})
+    assert len(s.lines) == 2 and s.totals == {"EUR": 325000.0} and s.sum_ok is True
+
+
+def test_a_delivered_total_opening_the_list_counts_its_options():
+    s = prices.parse_section({1: "PRICE\nCIP Berlin (Incoterms 2010) CHF 325,000.00\nPaloma 4R cell CHF 300,000.00\n"
+                                 "Option: vision system CHF 25,000.00"})
+    assert len(s.lines) == 2 and s.totals == {"CHF": 325000.0} and s.sum_ok is True
+
+
 def test_footer_and_header_shapes_in_a_description_are_kept():
     s = prices.parse_section({1: "PRICE\nVision system CHF 25,000.00\n- see www.example.com for specs\n"
                                  "- Delivery 12.03.2025 per order 3001234\nPRICE, net, without taxes, CHF 25,000.00"})
