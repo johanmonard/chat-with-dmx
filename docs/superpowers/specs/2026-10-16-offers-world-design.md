@@ -291,11 +291,13 @@ Rules every one of them follows:
   say only CHF is binding); an offer without that currency is left out and named.
 - **Default: last revision of each offer** for trends and counts; every revision for the history
   of a client or an offer.
-- **Default scope of price trends** (designer's call): firm offers of the client folders and the
-  archive. Budget offers and partner offers (`06_Offres IPSO`, `07_Offres_Wyzo`, whose prices may
-  be to the partner) are left out by default, counted in the coverage line, and included with
-  `offer_type=` / `category=` filters. Counts (`offer_stats`) include every offer and can be
-  grouped by `offer_type` and `category`.
+- **Default scope of price trends**: the offers of the client folders and the archive, firm and
+  budget. Budget offers are included and marked: each chart row carries an `offer_type` column so
+  charts can mark budget points; `offer_type="firm"` excludes them (user's decision, 2026-10-19,
+  after the first real run; the designer's first call left them out). Partner offers
+  (`06_Offres IPSO`, `07_Offres_Wyzo`, whose prices may be to the partner) are left out by default,
+  counted in the coverage line, and included with `category=`. Counts (`offer_stats`) include every
+  offer and can be grouped by `offer_type` and `category`.
 - Every row carries its source file and page, so Claude can cite each point and the user can
   open it.
 

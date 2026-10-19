@@ -562,6 +562,66 @@ def test_values_below_50_are_not_amounts():
     assert len(s.lines) == 2 and s.sum_ok is True
 
 
+# --- fix round 1 of the real-data fixes ---
+
+def test_an_item_stating_its_delivery_term_stays_a_line():
+    s = prices.parse_section({1: "PRIX\n1x Paloma 3R, livré DAP Lyon\nEUR 400 000.-\nFormation EUR 5 000.-\n"
+                                 "Prix total net HT EUR 405 000.-"})
+    assert [(l.kind, l.model) for l in s.lines] == [("machine", "Paloma 3R"), ("service", None)]
+    assert s.lines[0].text == "1x Paloma 3R, livré DAP Lyon" and s.sum_ok is True
+    s = prices.parse_section({1: "PRICE\n1x Paloma 3R cell\nFCA Ecublens (Incoterms 2010)\nCHF 400,000\n"
+                                 "Training CHF 5,000"})
+    assert [l.text for l in s.lines] == ["1x Paloma 3R cell FCA Ecublens (Incoterms 2010)", "Training"]
+    assert s.lines[0].kind == "machine" and s.totals == {} and s.sum_ok is None
+
+
+@pytest.mark.parametrize("late, kind", [("Transport and insurance CIP Berlin (Incoterms 2010) CHF 12,000.00", "service"),
+                                        ("CIP Berlin (Incoterms 2010) CHF 12,000.00", "other")])
+def test_a_delivered_price_below_the_net_total_is_a_late_line(late, kind):
+    s = prices.parse_section({1: ITEMS + "PRICE, net, without taxes, CHF 325,000.00\n" + late})
+    assert len(s.lines) == 3 and s.lines[2].kind == kind and s.sum_ok is False
+
+
+def test_clean_in_place_is_no_incoterm():
+    s = prices.parse_section({1: ITEMS + "CIP Cleaning station CHF 25,000.00\nPRICE, net, without taxes, CHF 350,000.00"})
+    assert len(s.lines) == 3 and s.lines[2].text == "CIP Cleaning station" and s.sum_ok is True
+    s = prices.parse_section({1: ITEMS + "PRICE, net, without taxes, CHF 325,000.00\nOption CIP Cleaning station CHF 25,000.00"})
+    assert len(s.lines) == 3 and s.lines[2].kind == "option" and s.sum_ok is True  # R35: an option after the total
+
+
+@pytest.mark.parametrize("label, kind, text", [
+    ("Training:\n3 days at the customer site", "service", "Training: 3 days at the customer site"),
+    ("Installation and commissioning:\nOn site, 10 days", "service", "Installation and commissioning: On site, 10 days"),
+    ("Option N°2 au choix:\nCellule supplémentaire", "option", "Option N°2 au choix: Cellule supplémentaire"),
+])
+def test_a_colon_line_naming_a_kind_is_the_item(label, kind, text):
+    s = prices.parse_section({1: f"PRICE\nPaloma 4R cell CHF 300,000.00\n{label}\nCHF 6,000.00\n"
+                                 "PRICE, net, without taxes, CHF 306,000.00"})
+    assert (s.lines[1].kind, s.lines[1].text) == (kind, text) and s.sum_ok is True
+
+
+def test_options_after_the_net_total_are_kept_out_of_the_sum():  # R35
+    s = prices.parse_section({1: ITEMS + "PRICE, net, without taxes, CHF 325,000.00\n"
+                                         "The following options are also possible:\nSecond infeed CHF 40,000.00\n"
+                                         "Option: spare parts kit CHF 12,000.00"})
+    assert [l.kind for l in s.lines] == ["machine", "option", "option", "option"] and s.sum_ok is True
+    s = prices.parse_section({1: ITEMS + "PRICE, net, without taxes, CHF 325,000.00\nTraining CHF 4,000.00"})
+    assert len(s.lines) == 3 and s.sum_ok is False  # R13: any other late line
+
+
+def test_footer_and_header_shapes_in_a_description_are_kept():
+    s = prices.parse_section({1: "PRICE\nVision system CHF 25,000.00\n- see www.example.com for specs\n"
+                                 "- Delivery 12.03.2025 per order 3001234\nPRICE, net, without taxes, CHF 25,000.00"})
+    assert s.lines[0].text == ("Vision system - see www.example.com for specs - Delivery 12.03.2025 per order "
+                               "3001234")
+
+
+def test_a_numbered_item_with_its_description_is_not_a_heading():
+    s = prices.parse_section({1: "PRICE\nPaloma 4R cell CHF 300,000.00\n2. Equipment upgrade\n- new grippers\n"
+                                 "CHF 30,000.00\nPRICE, net, without taxes, CHF 330,000.00"})
+    assert s.lines[1].text == "2. Equipment upgrade - new grippers" and s.sum_ok is True
+
+
 def test_offer_date_before_1990_or_far_ahead_is_no_date():
     far = (date.today() + timedelta(days=400)).strftime("%d.%m.%Y")
     near = (date.today() + timedelta(days=300)).strftime("%d.%m.%Y")
