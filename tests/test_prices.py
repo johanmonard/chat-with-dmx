@@ -719,3 +719,243 @@ def test_model_sum_uses_the_same_tolerance(fake_ollama):
                                         {"name": "Training", "amounts": {"CHF": 3500}}], "totals": {"CHF": 1940000}})
     page = "Paloma 3R cell CHF 1,940,000.-\nTraining CHF 3,500.-\nTotal CHF 1,940,000.-"
     assert prices.parse_with_model(fake_ollama.url, "test-vision", {1: page}, timeout=10).sum_ok is False
+
+
+# --- fixes from the 30-offer spot check (2026-10-19) ---
+
+TABLE_FR = ("Pos | Désignation | Qté | Prix/unit. CHF | Total CHF\n"
+            "Engineering :\n"
+            "1 | Prestation interne | 1 | | 12'000.00\n"
+            "Fourniture de matériel comprenant :\n"
+            "2 | Ensemble de 2 systèmes de vision ACME comprenant : Un PC | 1 | | 40'000.00\n"
+            "Montage sur site (2 hommes) :\n"
+            "3 | Monteur en externe, en régie : câblage | ~100 h | 120.00 | 12'000.00\n"
+            "| Total | | CHF | 64'000.00\n"
+            "Pour la position 3, la durée de travail est une estimation.")
+
+
+def test_a_table_with_the_currency_in_its_column_header_is_read():
+    s = prices.parse_section({2: TABLE_FR})
+    assert s.pages == [2] and s.totals == {"CHF": 64000.0} and s.sum_ok is True
+    assert [l.amounts for l in s.lines] == [{"CHF": 12000.0}, {"CHF": 40000.0}, {"CHF": 12000.0}]
+    assert s.lines[2].kind == "service" and not any("|" in l.text for l in s.lines)
+    assert s.lines[0].text == "Engineering : Prestation interne"  # the position number and quantity cells are left out
+
+
+def test_a_deduction_after_the_table_total_is_kept_out_of_the_sum():  # R36
+    s = prices.parse_section({2: "Pos | Designation | Qty | Unit price | Total €uro\n"
+                                 "1 | Training package for technicians | 2 | 2'000.00 | 4'000.00\n"
+                                 "2 | Travel package 5 days | 1 | 1'500.00 | 1'500.00\n"
+                                 "| Total | | €uro | 5'500.00\n"
+                                 "Special deduction:\n"
+                                 "| As agreed with the ACME order, 8 hours deduction | -1 | 600.00\n"})
+    assert s.totals == {"EUR": 5500.0} and [l.kind for l in s.lines] == ["service", "service", "discount"]
+    assert s.lines[2].amounts == {"EUR": 600.0} and s.sum_ok is True
+
+
+def test_included_items_are_lines_without_amounts():
+    s = prices.parse_section({13: "PRIX\nPrix, net, hors taxe\nEquipement (selon §5.3) € Inclus\n"
+                                  "Emballage, transport et assurance € Inclus\nMontage dans votre usine € Inclus\n"
+                                  "Total: € 180'000.--\nCIP Lyon (France)\nIncoterms 2000"})
+    assert s.pages == [13] and s.totals == {"EUR": 180000.0} and s.sum_ok is None  # nothing priced to check
+    assert [(l.kind, l.amounts) for l in s.lines] == [("machine", {}), ("service", {}), ("service", {})]
+    assert s.lines[0].text == "Equipement (selon §5.3) € Inclus"
+
+
+def test_included_items_named_before_inclus_and_a_paragraph_between_them():
+    s = prices.parse_section({4: "2. Proposition\nNous avons le plaisir de vous proposer l'équipement suivant :\n"
+                                 "2 Paloma 4R composés chacun de : Inclus\n• 2 Bâtis en acier\n• 4 Robots delta\n"
+                                 "Des jours additionnels sont possibles sur demande au tarif\n"
+                                 "de CHF 1'100.- par jour supplémentaire.\n"
+                                 "1 Installation et Mise en Service à Lyon Inclus\n"
+                                 "L'installation et la mise en service est effectuée par\n"
+                                 "ACME SA et est prévue pour 6 semaines,\nles frais de voyage sont inclus.\n"
+                                 "Emballage, Transport et Assurance Inclus\n"
+                                 "PRIX TOTAL, net, hors taxes, EUR 900,000.- CHF 1,000,000.-\nDAP Lyon (INCOTERMS 2010)"})
+    assert [l.kind for l in s.lines] == ["machine", "service", "service"] and s.sum_ok is None
+    assert s.lines[0].text.startswith("2 Paloma 4R composés chacun de : Inclus • 2 Bâtis")
+    assert s.lines[1].text == "1 Installation et Mise en Service à Lyon Inclus"
+    assert s.lines[2].text == "Emballage, Transport et Assurance Inclus"
+    assert s.totals == {"EUR": 900000.0, "CHF": 1000000.0}
+
+
+def test_headings_cut_the_text_before_them_and_not_included_items_are_no_lines():
+    doc = prices.parse_section({13: "# PRIX\n## Emballage, transport et assurance\nNon inclus\n"
+                                    "## Prix, net, hors taxe, EXW Ecublens (INCOTERMS 2000)\n"
+                                    "Equipement (selon §6.3) CHF 500'000.--\nMise en service (selon §9.2) CHF 40'000.--\n"})
+    assert [(l.text, l.kind) for l in doc.lines] == [("Equipement (selon §6.3)", "machine"),
+                                                     ("Mise en service (selon §9.2)", "service")]
+    pdf = prices.parse_section({10: "9. SERVICES INCLUS\n9.1. Services inclus dans le prix de l'équipement\n"
+                                    "Les applications définies seront contrôlées avant livraison.\n"
+                                    "9.2. Services inclus dans le prix de la mise en service\n"
+                                    "Une formation est comprise dans le prix de la mise en service.\n"
+                                    "10. PRIX\n10.1. Emballage, transport et assurance\n"
+                                    "Inclus dans le prix de l'équipement au point 10.2.\n"
+                                    "10.2. Prix, net, hors taxe, CIP Lyon (INCOTERMS 2000)\n"
+                                    "Equipement (selon §6.2) CHF 493'000.-- (€ 316'000.--)\n"
+                                    "Mise en service (selon §9.2) CHF 32'600.-- (€ 20'900.--)\n"
+                                    "Le seul prix valable est celui en francs suisses (CHF)."})
+    assert [l.kind for l in pdf.lines] == ["service", "machine", "service"] and pdf.lines[0].amounts == {}
+    assert pdf.lines[0].text.startswith("10.1. Emballage") and pdf.lines[1].text == "Equipement (selon §6.2)"
+
+
+def test_a_budgetary_price_section_with_written_quantity_and_an_option_heading():
+    s = prices.parse_section({9: "9.2.3. Operating training at your location during installation\n"
+                                 "10. BUDGETARY PRICE\n10.1. Packaging, Transport & Insurance\nNot included\n"
+                                 "10.2. Price, net, without taxes, EXW Ecublens (INCOTERMS 2000)\n"
+                                 "Equipment (according to §6.2 & §9.1)\n"
+                                 "Four (4) Presto machine CHF 900'000.-- (€ 600'000.--)\n"
+                                 "Installation and setup of one line in Lyon\n(according to §9.2) CHF 20'000.-- (€ 13'000.--)\n"
+                                 "10.3. OPTION\nExtra bucket chain\n(according to §6.2) CHF 7'000.-- (€ 4'700.--)\n"})
+    assert [(l.kind, l.quantity, l.family) for l in s.lines] == [("machine", 4, "Presto"), ("service", None, None),
+                                                                ("option", None, None)]
+    assert "Four (4) Presto machine" in s.lines[0].text and s.lines[1].text.startswith("Installation and setup")
+
+
+def test_the_line_carrying_the_amount_is_the_item_not_the_paragraph_above():
+    s = prices.parse_section({4: "2. Angebot\nGerne unterbreiten wir Ihnen das folgende Angebot:\n"
+                                 "1x Paloma 3R einschliesslich: (EUR 500 000.-) CHF 510 000.-\n"
+                                 "• 3 Delta Roboter\n• 1 Tag für die Werksabnahme (FAT)\n"
+                                 "Zusätzliche Tage sind auf Anfrage zum Preis von CHF\n1'100 pro Zusatztag möglich.\n"
+                                 "2 Infeed belt conveyor (EUR 30 000.-) CHF 30 600.-\n"
+                                 "Installation and commissioning (EUR 100 000.-) CHF 102 000.-\n"
+                                 "Installation und Einrichtung erfolgen durch ACME SA, geplante Dauer 50 Mann Tage.\n"
+                                 "Reisekosten, Unterkunft und Verpflegung im Preis\ninbegriffen.\n"
+                                 "Verpackung, Transport und Versicherung (EUR 15 000.-) CHF 15 300.-\n"
+                                 "PREIS, netto, ohne Steuern, (EUR 645 000.-) CHF 657 900.-"})
+    assert [(l.text, l.kind) for l in s.lines[1:]] == [("2 Infeed belt conveyor", "machine"),
+                                                       ("Installation and commissioning", "service"),
+                                                       ("Verpackung, Transport und Versicherung", "service")]
+    assert s.sum_ok is True
+
+
+@pytest.mark.parametrize("page, texts, kinds", [
+    ("1. Introduction\nRegarding your request, we propose an assessment of your line.\n"
+     "The goal is to understand the situation.\n2. Proposal\nIn this quotation, we kindly offer you:\n"
+     "Specialist intervention CHF 7'000.-\nThe intervention will be performed by ACME SA and\n"
+     "is planned for 1 man-day with 1 travel included\n(additional travels will be charged). Travelling fees are included.\n"
+     "One extra day on-site CHF 2'000.-\nTOTAL PRICE, net, without taxes, CHF 9'000.-",
+     ["Specialist intervention", "One extra day on-site"], ["service", "service"]),
+    ("1. Proposition\nPour donner suite à nos conversations, nous vous faisons parvenir cette offre.\n"
+     "1 Globex Sidebot EUR 80,000.-\nSidebot complet avec un bâti en cantilever, robot Delta 4 axes\n(tracking)\n"
+     "1 Smart Caméra avec support et licences EUR 9,000.-\nCaméra intelligente couleur 1920x1200.\n"
+     "Support mécanique inclus.\n1 Emballage, Transport et Assurance EUR 3,000.-\nPRIX TOTAL, net, hors taxes, EUR 92,000.-",
+     ["1 Globex Sidebot", "1 Smart Caméra avec support et licences", "1 Emballage, Transport et Assurance"],
+     ["machine", "other", "service"]),
+])
+def test_text_of_the_previous_item_is_not_glued_to_the_next(page, texts, kinds):
+    s = prices.parse_section({3: page})
+    assert [l.text for l in s.lines] == texts and [l.kind for l in s.lines] == kinds and s.sum_ok is True
+
+
+def test_options_after_the_total_on_the_next_page_are_read():
+    s = prices.parse_section({3: "2x Presto DC each including : | (USD 700'000.-) | CHF 630'000.-\n"
+                                 "1 Painted mild steel frame including electrical cabinet 1 Delta robot 1 HMI screen "
+                                 "Preparation and tests for 2 recipes\n"
+                                 "2x Erecting x 3 (include 2 formats) Format versatility: automatic former | "
+                                 "(USD 600'000.-) | CHF 540'000.-\n"
+                                 "Installation and commissioning Presto | (USD 100'000.-) | CHF 90'000.-\n"
+                                 "TOTAL PRICE, net, without taxes, DAP Ecublens (INCOTERMS 2020) | (USD 1'400'000.-) | "
+                                 "CHF 1'260'000.-\nThe following options are also possible:\n",
+                              4: "2 Checkweigher High-speed accuracy | (USD 100'000.-) | CHF 90'000.-\n"
+                                 "Installation and commissioning Casepacker | (USD 200'000.-) | CHF 180'000.-\n"
+                                 "Only prices in Swiss Francs are valid (CHF). As indication, 1.00 USD = 0.9 CHF.\n"})
+    assert s.pages == [3, 4] and len(s.lines) == 5 and s.sum_ok is True
+    assert s.lines[1].text.startswith("2x Erecting x 3") and (s.lines[1].kind, s.lines[1].quantity) == ("machine", 2)
+    assert [l.kind for l in s.lines[3:]] == ["option", "option"]
+    s = prices.parse_section({4: "PREIS\n1x Paloma 3R CHF 300 000.-\nInstallation CHF 20 000.-\n"
+                                 "PREIS, netto, ohne Steuern, CHF 320 000.-\nFCA Ecublens (INCOTERMS 2020)",
+                              5: "ACME GmbH 3001234 - 00 18.07.2022\nDie folgenden Optionen sind ebenfalls möglich:\n"
+                                 "2 Additional robot CHF 140 000.-\n2 Additional end effector CHF 22 000.-\n"
+                                 "Nur Preise in Schweizer Franken (CHF) sind gültig."})
+    assert s.pages == [4, 5] and [l.kind for l in s.lines] == ["machine", "service", "option", "option"]
+    assert s.sum_ok is True
+
+
+def test_items_on_the_page_before_the_total_page_are_read():
+    pages = {2: "1. Proposal\nIn this quotation, we kindly offer you:\n"
+                "1x Paloma 7R including : (EUR 700’000.-) CHF 680’000.-\n• 7 Delta robots\n"
+                "1 Output conveyor (EUR 70’000.-) CHF 68’000.-\n",
+             3: "Packaging (EUR 10’000.-) CHF 9’700.-\nTOTAL PRICE, net, without taxes, (EUR 780’000.-) CHF 757’700.-\n"
+                "FCA Ecublens (INCOTERMS 2020)"}
+    s = prices.parse_section(pages)
+    assert s.pages == [2, 3] and [l.kind for l in s.lines] == ["machine", "machine", "service"] and s.sum_ok is True
+    assert prices.price_pages({1: ITEMS + "TOTAL CHF 325,000.00", 2: "Spare parts CHF 5,000 and CHF 2,000"}) == [1]
+
+
+def test_a_total_currency_no_line_carries_is_a_conversion_of_the_total():
+    s = prices.parse_section({4: "PRICE\n1 Delfi 2R including: CHF 325,000.-\n1 Buffer conveyor of 10m CHF 29,000.-\n"
+                                 "Packaging for ACME Equipment CHF 3,000.-\n"
+                                 "TOTAL PRICE, net, without taxes, EUR 347,000.- CHF 357,000.-"})
+    assert s.totals == {"EUR": 347000.0, "CHF": 357000.0} and s.sum_ok is True and s.lines[2].kind == "service"
+    s = prices.parse_section({4: "PRICE\nPaloma 4R cell EUR 300,000.-\nTOTAL PRICE, net, without taxes, CHF 320,000.-"})
+    assert s.sum_ok is False  # no line in the total's currency: nothing checked
+
+
+def test_the_machine_named_after_a_generic_equipment_price_belongs_to_it():
+    s = prices.parse_section({4: "2. Proposal\nEquipment\nIn this quotation, we kindly offer you:\n"
+                                 " Equipment (EUR 244’000.-) CHF 320’000.-\n"
+                                 "1 Paloma 2R Top Loader cell including each :\n Two Delta Robots\n One Controller\n"
+                                 " Installation and setup 8 to 10% equipment price\n"
+                                 " Packaging, transport and insurance Not included\n"
+                                 "PRICE, net, without taxes,\nFCA Ecublens (INCOTERMS 2000) (EUR 244’000.-) CHF 320’000.-"})
+    assert len(s.lines) == 1 and (s.lines[0].kind, s.lines[0].model) == ("machine", "Paloma 2R")
+    assert "1 Paloma 2R Top Loader cell" in s.lines[0].text
+    assert s.totals == {"CHF": 320000.0, "EUR": 244000.0} and s.sum_ok is True
+
+
+@pytest.mark.parametrize("text, kind", [
+    ("Equipement (selon §6.2)", "machine"), ("Equipment (according to §6.2 & §9.1)", "machine"),
+    ("Lieferumfang", "machine"), ("2 Infeed belt conveyor", "machine"), ("1 case erector + closer", "machine"),
+    ("Packaging", "service"), ("Packaging for ACME equipment", "service"), ("Transportation Cost", "service"),
+    ("Monteur en externe, en régie", "service"), ("Montage dans votre usine", "service"),
+    ("1 ACME Supply I&C in Lyon (1)", "service"), ("Specialist intervention", "service"),
+    ("One extra day on-site", "service"), ("Special deduction 8 hours", "discount"),
+    ("Packaging line with Paloma 3R", "machine"), ("Spare parts kit", "other"),
+])
+def test_classify_equipment_services_and_deductions(text, kind):
+    assert prices.classify(text, {}) == kind
+
+
+@pytest.mark.parametrize("pages, name, kind", [
+    ({1: "Offre budgétaire n° 250001 Version 1"}, "x.pdf", "budget"),
+    ({1: "ACME (Globex) – Price indication B-1112001 V1"}, "x.doc", "budget"),
+    ({3: "Indication de prix pour une cellule Paloma"}, "x.pdf", "budget"),
+    ({2: "Preisindikation"}, "x.pdf", "budget"), ({1: "Richtangebot"}, "x.pdf", "budget"),
+    ({1: "Budget offer"}, "x.pdf", "budget"),
+    ({1: "Offre", 2: "Pour les positions 4 et 5, la durée de travail est une estimation."}, "x.pdf", "firm"),
+    ({1: "Offer", 2: "Prices in EUR are indicative only, at the rate of the day."}, "x.pdf", "firm"),
+    ({1: "Offer", 4: "Budgetary offer"}, "x.pdf", "firm"),  # the wording counts on pages 1-3 only
+])
+def test_offer_type_wording(pages, name, kind):
+    assert prices.offer_type(pages, name) == kind
+
+
+def test_model_zero_amounts_and_day_rates_are_no_prices(fake_ollama):
+    _model_says(fake_ollama, {"lines": [{"name": "Vision systems", "amounts": {"CHF": 0}},
+                                        {"name": "Paloma 2R cell", "amounts": {"CHF": 1100}}], "totals": {"CHF": 0}})
+    page = "cell equipment negotiation 0 indication days:1100 CHF/Day) 10% included"
+    assert prices.parse_with_model(fake_ollama.url, "test-vision", {1: page}, timeout=10) is None
+    cached = prices.PriceSection([prices.PriceLine(1, "Paloma 2R cell", "machine", None, {"CHF": 300000.0}, 1),
+                                  prices.PriceLine(2, "Training", "service", None, {"CHF": 0.0}, 1)],
+                                 {"CHF": 0.0}, [], [1], False)
+    s = prices.clean_model(cached, {1: "Paloma 2R cell CHF 300,000.-\nTraining 0"})
+    assert [l.text for l in s.lines] == ["Paloma 2R cell"] and s.totals == {} and s.sum_ok is None
+
+
+def test_a_price_quoted_in_a_sentence_is_no_line():
+    s = prices.parse_section({2: "PRICE\nTraining package CHF 4'000.-\nTravel package CHF 1'500.-\n"
+                                 "TOTAL PRICE, net, without taxes, CHF 5'500.-\n"
+                                 "The operator training is given during commissioning. A credit note of CHF 600.- , "
+                                 "that is 8 hours, will be issued in favour of ACME with this order.\n"})
+    assert [l.text for l in s.lines] == ["Training package", "Travel package"] and s.sum_ok is True
+
+
+def test_an_option_word_deep_in_a_long_description_is_no_option():
+    assert prices.classify("2x Erecting x 3 Format versatility: automatic former with an optional extended head", {}) \
+        == "machine"
+    assert prices.classify("Option: second infeed with its own conveyor and a vision camera on top", {}) == "option"
+
+
+def test_offer_date_with_of_between_day_and_month():
+    assert prices.offer_date({1: "Written by ACME, the 10th of February 2006"}) == ("2006-02-10", "10th of February 2006")

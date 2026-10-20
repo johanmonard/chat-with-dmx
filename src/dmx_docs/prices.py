@@ -86,14 +86,28 @@ _NUMBERING = re.compile(r"^\W*\d+(?:\.\d+)*\.?\s+")
 _HEADING = re.compile(r"(?:\d+(?:\.\d+)*\.?\s*)?(?:prix|prices?|preise?)(?:\s*/\s*(?:prix|prices?|preise?))*", re.I)
 _RUNNING = re.compile(r"(?=.*\b(?:offer|offre|angebot))(?=.*\d{5})", re.I)  # "Offer 3001234 - ACME - Paloma 4R"
 _PAGE_NO = re.compile(r"^\s*(?:page|seite)\s+\d+(?:\s*(?:/|of|von|sur|de)\s*\d+)?\s*$", re.I)
-_DESCRIPTION = re.compile(r"[-•*–]|(?:including|inkl|einschliesslich|einschließlich|y compris|comprenant)\b",
-                          re.I)
-_QUANTITY = re.compile(r"^\s*(\d+)\s*[x×](?=\s|[^\W\d_])")  # "2x Paloma", "2 x Paloma", "2xPaloma"
+# A description line: a bullet (also the Wingdings bullets of Word documents, U+F0xx) or an including-word.
+_DESCRIPTION = re.compile(r"[-•*–▪●◦►➢✓-]|(?:including|inkl|einschliesslich|einschließlich|y compris"
+                          r"|comprenant)\b", re.I)
+_NUMBER_WORD = (r"(?:one|two|three|four|five|six|seven|eight|nine|ten|un|une|deux|trois|quatre|cinq|sept|huit"
+                r"|neuf|dix|ein|eine|zwei|drei|vier|fünf|sechs|sieben|acht|neun|zehn)")
+# "2x Paloma", "2 x Paloma", "2xPaloma", "Four (4) Presto": group 1 or group 2 is the quantity.
+_QUANTITY = re.compile(rf"^\s*(?:(\d+)\s*[x×](?=\s|[^\W\d_])|(?i:{_NUMBER_WORD})\s*\((\d+)\)(?=\s))")
+# A count before a name ('1 Wyzo Sidebot', '2 Infeed belt conveyor'): an item's name when it carries the amount.
+_BARE_COUNT = re.compile(r"^\s*\d{1,3}\s+[^\W\d_]")
+# Included items ('Equipement € Inclus', 'Emballage, Transport et Assurance Inclus', 'Included in the equipment
+# price'): a line without amounts; not a sentence ('... sont inclus.'). Not included items are no lines.
+_INCL = r"(?:inclus|incluse?s?|included|inbegriffen|inklusive|compris|enthalten)"
+_INCLUDED_START = re.compile(rf"^\W*{_INCL}\b", re.I)
+_INCLUDED_END = re.compile(rf"(?:(?:{_CUR}|[|:])[{_SP}]*(?i:{_INCL})|[{_SP}](?:Inclus|Included|Inbegriffen|Inklusive"
+                           rf"|INCLUS|INCLUDED))[{_SP}]*$")
+_NOT_INCLUDED = re.compile(r"(?i:non|not|nicht|pas)\s+(?i:inclus|included|inbegriffen|compris|enthalten)\b")
+_MD_HEADING = re.compile(r"^#{1,6}\s+")  # a heading of a Word document's text ('## Prix, net, hors taxe')
 # A page header repeated on each page: an offer number and a date ("ACME 3001234 - 02 04.11.2024").
 _OFFER_NO = re.compile(r"(?<!\d)\d{7}(?!\d)|(?<![A-Za-z0-9])[BFE]-\d{6,7}(?!\d)")
 _NUM_DATE = re.compile(r"(?<![\d.])(?:\d{1,2}\.\d{1,2}\.\d{4}|\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2})(?!\d)")
 # A numbered section heading ("2. Proposal", "2. Proposition Equipement"), short and without amounts.
-_SECTION = re.compile(r"^\d+(?:\.\d+)*\.?\s*(?:proposal|proposition|angebot|offer|offre|equipment|équipement"
+_SECTION = re.compile(r"^\d+(?:\.\d+)*\.?\s*(?:proposal|proposition|angebot|vorschlag|offer|offre|equipment|équipement"
                       r"|equipement|ausrüstung|prix|price|preis)\b", re.I)
 # The company's footer and letterhead: name, group, address with a CH- postcode, web site, phone.
 _STREET = (r"(?:\b(?:route|rue|chemin|avenue|place|via|street|road)\b|\b(?:rte|ch|av)\."
@@ -114,7 +128,7 @@ _INCOTERMS_WORD = re.compile(r"\bincoterms?\b", re.I)
 # The introduction of the offered items ("In this quotation, we kindly offer you:") and of options
 # ("The following options are also possible:"): left out of the item's label.
 _INTRO = re.compile(r"we kindly offer you|nous avons le plaisir de vous propos|wir freuen uns|nous vous proposons"
-                    r"|we are pleased to offer", re.I)
+                    r"|we are pleased to offer|wir schlagen ihnen", re.I)
 _OPTION_INTRO = re.compile(r"following options? (?:is|are) (?:also )?possible|les options suivantes|l.option suivante"
                            r"|folgenden? optionen?", re.I)
 # An item line that is an option by its first word ("Option: ...", "Optional ...", "En option ..."): with
@@ -123,11 +137,18 @@ _VARIANT = re.compile(r"^\W*(?:\d+(?:\.\d+)*\.?\s+)?(?:variante?|alternative)\b"
 _OPTION_START = re.compile(r"^\W*(?:\d+(?:\.\d+)*\.?\s+)?"
                            r"(?:options?|optional|optionen|en\s+option|variante\s+option)\b", re.I)
 
-_DISCOUNT = re.compile(r"\b(?:remise|rabais|rabatt|discount|nachlass)", re.I)
+_DISCOUNT = re.compile(r"\b(?:remise|rabais|rabatt|discount|nachlass|d[ée]duction|abzug|gutschrift)", re.I)
 _OPTION = re.compile(r"\boption", re.I)
 _SERVICE = re.compile(r"\b(?:installation|inbetriebnahme|mise en service|commissioning|training|formation|schulung"
-                      r"|travel|reise|déplacement|transport|documentation|sat|fat)\b", re.I)
-_MACHINE = re.compile(r"\b(?:cells?|cellules?|zellen?|lines?|lignes?|linien?|robot\w*)\b", re.I)
+                      r"|travel|reise|déplacement|transport|transportation|documentation|sat|fat|montage|monteur"
+                      r"|supervision|intervention|on[- ]site|I&C)(?![\w&])", re.I)
+# Machine words: a cell or line, and the equipment of an offer ('Equipement (selon §6.2)', conveyors, case packers).
+_MACHINE = re.compile(r"\b(?:cells?|cellules?|zellen?|lines?|lignes?|linien?|robot\w*|equipment|[ée]quipements?"
+                      r"|ausrüstung|lieferumfang|conveyors?|convoyeurs?|förder\w*|case ?packers?|encaisseuses?"
+                      r"|erect(?:ors?|ing)|formeuses?|fermeuses?|closers?|denesters?|dépileurs?|sidebots?)\b", re.I)
+# Packaging as the item itself ('Packaging', 'Emballage', 'Packaging for ACME equipment'): crating, a service.
+_PACKING = re.compile(r"^\W*(?:\d+\s*[x×]?\s*)?(?:packaging|emballage|verpackung)\b"
+                      r"(?!\s+(?:cells?|lines?|machines?|robots?|systems?|modules?)\b)", re.I)
 
 _MONTHS = {
     "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6, "july": 7, "august": 8,
@@ -141,14 +162,18 @@ _MONTH = "|".join(sorted(map(re.escape, _MONTHS), key=len, reverse=True))
 _DATE = re.compile(
     rf"\b(?:(?P<d1>\d{{1,2}})[./](?P<m1>\d{{1,2}})[./](?P<y1>\d{{4}})"
     rf"|(?P<y2>\d{{4}})-(?P<m2>\d{{2}})-(?P<d2>\d{{2}})"
-    rf"|(?P<d3>\d{{1,2}})(?:\.|er|st|nd|rd|th)?\s+(?P<m3>{_MONTH})\s+(?P<y3>\d{{4}})"
+    rf"|(?P<d3>\d{{1,2}})(?:\.|er|st|nd|rd|th)?(?:\s+of)?\s+(?P<m3>{_MONTH})\s+(?P<y3>\d{{4}})"
     rf"|(?P<m4>{_MONTH})\s+(?P<d4>\d{{1,2}})(?:st|nd|rd|th)?,?\s+(?P<y4>\d{{4}}))(?!\d)", re.I)
 # Sentence ends: a line break, or . ! ? after a non-digit ("1. November 2011" is not an end).
 _SENTENCE_END = re.compile(r"\n|(?<=[^\d\s][.!?])\s+")
 _RATE_WORDS = re.compile(r"tageskurs|wechselkurs|taux de change|cours de change|exchange rate|rate of exchange", re.I)
 # Looser hints, only for a date in parentheses: "actual rate (November 1st, 2011)", "cours du jour (12.03.2019)".
 _RATE_HINT = re.compile(r"\brates?\b|\bcours\b|kurs|\btaux\b|\bexchange\b", re.I)
-_BUDGET = re.compile(r"\b(?:budget|budgetary|richtpreis|prix indicatif|indicative|estimation)", re.I)
+# Budget wording on pages 1-3 or in the file name ('Offre budgétaire', 'Budgetangebot', 'Price indication'). Not
+# 'indicative' or 'estimation' alone: 'prices in EUR are indicative', 'the working time is an estimation'.
+_BUDGET = re.compile(r"\b(?:budget|budg[ée]taire|richtpreis|richtangebot|preisindikation|price indication"
+                     r"|indication de prix|prix indicatifs?|offre indicative|indicative (?:offer|price|quotation|proposal))",
+                     re.I)
 
 
 def parse_number(s: str) -> float | None:
@@ -211,6 +236,46 @@ def amounts_in(text: str) -> list[tuple[str, float]]:
     return [(c, v) for _, _, c, v, _ in _amount_spans(text)]
 
 
+def _rate_values(text: str) -> set[float]:
+    """Values printed as rates per day or hour ('1100 CHF/Day')."""
+    text = _blank_rates(text)
+    return {v for m in _AMOUNT.finditer(text) if _PER.match(text, m.end())
+            if (v := parse_number(m.group("v1") or m.group("v2"))) is not None}
+
+
+# Tables of Word documents ('Pos | Désignation | Qté | Prix/unit. CHF | Total CHF'): the currency is in the header
+# of the price column, the rows hold bare numbers. A row's amount is its last cell, printed as a price ("12'000.00",
+# "944.00"); position, quantity and unit price cells are left out.
+_PRICE_HEADER = re.compile(r"\b(?:prix|price|preis|total|amount|montant|betrag|summe)", re.I)
+_CUR_CELL = re.compile(r"(?<![A-Za-z])(?:CHF|EUR|USD|GBP|US\$|€uros?|euros?|€|\$|£|SFr\.?|Fr\.)(?![A-Za-z])", re.I)
+_CELL_PRICE = re.compile(rf"[{_DASH}]?[{_SP}]*(?:\d{{1,3}}(?:['’ .,]\d{{3}})+(?:[.,]\d{{2}})?|\d+[.,]\d{{2}})"
+                         rf"{_END}")
+
+
+def _tables(text: str) -> str:
+    """The text with each priced row of a table under a currency header written as '<text> <amount> <currency>'."""
+    out, currency = [], None
+    for line in text.split("\n"):
+        cells = [c.strip() for c in line.split("|")] if "|" in line else []
+        if cells:
+            head = [c for c in cells if _PRICE_HEADER.search(c) and _CUR_CELL.search(c)]
+            if head and not _AMOUNT.search(line):
+                currency = _currency(_CUR_CELL.findall(head[-1])[-1])
+                out.append("")  # the header row is no item's text
+                continue
+            filled = [c for c in cells if c]
+            if currency and filled and _CELL_PRICE.fullmatch(filled[-1]) and not _amount_spans(line):
+                words = [c for c in filled[:-1] if not _CELL_PRICE.fullmatch(c) and parse_number(c) is None
+                         and not _CUR_CELL.fullmatch(c)]
+                line = " ".join(words + [filled[-1], currency])
+        out.append(line)
+    return "\n".join(out)
+
+
+def _prepared(pages: dict[int, str]) -> dict[int, str]:
+    return {p: _tables(t) for p, t in pages.items()}
+
+
 def _split(line: str) -> tuple[list[tuple[str, float, bool]], str, str]:
     """(amounts, label, words) of a line. label: the line, or its text without the amounts when it has
     some; words: the text without amounts and currency tokens, stripped of punctuation (empty = amounts only)."""
@@ -222,6 +287,14 @@ def _split(line: str) -> tuple[list[tuple[str, float, bool]], str, str]:
     words = rest.strip("()-–:,. \t")
     label = " ".join(re.sub(r"\(\s*\)", "", rest).split()).rstrip(" :,-–") if spans else line.strip()
     return [(c, v, a) for _, _, c, v, a in spans], label, words
+
+
+def _prose(line: str) -> bool:
+    """A sentence quoting a price ('Une note de crédit de € 944.- , soit 8 heures, sera émise en faveur de ...'):
+    12 words or more, and 4 words or more after its last amount. A priced line ends with its amounts."""
+    spans = _amount_spans(line)
+    return (bool(spans) and len(line.split()) >= 12
+            and len(re.findall(r"[^\W\d_]{2,}", line[spans[-1][1]:])) >= 4)
 
 
 def _total_strength(label: str) -> int:
@@ -246,21 +319,66 @@ def _has_total(text: str) -> bool:
     return False
 
 
+def _included_line(line: str, following_amounts_only: bool = False) -> str | None:
+    """'in' for an included item's line ('Equipement € Inclus', 'Inclus dans le prix de l'équipement'), 'out' for a
+    not included one ('Not included', 'Verpackung ... Nicht inbegriffen'), else None. Never a sentence ending with a
+    period ('... sont inclus.', 'inbegriffen.'), never a line whose amounts follow on the next line."""
+    line = line.strip()
+    if not line or following_amounts_only or _is_description(line):
+        return None
+    short = len(line.split()) <= 12
+    m = _NOT_INCLUDED.search(line)
+    if m and short and not line[m.end():].strip(" .;"):
+        lead = line[:m.start()]
+        if not lead.strip() or line[m.start()].isupper() or re.search(rf"(?:{_CUR}|[|:])[{_SP}]*$", lead):
+            return "out"
+    if not line.endswith((".", ":")) and _INCLUDED_END.search(line):
+        return "in"
+    if _INCLUDED_START.match(line) and line[:1].isupper() and short and not line.endswith(":"):
+        return "in"
+    return None
+
+
+def _has_included(text: str) -> bool:
+    return any(_included_line(line) == "in" for line in text.split("\n"))
+
+
 def price_pages(pages: dict[int, str]) -> list[int]:
-    """From a page with a price word and 2+ amounts through the page holding the total (at most 3
-    consecutive pages). The first such run that ends in a total wins, else the first candidate page alone."""
+    """From a page with a price word and 2+ amounts (or 1 amount and an included item: 'Equipement € Inclus',
+    'Total € 270'000') through the page holding the total (at most 3 consecutive pages). The first such run that
+    ends in a total wins, else the first candidate page alone. A run that ends in a total also takes the pages
+    before it that hold 2+ amounts and no total (items listed under 'Proposal' without a price word), within the
+    3 pages, and the next page when options are announced after the total ('The following options are also
+    possible:' at the end of the total page or at the top of the next one)."""
+    pages = _prepared(pages)
     first: list[int] = []
     for p in sorted(pages):
         text = pages[p]
-        if not (_PRICE_WORD.search(text) and len(amounts_in(text)) >= 2):
+        found = amounts_in(text)
+        if not (_PRICE_WORD.search(text) and (len(found) >= 2 or (found and _has_included(text)))):
             continue
         for k in range(MAX_PAGES):
             if p + k not in pages:
                 break
             if _has_total(pages[p + k]):
-                return list(range(p, p + k + 1))
+                return _extended(pages, list(range(p, p + k + 1)))
         first = first or [p]
     return first
+
+
+def _extended(pages: dict[int, str], run: list[int]) -> list[int]:
+    while (len(run) < MAX_PAGES and run[0] - 1 in pages and len(amounts_in(pages[run[0] - 1])) >= 2
+           and not _has_total(pages[run[0] - 1])):
+        run.insert(0, run[0] - 1)
+    last, nxt = pages[run[-1]], run[-1] + 1
+    spans = _amount_spans(last)
+    after = last[spans[-1][1]:] if spans else ""
+    if nxt in pages and amounts_in(pages[nxt]):
+        head = _amount_spans(pages[nxt])
+        before = pages[nxt][:head[0][0]] if head else pages[nxt]
+        if _OPTION_INTRO.search(after) or _OPTION_INTRO.search(before):
+            run.append(nxt)
+    return run
 
 
 def _machine(text: str) -> tuple[str | None, str | None]:
@@ -285,11 +403,13 @@ def classify(text: str, amounts: dict[str, float]) -> str:
         return "discount"
     family, service = machines._FAMILY.search(first), _SERVICE.search(first)  # _FAMILY: what models_in finds
     option = _OPTION.search(first)
+    if option and len(first.split()) > 8 and len(first[:option.start()].split()) > 3:
+        option = None  # an option word deep in a long description ('... optional extended-range head')
     if option and not any(m and m.start() < option.start() for m in (family, service)):
         return "option"
     if family and not (service and service.start() < family.start()):
         return "machine"
-    if service:
+    if service or _PACKING.match(first):  # 'Packaging', 'Emballage' alone: crating
         return "service"
     if _MACHINE.search(first):
         return "machine"
@@ -338,8 +458,10 @@ class _Block:
     amounts: dict[str, float] = field(default_factory=dict)
     page: int | None = None
     ambiguous: bool = False
-    inline: bool = False  # the last label line carried the amounts itself
+    inline: bool = False  # the last label line carried the amounts (or 'Inclus') itself
     description: list[str] = field(default_factory=list)  # lines after its amounts ("including travel")
+    included: bool = False  # an included item: no amounts ('Emballage, transport et assurance Inclus')
+    name_line: str | None = None  # the machine named after a generic price ('Equipment CHF ...' + '1 Paloma 2R cell:')
 
 
 def _is_heading(words: str, line: str, following: str | None) -> bool:
@@ -361,7 +483,8 @@ def _is_heading(words: str, line: str, following: str | None) -> bool:
         return True
     if len(words.split()) <= 2 and _names_kind(words):
         return False  # 'SAT', 'TRAINING', 'OPTION': an item's name in capitals
-    return words == words.upper() and any(c.isalpha() for c in words) and not re.search(r"\d", words)
+    caps = _NUMBERING.sub("", words)  # '9. SERVICES INCLUS'
+    return caps == caps.upper() and any(c.isalpha() for c in caps) and not re.search(r"\d", caps)
 
 
 def _is_description(line: str) -> bool:
@@ -443,11 +566,31 @@ class _Item:
     name: str  # the line quantity, family and model come from
 
 
-def _item(label: list[str]) -> _Item:
+def _names_item(line: str) -> bool:
+    """The line can be an item's name: a quantity, a count or a machine first ('1 Globex Sidebot', '2 Infeed belt
+    conveyor'), a variant, or a kind or machine word (among the first three words of a long line)."""
+    w = _item_name(line)
+    if _has_item(w) or _starts_item(w) or _BARE_COUNT.match(w) or _VARIANT.match(w) or _PACKING.match(w):
+        return True
+    words = _NUMBERING.sub("", w).split()
+    head = w if len(words) <= 8 else " ".join(words[:3])
+    return bool(_names_kind(head) or _MACHINE.search(head))
+
+
+def _kind_first(line: str) -> bool:
+    """A kind word among the first two words ('Installation and setup of one line', 'Special deduction:')."""
+    return _names_kind(" ".join(_NUMBERING.sub("", _item_name(line)).split()[:2]))
+
+
+def _item(label: list[str], inline: bool = False) -> _Item:
     """The block's item.
 
     Introductions and Incoterm captions above the item are left out ('2. Proposal' and the page header are
-    no label lines). The item line is the first line with a quantity, a machine family or a kind word, else
+    no label lines). When the last label line carries the amounts and names an item ('2 Infeed belt conveyor
+    CHF ...'), it is the item line: the lines above it are the previous item's description or a paragraph
+    ('Zusätzliche Tage sind auf Anfrage ...'), unless the line right above it names a kind first and ends
+    no sentence ('Installation and commissioning of the' + 'Paloma cells at customer site CHF ...'). Else the
+    item line is the first line with a quantity, a machine family or a kind word, else
     the first line; never a description line, never a line that only mentions a machine below a kind line.
     - A quantity or a machine line: kind, quantity, family and model come from it.
     - A service, option or discount line ('Commissioning' + 'For the Delfi cells', 'Option' + 'Paloma 2R
@@ -463,8 +606,15 @@ def _item(label: list[str]) -> _Item:
         elif not (following is not None and _is_incoterm(line) and not _has_item(line) and not _names_kind(line)):
             lines.append(line)  # else the Incoterm caption of the total above
     named = [i for i, line in enumerate(lines) if not _is_description(line) and not line.startswith("(")]
-    start = next((i for i in named
-                  if _has_item(lines[i]) or _names_kind(lines[i]) or _VARIANT.match(lines[i])), 0)
+    start, last = None, len(lines) - 1
+    if inline and last in named and _names_item(lines[last]):
+        start = last
+        above = lines[last - 1] if last - 1 in named else ""
+        if above and not re.search(r"[.!?]\s*$", above) and (_kind_first(above) or _VARIANT.match(above)):
+            start = last - 1
+    if start is None:
+        start = next((i for i in named
+                      if _has_item(lines[i]) or _names_kind(lines[i]) or _VARIANT.match(lines[i])), 0)
     kind_line = name = lines[start]
     if not _has_item(lines[start]):
         below = [i for i in named if i > start]
@@ -509,14 +659,19 @@ def _blocks(pages: dict[int, str], nums: list[int]) -> list[_Block]:
             block.page = block.page or page
             block.ambiguous |= ambiguous
 
-    rows = []  # (page, line, amounts, label, words) without blank lines, running headers and page numbers
+    rows = []  # (page, line, amounts, label, words, Word heading) without blank lines, running headers, page numbers
     for p in nums:
         first = True
         for line in _blank_rates(pages[p]).split("\n"):  # a rate wrapped over two lines is no line
             stripped = line.strip()
             if not stripped:
                 continue
+            md = bool(_MD_HEADING.match(stripped))
+            if md:
+                line = stripped = _MD_HEADING.sub("", stripped)
             amts, text, words = _split(line)
+            if amts and _prose(line):  # a price quoted in a sentence: no priced line
+                amts, text = [], stripped
             # Header and footer shapes inside a description stay: '- see www.example.com for specs'.
             letterhead = ((not _is_description(stripped) or stripped.lower().startswith("www."))
                           and (_is_page_header(stripped) or _FOOTER.search(stripped)))
@@ -524,27 +679,56 @@ def _blocks(pages: dict[int, str], nums: list[int]) -> list[_Block]:
                 first = False
                 continue  # running header, page number or the company's footer
             first = False
-            rows.append((p, stripped, amts, text, words))
+            rows.append((p, stripped, amts, text, words, md))
 
-    for i, (p, stripped, amts, text, words) in enumerate(rows):
-        following = rows[i + 1][1] if i + 1 < len(rows) and rows[i + 1][4] else None
+    for i, (p, stripped, amts, text, words, md) in enumerate(rows):
+        nxt = rows[i + 1] if i + 1 < len(rows) else None
+        following = nxt[1] if nxt and nxt[4] else None
         if not amts and (not words or _is_heading(words, stripped, following)):
             if words and prev_amounts:
                 close()
                 prev_amounts = False
+            elif words and block is None:
+                label = []  # the text before a heading belongs to no item ('9.2. Services ...' before '10. PRIX')
             describing = False
             continue
         if words:
             just_closed = prev_amounts
             if prev_amounts:
                 close()
-            if not amts and (just_closed or describing) and blocks and _is_description(stripped):
+            if md and not amts:
+                label = []  # a Word heading starts an item's label ('## Emballage, transport et assurance')
+            if not amts and (just_closed or describing) and blocks and (
+                    _is_description(stripped) or (describing and stripped.startswith("("))):
                 blocks[-1].description.append(stripped)  # the previous item's description
+                describing, prev_amounts = True, False
+                continue
+            if (not amts and blocks and (just_closed or (describing and blocks[-1].name_line))
+                    and not any(_has_item(x) for x in blocks[-1].label) and stripped.endswith(":")
+                    and _starts_item(stripped) and nxt and _is_description(nxt[1])):
+                # 'Equipment CHF 320'000' then '1 Paloma 2R Top Loader cell including each :' and its bullets
+                blocks[-1].description.append(stripped)
+                blocks[-1].name_line = blocks[-1].name_line or stripped
                 describing, prev_amounts = True, False
                 continue
             describing = False
             if label and _total_strength(label[-1]):
-                label.pop()  # a total-like sentence without amounts: "Alle Preise verstehen sich netto ab Werk."
+                if amts and label[-1].endswith((",", "-")):  # 'PRICE, net, without taxes,' + 'FCA ... CHF ...'
+                    text = label.pop() + " " + text
+                else:
+                    label.pop()  # a total-like sentence without amounts: "Alle Preise verstehen sich netto ab Werk."
+            if not amts:
+                inc = _included_line(stripped, following_amounts_only=bool(nxt and nxt[2] and not nxt[4]))
+                if inc == "out":  # 'Packaging, transport and insurance: Not included': no line
+                    label, prev_amounts = [], False
+                    continue
+                if inc == "in":
+                    named = bool(label or _INCLUDED_END.search(stripped))  # else a note: 'Included in the price'
+                    if named:
+                        blocks.append(_Block(label + [text], page=p, included=True,
+                                             inline=bool(_INCLUDED_END.search(stripped))))
+                    label, prev_amounts = [], named
+                    continue
             label.append(text)
             if amts:
                 add(amts, p, inline=True)
@@ -580,7 +764,11 @@ def _sums_match(lines: list[PriceLine], totals: dict[str, float], text: str) -> 
 
     def tolerance(currency: str, total: float) -> float:
         return min(5, len(lines)) if currency == main else max(5, 0.0005 * abs(total))
-    return all(abs(sum(l.amounts.get(c, 0.0) for l in lines) - t) <= tolerance(c, t) for c, t in totals.items())
+    # A total currency no line carries is the total's conversion ('EUR 347,000.- CHF 357,000.-' under CHF lines):
+    # nothing to check in it. When no line carries any total currency, nothing is checked: False.
+    checked = {c: t for c, t in totals.items() if any(c in l.amounts for l in lines)}
+    return bool(checked) and all(abs(sum(l.amounts.get(c, 0.0) for l in lines) - t) <= tolerance(c, t)
+                                 for c, t in checked.items())
 
 
 def parse_section(pages: dict[int, str]) -> PriceSection | None:
@@ -588,11 +776,14 @@ def parse_section(pages: dict[int, str]) -> PriceSection | None:
 
     sum_ok is False (unreadable) when amounts have no label, a line with amounts mentions a total
     without being a total label, priced lines other than extras follow the total (options listed after it,
-    _OPTION_START or an option introduction: kept, out of the sum, R35), or (without a total) an amount may
-    hold a fused quantity.
+    _OPTION_START or an option introduction, R35; deductions, R36; included items: kept, out of the sum), or
+    (without a total) an amount may hold a fused quantity. sum_ok is None when no line before the total carries
+    an amount (every item 'Inclus': nothing to check).
     A delivered price ('CIP Berlin (INCOTERMS 2010) ...') is the total when none is printed; after a
     printed total it is left out when it reaches that total, else it is a late line. Kind, quantity,
-    family and model come from the item line (_item); the line's text starts there."""
+    family and model come from the item line (_item); the line's text starts there. Included items are lines
+    without amounts."""
+    pages = _prepared(pages)
     nums = price_pages(pages)
     if not nums:
         return None
@@ -601,57 +792,68 @@ def parse_section(pages: dict[int, str]) -> PriceSection | None:
         return None
     total_block, strength = None, 0  # the printed total, known before the lines: a delivered price is compared
     for b in blocks:
-        s = _total_strength(b.label[-1]) if b.label else 0
+        s = _total_strength(b.label[-1]) if b.label and not b.included else 0
         if s > strength:  # the first net total, else the first short total label
             total_block, strength = b, s
     printed = dict(total_block.amounts) if total_block else {}
     # Without a printed total, the largest delivered price is the total; the others are ordinary lines.
-    candidates = [b for b in blocks if not printed and b.label and not _total_strength(b.label[-1])
+    candidates = [b for b in blocks if not printed and b.label and not b.included and not _total_strength(b.label[-1])
                   and not _SUBTOTAL.search(b.label[-1]) and _delivered(b.label)]
     ref = next(iter(candidates[0].amounts)) if candidates else None
     delivered_block = max(candidates, key=lambda b: b.amounts.get(ref, -math.inf)) if candidates else None
     lines: list[PriceLine] = []
-    extras: list[bool] = []  # per line: an option that may follow the total, out of the sum (R35)
+    extras: list[bool] = []  # per line: may follow the total, out of the sum (options R35, deductions R36, included)
     totals: dict[str, float] = {}
     delivered: dict[str, float] = {}
-    total_at, delivered_at, unreadable, ambiguous = 0, 0, False, False
+    total_at, delivered_at, unreadable, ambiguous, options_follow = 0, 0, False, False, False
     for b in blocks:
         if b is total_block:
             totals, total_at = dict(b.amounts), len(lines)
             continue
-        if b.label and _total_strength(b.label[-1]):
-            continue
-        if b.label and _SUBTOTAL.search(b.label[-1]):
-            continue  # a subtotal: the lines already hold its amounts
-        if b is delivered_block:  # the total
-            delivered, delivered_at = dict(b.amounts), len(lines)
-            continue
-        if printed and _delivered(b.label) and any(c in printed and v >= printed[c] for c, v in b.amounts.items()):
-            continue  # the printed total delivered (transport and insurance added); a smaller one is a late line
-        if not b.label or (b.inline and _TOTAL_WORD.search(b.label[-1])):
-            unreadable = True  # amounts without a label, or "Total 4 cells CHF ...": never an ordinary line
-            continue
-        item = _item(b.label)
+        if not b.included:
+            if b.label and _total_strength(b.label[-1]):
+                continue
+            if b.label and _SUBTOTAL.search(b.label[-1]):
+                continue  # a subtotal: the lines already hold its amounts
+            if b is delivered_block:  # the total
+                delivered, delivered_at = dict(b.amounts), len(lines)
+                continue
+            if printed and _delivered(b.label) and any(c in printed and v >= printed[c] for c, v in b.amounts.items()):
+                continue  # the printed total delivered (transport and insurance added); a smaller one is a late line
+            if not b.label or (b.inline and _TOTAL_WORD.search(b.label[-1])):
+                unreadable = True  # amounts without a label, or "Total 4 cells CHF ...": never an ordinary line
+                continue
+        item = _item(b.label, b.inline)
         text = " ".join(" ".join(item.lines + b.description).split())
-        q = _QUANTITY.match(item.name)
-        family, model = _machine(_item_name(item.name))
+        name = item.name
+        if b.name_line and not _has_item(name):  # 'Equipment' priced, the machine named after it
+            name = b.name_line
+        q = _QUANTITY.match(name)
+        family, model = _machine(_item_name(name))
         kind = classify(_item_name(item.kind_line), b.amounts)
-        intro = item.option_intro and kind != "discount"
+        # After the total, an option introduction announces every line that follows it (R35).
+        options_follow |= item.option_intro and bool(totals)
+        intro = (item.option_intro or options_follow) and kind != "discount"
         ambiguous |= b.ambiguous
         lines.append(PriceLine(len(lines) + 1, text, "option" if intro else kind,
-                               int(q.group(1)) if q else None, dict(b.amounts), b.page, family, model))
+                               int(q.group(1) or q.group(2)) if q else None, dict(b.amounts), b.page, family, model))
         # R35: an extra after the total is announced by an option introduction, or its item line starts with
-        # an option word, and no quantity, machine or service word is on it or named below it.
-        extras.append(intro or (kind == "option" and bool(_OPTION_START.match(item.kind_line))
-                                and not any(_has_item(x) or _SERVICE.search(x) for x in (item.kind_line, item.name))))
+        # an option word, and no quantity, machine or service word is on it or named below it. R36: a deduction
+        # after the total is taken from it. An included item carries no amount.
+        extras.append(intro or b.included or kind == "discount"
+                      or (kind == "option" and bool(_OPTION_START.match(item.kind_line))
+                          and not any(_has_item(x) or _SERVICE.search(x) for x in (item.kind_line, item.name))))
     text = "\n".join(pages[p] for p in nums)
-    if totals:  # R13: a late line makes the sum unchecked, unless it is an extra (R35)
-        sum_ok = _sums_match(lines[:total_at], totals, text) and not unreadable and all(extras[total_at:])
+    if totals:  # R13: a late line makes the sum unchecked, unless it is an extra (R35, R36)
+        counted = lines[:total_at]
+        sum_ok = (False if unreadable or not all(extras[total_at:])
+                  else None if not any(l.amounts for l in counted) else _sums_match(counted, totals, text))
     elif delivered:  # the delivered price is the total; it may follow or precede the lines
         totals = delivered
         counted = lines if not delivered_at else lines[:delivered_at] + [  # extras after it: out of the sum
             l for l, extra in zip(lines[delivered_at:], extras[delivered_at:]) if not extra]
-        sum_ok = _sums_match(counted, totals, text) and not unreadable
+        sum_ok = (False if unreadable else None if not any(l.amounts for l in counted)
+                  else _sums_match(counted, totals, text))
     else:
         sum_ok = False if unreadable or ambiguous else None
     rates = _rates(text)
@@ -688,8 +890,8 @@ def offer_date(pages: dict[int, str]) -> tuple[str, str] | None:
 
 
 def offer_type(pages: dict[int, str], name: str) -> str:
-    """'budget' when pages 1-2 or the file name say budget / Richtpreis / indicative..., else 'firm'."""
-    text = "\n".join(pages.get(p, "") for p in (1, 2)) + "\n" + name
+    """'budget' when pages 1-3 or the file name say budget / budgétaire / Richtpreis / price indication..., else 'firm'."""
+    text = "\n".join(pages.get(p, "") for p in (1, 2, 3)) + "\n" + name
     return "budget" if _BUDGET.search(text) else "firm"
 
 
@@ -806,10 +1008,40 @@ def parse_with_model(url: str, model: str, pages: dict[int, str], timeout: float
         rate = _model_rate(r)
         if rate and rate not in rates:
             rates.append(rate)
+    return clean_model(PriceSection(lines, totals, rates, nums, None), pages, checked=False)
+
+
+def _model_sum(lines: list[PriceLine], totals: dict[str, float], sent: str) -> bool | None:
+    """False when an amount or a total is not printed in the pages sent (R16), else the sum check."""
     printed = _printed_numbers(sent)
     values = [v for l in lines for v in l.amounts.values()] + list(totals.values())
     if any(round(abs(v), 2) not in printed for v in values):
-        sum_ok = False
-    else:
-        sum_ok = _sums_match(lines, totals, sent) if totals else None
-    return PriceSection(lines, totals, rates, nums, sum_ok)
+        return False
+    return _sums_match(lines, totals, sent) if totals else None
+
+
+def clean_model(section: PriceSection | None, pages: dict[int, str], checked: bool = True) -> PriceSection | None:
+    """A model's section (also a cached one) without what is no price: amounts of 0 (the model's 'no price', never
+    printed as such) and values printed only as rates per day or hour ('1100 CHF/Day'). A line left without amounts
+    is dropped, positions follow; None when no line is left. sum_ok is computed again when something was dropped
+    (always when checked is False)."""
+    if section is None:
+        return None
+    sent = "\n\n".join(f"[Page {p}]\n{pages[p]}" for p in section.pages if p in pages)
+    rates = _rate_values(sent) - {v for _, v in amounts_in(sent)}
+
+    def price(v: float) -> bool:
+        return v != 0 and abs(v) not in rates
+
+    lines, changed = [], False
+    for l in section.lines:
+        amounts = {c: v for c, v in l.amounts.items() if price(v)}
+        changed |= amounts != l.amounts
+        if amounts:
+            lines.append(PriceLine(len(lines) + 1, l.text, l.kind, l.quantity, amounts, l.page, l.family, l.model))
+    totals = {c: v for c, v in section.totals.items() if price(v)}
+    changed |= totals != section.totals
+    if not lines:
+        return None
+    sum_ok = _model_sum(lines, totals, sent) if changed or not checked else section.sum_ok
+    return PriceSection(lines, totals, section.rates, section.pages, sum_ok)
