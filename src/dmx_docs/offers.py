@@ -233,8 +233,8 @@ class _Model:
         key = self._key(pages)
         row = self.con.execute("SELECT answer FROM offer_model_cache WHERE text_hash = ?", (key,)).fetchone()
         if row:
-            try:
-                return _load(row[0]), None
+            try:  # cached answers are cleaned like new ones (amounts of 0, day rates)
+                return prices.clean_model(_load(row[0]), pages), None
             except (ValueError, KeyError, TypeError, AttributeError) as e:  # damaged entry: asked again
                 log.warning("unreadable cached model answer %s, asked again: %s", key, e)
         if self.deadline is not None and time.perf_counter() > self.deadline:
@@ -275,6 +275,7 @@ class _Read:
     date_source: str | None = None
     variant: str | None = None
     twin: _Read | None = None  # the revision's document this one translates
+    budget: bool = False  # budget wording (prices.offer_type), in this document or its PDF/Word twin
 
 
 def _confidence(read_by: str, sum_ok: bool | None) -> str:
@@ -288,20 +289,43 @@ def _alias_model(text: str, aliases: list[tuple[str, str]]) -> str | None:
     return next((model for alias, model in aliases if f" {alias} " in folded), None)
 
 
-def _read(con, doc, model: _Model, aliases) -> _Read:
+def _score(section: prices.PriceSection | None) -> int:
+    """How well the rules read a section: none 0, sum check failed 1, no total 2, sum checked 3."""
+    return 0 if section is None else {False: 1, None: 2, True: 3}[section.sum_ok]
+
+
+def _read(con, doc, model: _Model, aliases, twin=None) -> _Read:
+    """One document read. A mail is never a price document (its date is the mail's). A PDF the rules cannot read
+    (a scan whose OCR lost the numbers, a garbled text layer) gives way to its Word twin (same name) when the rules
+    read the twin better."""
     if doc["status"] != "ok":  # listed, not read: a scan before OCR, a damaged or empty file
         note = (f"file error: {doc['error'] or 'unknown'}" if doc["status"] == "error"
                 else _STATUS_NOTES.get(doc["status"], f"not read (status {doc['status']})"))
         return _Read(doc, {}, notes=[note])
-    r = _Read(doc, _pages(con, doc["id"]))
-    section, read_by = prices.parse_section(r.pages), "rules"
+    pages = _pages(con, doc["id"])
+    budget = prices.offer_type(pages, doc["name"]) == "budget"
+    if doc["ext"] == ".msg":
+        r = _Read(doc, pages, notes=["mail: not a price document"], budget=budget)
+        found = prices.offer_date(pages)
+        if found:
+            r.date, r.date_source = found[0], "mail"
+        return r
+    section, other = prices.parse_section(pages), pages
+    if twin is not None and _score(section) < 2:
+        twin_pages = _pages(con, twin["id"])
+        twin_section = prices.parse_section(twin_pages)
+        budget |= prices.offer_type(twin_pages, twin["name"]) == "budget"
+        if _score(twin_section) > _score(section):
+            doc, pages, section, other = twin, twin_pages, twin_section, pages
+    r = _Read(doc, pages, budget=budget)
+    read_by = "rules"
     if r.pages and (section is None or section.sum_ok is False):
         answer, problem = model.read(r.pages)
         if problem:
             r.notes.append(problem)
         if answer is not None and (section is None or answer.sum_ok):
             section, read_by = answer, "model"
-    found = prices.offer_date(r.pages)
+    found = prices.offer_date(r.pages) or prices.offer_date(other)
     if found:
         r.date, r.date_source = found[0], "document"
     if section is None:
@@ -360,16 +384,56 @@ def _merge_versions(folders: dict[str, list]) -> dict[str, list]:
     return folders
 
 
+# Names of the documents sent to the client ('Quotation', 'Offre', 'Angebot'...): read first in a revision.
+_OFFER_NAMED = re.compile(r"\b(?:offers?|offres?|angebot|quotation|proposal|proposition|devis)\b")
+# Documents that are not what was sent: internal costing and negotiation sheets, drafts, old copies (folded names).
+_NOT_SENT = re.compile(r"\b(?:nego\w*|calcul\w*|kalkulation|interne?|internal|prix de revient|costs?|kosten"
+                       r"|prices? summary|summary for sales|old|draft|brouillon|entwurf|en cours|copie de|copy of|kopie)\b")
+_OLD_FOLDERS = {"old", "alt", "archive", "archiv", "ancien", "anciens", "draft", "temp", "tmp", "brouillon", "entwurf"}
+
+
+def _stem(d) -> str:
+    return fold(os.path.splitext(d["name"])[0])
+
+
+def _sent_rank(d) -> int:
+    """0 a document sent to the client, 1 an internal sheet, a draft or an old copy, 2 a mail."""
+    if d["ext"] == ".msg":
+        return 2
+    folders = {fold(f) for f in os.path.dirname(d["path"]).split(os.sep)[-2:]}
+    return 1 if _NOT_SENT.search(_stem(d)) or folders & _OLD_FOLDERS else 0
+
+
+def _doc_order(d) -> tuple:
+    """The documents of a revision: those named as the offer first ('..._Quotation.pdf'), then by file date."""
+    return not _OFFER_NAMED.search(_stem(d)), d["mtime"] or 0, d["path"]
+
+
+def _twins(docs: list) -> dict:
+    """{id of a readable PDF: the readable .doc(x) offer document with the same name}."""
+    words = {os.path.splitext(d["path"].lower())[0]: d for d in docs
+             if d["doc_type"] == "offer" and d["ext"] in (".doc", ".docx") and d["status"] == "ok"}
+    return {d["id"]: words[stem] for d in docs if d["doc_type"] == "offer" and d["ext"] == ".pdf"
+            and d["status"] == "ok" and (stem := os.path.splitext(d["path"].lower())[0]) in words}
+
+
 def _candidates(docs: list, key: str) -> list:
     """Offer documents (also those the index could not read); of a readable .pdf and a .doc(x) with the
-    same name, the PDF. In each revision, the documents whose file name carries the offer number; the
-    other offer documents (a supplier's quotation, a transport quote) only when none does."""
+    same name, the PDF (its Word twin is read when the PDF is not: _twins). In each revision, the documents whose
+    file name carries the offer number; the other offer documents (a supplier's quotation, a transport quote) only
+    when none does. Then the documents sent to the client: an internal sheet (costing, negotiation, prices
+    summary), a draft or an old copy only when nothing else is left, a mail only when it is the only document
+    (it is listed, never read for prices)."""
     docs = [d for d in docs if d["doc_type"] == "offer"]
     pdfs = {os.path.splitext(d["path"].lower())[0] for d in docs if d["ext"] == ".pdf" and d["status"] == "ok"}
     docs = [d for d in docs
             if d["ext"] not in (".doc", ".docx") or os.path.splitext(d["path"].lower())[0] not in pdfs]
     numbered = {d["revision"] for d in docs if offerkeys.offer_key(d["name"]) == key}
-    return [d for d in docs if d["revision"] not in numbered or offerkeys.offer_key(d["name"]) == key]
+    docs = [d for d in docs if d["revision"] not in numbered or offerkeys.offer_key(d["name"]) == key]
+    best: dict = {}
+    for d in docs:
+        best[d["revision"]] = min(best.get(d["revision"], 2), _sent_rank(d))
+    return [d for d in docs if _sent_rank(d) == best[d["revision"]]]
 
 
 def _name_variant(stem: str, key: str) -> str | None:
@@ -391,22 +455,46 @@ def _label_pattern(label: str | None) -> re.Pattern | None:
     return re.compile(rf"(?<![A-Za-z0-9])(?<!\d[./])(?:{alt})(?!\d)(?![./]\d)", re.I)
 
 
+# The seller's letterhead, address and footer (Demaurex, Bosch Packaging, Rotzinger; Romanel, Vufflens, Ecublens).
+_SELLER = re.compile(r"demaurex|bosch\s+packaging|rotzinger|m[ée]sanges|romanel|vufflens|ecublens|\bCH-\d{4}\b|\+41",
+                     re.I)
+
+
+def _first_country(text: str) -> str | None:
+    words = _WORD.findall(text)
+    for i in range(len(words)):
+        for n in (3, 2, 1):
+            phrase = " ".join(words[i:i + n])
+            if i + n > len(words) or not phrase[:1].isupper():
+                continue
+            country = offerkeys.country_en(phrase)
+            if country and (len(phrase) > 3 or phrase.isupper()):
+                return country
+    return None
+
+
 def _country_in(text: str) -> str | None:
     """English name of the first country named on a page (one to three words, starting with a capital;
-    abbreviations of 3 letters or fewer only in capitals). The seller's own address lines are skipped."""
+    abbreviations of 3 letters or fewer only in capitals). The seller's own address is skipped: a cell (between
+    '|' or '♦') naming the seller or its address, and Switzerland in the seller's row or the row after it
+    ('Ch. des Mésanges 3, CH-1032 Romanel' + 'Switzerland 27/05/09')."""
+    after_seller = False
     for row in text.split("\n"):
-        if "demaurex" in fold(row):
-            continue
-        words = _WORD.findall(row)
-        for i in range(len(words)):
-            for n in (3, 2, 1):
-                phrase = " ".join(words[i:i + n])
-                if i + n > len(words) or not phrase[:1].isupper():
-                    continue
-                country = offerkeys.country_en(phrase)
-                if country and (len(phrase) > 3 or phrase.isupper()):
-                    return country
+        seller_row = False
+        for cell in re.split(r"[|♦]", row):
+            if _SELLER.search(cell):
+                seller_row = True
+                continue
+            country = _first_country(cell)
+            if country and not (country == "Switzerland" and (seller_row or after_seller)):
+                return country
+        after_seller = seller_row
     return None
+
+
+def _document_country(revisions) -> str | None:
+    """The country named on page 1 of the offer's documents, the last revision first."""
+    return next((c for _, _, r in reversed(revisions) if (c := _country_in(r.pages.get(1, "")))), None)
 
 
 def _mtime_date(doc) -> str | None:
@@ -448,9 +536,12 @@ class _Offer:
     revisions: list[tuple[str | None, int, _Read]]  # (label, rev_order, read)
 
 
-def _revision(con, key: str, owner: str, docs: list, order: int, history, ctx: _Context) -> list[_Read]:
-    """The documents of one revision, oldest file first: translations, variants and dates."""
-    reads = [_read(con, d, ctx.model, ctx.aliases) for d in sorted(docs, key=lambda d: (d["mtime"] or 0, d["path"]))]
+def _revision(con, key: str, owner: str, docs: list, order: int, history, ctx: _Context,
+              twins: dict | None = None) -> list[_Read]:
+    """The documents of one revision, those named as the offer first, then the oldest file first (_doc_order):
+    translations, variants and dates. twins: {PDF id: its Word twin} (_twins)."""
+    reads = [_read(con, d, ctx.model, ctx.aliases, twin=(twins or {}).get(d["id"]))
+             for d in sorted(docs, key=_doc_order)]
     kept: list[_Read] = []
     for r in reads:  # a later document with the same totals translates an earlier one: no lines of its own
         totals = r.section.totals if r.section else None
@@ -484,9 +575,9 @@ def _build_offer(con, key: str, owner: str, docs: list, others: list[str], ctx: 
     labels = sorted(by_label, key=lambda lb: offerkeys.revision_order(lb or ""))
     history = ctx.history(owner)
     revisions = [(label, order, r) for order, label in enumerate(labels)
-                 for r in _revision(con, key, owner, by_label[label], order, history, ctx)]
+                 for r in _revision(con, key, owner, by_label[label], order, history, ctx, _twins(docs))]
     last = [r for label, _, r in revisions if label == labels[-1]]
-    offer_type = "budget" if any(prices.offer_type(r.pages, r.doc["name"]) == "budget" for r in last) else "firm"
+    offer_type = "budget" if any(r.budget for r in last) else "firm"
 
     first = docs[0]
     # File dates only when no revision has a printed or History date: an annex copied later moves nothing.
@@ -497,7 +588,7 @@ def _build_offer(con, key: str, owner: str, docs: list, others: list[str], ctx: 
     if country is None and quote and offerkeys.country_en(quote.get("country") or ""):
         country, country_source = offerkeys.country_en(quote["country"]), "quotation_list"
     if country is None:
-        country = next((c for _, _, r in revisions if (c := _country_in(r.pages.get(1, "")))), None)
+        country = _document_country(revisions)
         country_source = "document" if country else None
     for _, _, r in revisions:
         r.pages = {}  # the text is no longer needed

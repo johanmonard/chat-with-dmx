@@ -681,3 +681,74 @@ def test_prompt_cut_is_its_own_review_issue(offers_world, tmp_path):
                 "prompt cut: 8100 tokens read of a 8192 token window' WHERE offer_key = '3006666'")
     rows = [r for r in _review_rows(con, tmp_path) if r.startswith("3006666;00;")]
     assert len(rows) == 1 and ";prompt too long for the model;" in rows[0] and "prompt cut" in rows[0]
+
+
+# --- fixes from the 30-offer spot check (2026-10-19) -----------------------------------------------------
+
+def _doc(path, id, revision="01", ext=None, status="ok", doc_type="offer", mtime=0):
+    name = os.path.basename(path)
+    return {"id": id, "path": path, "name": name, "ext": ext or os.path.splitext(name)[1].lower(), "status": status,
+            "doc_type": doc_type, "revision": revision, "mtime": mtime, "error": None}
+
+
+REV = r"C:\Clients\ACME Foods\Offres\3001234 - Line 5\01"
+
+
+def test_mails_internal_sheets_and_old_copies_lose_to_the_quotation():
+    docs = [_doc(REV + r"\3001234_01_Prices summary.docx", 1), _doc(REV + r"\3001234_01_Summary for Sales Nego.docx", 2),
+            _doc(REV + r"\3001234_01_Layout & Price.pdf", 7, mtime=5), _doc(REV + r"\3001234_01_Quotation.pdf", 3, mtime=9),
+            _doc(REV + r"\3001234_01_Quotation.docx", 4), _doc(REV + r"\ACME - Offre 3001234-01.msg", 5),
+            _doc(REV + r"\OLD\3001234_01_Quotation.pdf", 6), _doc(REV + r"\Copie de 3001234_01_Quotation.pdf", 8)]
+    got = sorted(offers._candidates(docs, "3001234"), key=offers._doc_order)
+    assert [d["id"] for d in got] == [3, 7]  # the quotation first, then the other customer document
+    only = [_doc(REV + r"\3001234_01_Prices summary.docx", 1), _doc(REV + r"\ACME - Offre 3001234-01.msg", 5)]
+    assert [d["id"] for d in offers._candidates(only, "3001234")] == [1]
+    mail = [_doc(REV + r"\ACME - Offre 3001234-01.msg", 5)]
+    assert [d["id"] for d in offers._candidates(mail, "3001234")] == [5]  # listed, never read for prices
+    assert offers._twins(docs) == {3: docs[4]}  # the Word document of the PDF, read when the PDF is not
+
+
+class _NoModel:
+    def read(self, pages):
+        return None, "model unavailable"
+
+
+def _pages_db(texts):
+    import sqlite3
+    con = sqlite3.connect(":memory:")
+    con.executescript("CREATE TABLE chunks (id INTEGER PRIMARY KEY, doc_id INTEGER, page_no INTEGER, seq INTEGER, "
+                      "text TEXT); CREATE TABLE picture_uses (doc_id INTEGER, chunk_id INTEGER); "
+                      "CREATE TABLE ocr_pages (doc_id INTEGER, page_no INTEGER, status TEXT);")
+    for doc_id, pages in texts.items():
+        for p, text in pages.items():
+            con.execute("INSERT INTO chunks(doc_id, page_no, seq, text) VALUES (?, ?, 0, ?)", (doc_id, p, text))
+    return con
+
+
+def test_a_scanned_pdf_gives_way_to_its_word_document_and_mails_are_no_price_documents():
+    pdf, word = _doc(REV + r"\3001234_01.pdf", 1), _doc(REV + r"\3001234_01.doc", 2)
+    con = _pages_db({1: {1: "Offre budgétaire n° 3001234 Version 1\nACME Foods", 2: "PRIX\nEquipement CHF\nMise en service CHF"},
+                     2: {1: "ACME Foods", 2: "Pos | Désignation | Qté | Total CHF\n1 | Cellule Paloma 4R | 1 | 300'000.00\n"
+                                            "2 | Mise en service | 1 | 20'000.00\n| Total | | CHF | 320'000.00"},
+                     3: {1: "From: ACME\nSent: 12.03.2020\nOur last price for the Paloma 4R is CHF 280'000.-, "
+                            "installation CHF 18'000.-, total price CHF 298'000.-"}})
+    r = offers._read(con, pdf, _NoModel(), [], twin=word)
+    assert r.doc["id"] == 2 and r.read_by == "rules" and r.section.sum_ok is True and r.budget is True
+    mail = offers._read(con, _doc(REV + r"\ACME - Offre 3001234-01.msg", 3), _NoModel(), [])
+    assert mail.section is None and mail.read_by == "none" and mail.notes == ["mail: not a price document"]
+    assert (mail.date, mail.date_source) == ("2020-03-12", "mail")
+
+
+def test_country_skips_the_sellers_address():
+    assert offers._country_in("ACME Foods\nBOSCH PACKAGING TECHNOLOGY SA ♦ Chemin des Mésanges 3 ♦ 1032 Romanel-sur-"
+                              "Lausanne ♦ Switzerland") is None
+    assert offers._country_in("Pays\nCh. des Mésanges 3, CH-1032 Romanel Page 1 sur 11\nSwitzerland 27/05/09") is None
+    assert offers._country_in("ACME Foods Taikos 88 Kaunas Lithuania | Why Demaurex SA? Over 30 years") == "Lithuania"
+    assert offers._country_in("Globex GmbH\nBerlin\nGermany\nDemaurex SA, Route 1, 1030 Romanel, Switzerland") == "Germany"
+
+
+def test_country_from_the_last_revision_first():
+    from types import SimpleNamespace as R
+    revisions = [(None, 0, R(pages={1: "Supplier quote to Demaurex SA, Vufflens-la-Ville\nGlobex AG\nZürich, Switzerland"})),
+                 ("Q06", 7, R(pages={1: "ACME Foods Kaunas Lithuania"}))]
+    assert offers._document_country(revisions) == "Lithuania"

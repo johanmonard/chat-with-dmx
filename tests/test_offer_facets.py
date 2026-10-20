@@ -121,12 +121,12 @@ def test_index_stores_offer_facets_and_recomputes_on_profile_change(tmp_path, ma
     run_index(cfg, progress=quiet)
     con = store.connect(cfg.db_path)
     query = "SELECT client, offer, revision, doc_type, category, machine FROM doc_facets"
-    assert store.get_meta(con, "facets_version") == "offers:2"
+    assert store.get_meta(con, "facets_version") == "offers:3"
     assert [tuple(r) for r in con.execute(query)] == [("ACME Foods", "3002113", "02", "offer", "client", None)]
     # Another profile's rules, then the offers rules again: the rows are recomputed.
     store.set_meta(con, "facets_version", "marketing:1")
     assert facets.refresh(con, cfg.roots, "offers") == 1
-    assert store.get_meta(con, "facets_version") == "offers:2"
+    assert store.get_meta(con, "facets_version") == "offers:3"
     row = tuple(con.execute("SELECT client, offer FROM doc_facets").fetchone())
     assert row == ("ACME Foods", "3002113")
     assert facets.refresh(con, cfg.roots, "offers") == 0
@@ -163,3 +163,18 @@ def test_empty_corrections_setting_disables_the_path(tmp_path):
     cfg_file.write_text("[index]\ndata_dir = 'data'\n[worlds.offers]\nprofile = 'offers'\ncorrections = ''\n",
                         encoding="utf-8")
     assert load_config(cfg_file, world="offers").corrections_path is None
+
+
+@pytest.mark.parametrize("rel, revision", [
+    (r"01_Historique\PROSPECT\SUISSE\ACME\Line 4\B 250001 V1\B-250001 V1.pdf", "V1"),  # the folder name lost its dash
+    (r"01_Historique\PROSPECT\France\Dupont Biscuits\250002\B-250002 V2.doc", "V2"),  # a bare-number folder
+    (r"01_Historique\PROSPECT\France\Dupont Biscuits\B-250003 - Madeleine\B-250003 V4\B-250003 V4.pdf", "V4"),
+])
+def test_the_offers_own_file_is_an_offer_wherever_it_lies(rel, revision):
+    got = f(rel)
+    assert (got["doc_type"], got["revision"]) == ("offer", revision)
+
+
+def test_other_files_naming_the_offer_stay_other():
+    assert f(r"01_Historique\PROSPECT\France\Dupont Biscuits\250002\Notes B-250002.pdf")["doc_type"] == "other"
+    assert f(r"01_Historique\PROSPECT\France\Dupont Biscuits\250002\Layouts\B-250002 V2.pdf")["doc_type"] == "layout"

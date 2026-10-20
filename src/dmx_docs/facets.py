@@ -199,6 +199,8 @@ _OFFER_PARTNERS = {"06 offres ipso": "IPSO", "07 offres wyzo": "Wyzo"}
 _ARCHIVE_ANCHORS = ("prospect", "prospects", "client", "clients")
 _VERSION_LABEL = re.compile(r"(?<![A-Za-z0-9])V(\d+)(?!\w)", re.I)
 _NAME_REVISION = re.compile(r"(?:[ _]V(\d+)|_(\d{2}))$", re.I)
+# A file named as the offer only: its number and a version ('B-250306 V2', 'F-0903029 V1', '3001234_02').
+_OWN_FILE = re.compile(r"\W*(?:[BFE][- ]?)?\d{6,7}(?:[ _-]*(?:V\d+|Q\d{2}|\d{2}))?\W*", re.I)
 
 
 def _offer_structural(folder: str) -> bool:
@@ -285,7 +287,9 @@ def compute_offers(path: str, root: str) -> dict:
         kind = "mail"
     if kind is None:
         directly_in_offer = offer_idx == len(folders) - 1 or offerkeys.revision_of(folders[-1]) is not None
-        kind = "offer" if key and directly_in_offer and key.lower() in stem.lower() else "other"
+        # The offer's own file ('B-250306 V2.pdf'), also in a folder not read as the offer's: 'B 250306 V1', '250306'.
+        own_file = bool(key and _OWN_FILE.fullmatch(stem) and offerkeys.offer_key(stem) == key)
+        kind = "offer" if key and ((directly_in_offer and key.lower() in stem.lower()) or own_file) else "other"
     out["doc_type"] = kind
     out["facet_source"] = None if kind == "other" else "name"  # no evidence for the kind: None, as in the projects rules
     return out
@@ -293,8 +297,8 @@ def compute_offers(path: str, root: str) -> dict:
 
 RULES = {"projects": compute, "marketing": compute_marketing, "documentation": compute_documentation,
          "offers": compute_offers}
-# offers 2: the archive client by its position under the country folder.
-PROFILE_VERSIONS = {"marketing": MARKETING_FACETS_VERSION, "documentation": 1, "offers": 2}
+# offers 2: the archive client by its position under the country folder; 3: the offer's own file wherever it lies.
+PROFILE_VERSIONS = {"marketing": MARKETING_FACETS_VERSION, "documentation": 1, "offers": 3}
 
 
 def _version(profile: str) -> str:
