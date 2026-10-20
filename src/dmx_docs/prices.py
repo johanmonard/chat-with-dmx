@@ -255,21 +255,27 @@ _CELL_PRICE = re.compile(rf"[{_DASH}]?[{_SP}]*(?:\d{{1,3}}(?:['’ .,]\d{{3}})+(
 
 
 def _tables(text: str) -> str:
-    """The text with each priced row of a table under a currency header written as '<text> <amount> <currency>'."""
-    out, currency = [], None
+    """The text with each priced row of a table under a currency header written as '<text> <amount> <currency>'.
+    A row with as many cells as the header takes the last column of each currency ('Total CHF | Total €uros':
+    both; 'Prix/unit. CHF | Total CHF': the total); any other row its last cell in the header's last currency."""
+    out, currency, columns, width = [], None, {}, 0
     for line in text.split("\n"):
         cells = [c.strip() for c in line.split("|")] if "|" in line else []
         if cells:
-            head = [c for c in cells if _PRICE_HEADER.search(c) and _CUR_CELL.search(c)]
+            head = [(i, c) for i, c in enumerate(cells)
+                    if _PRICE_HEADER.search(c) and _CUR_CELL.search(c) and len(c.split()) <= 4]
             if head and not _AMOUNT.search(line):
-                currency = _currency(_CUR_CELL.findall(head[-1])[-1])
+                columns = {_currency(_CUR_CELL.findall(c)[-1]): i for i, c in head}  # the last column per currency
+                currency, width = _currency(_CUR_CELL.findall(head[-1][1])[-1]), len(cells)
                 out.append("")  # the header row is no item's text
                 continue
             filled = [c for c in cells if c]
             if currency and filled and _CELL_PRICE.fullmatch(filled[-1]) and not _amount_spans(line):
                 words = [c for c in filled[:-1] if not _CELL_PRICE.fullmatch(c) and parse_number(c) is None
                          and not _CUR_CELL.fullmatch(c)]
-                line = " ".join(words + [filled[-1], currency])
+                priced = [f"{cur} {cells[i]}" for cur, i in columns.items() if _CELL_PRICE.fullmatch(cells[i])] \
+                    if len(cells) == width else []
+                line = " ".join(words + (priced or [currency, filled[-1]]))
         out.append(line)
     return "\n".join(out)
 

@@ -742,6 +742,14 @@ def test_a_table_with_the_currency_in_its_column_header_is_read():
     assert s.lines[0].text == "Engineering : Prestation interne"  # the position number and quantity cells are left out
 
 
+def test_a_table_with_a_column_per_currency_keeps_both():
+    s = prices.parse_section({2: "Pos. | Désignation | Qty | Total CHF | Total €uros\n"
+                                 "1 | One (1) Complete end-effector | 1 | 6’000.00 | 4’080.00\n"
+                                 "2 | One (1) Finger for the end-effector | 1 | 1’700.00 | 1’155.00\n"
+                                 "Prices | : | Our prices are understood net, in CHF, taxes not included."})
+    assert [l.amounts for l in s.lines] == [{"CHF": 6000.0, "EUR": 4080.0}, {"CHF": 1700.0, "EUR": 1155.0}]
+
+
 def test_a_deduction_after_the_table_total_is_kept_out_of_the_sum():  # R36
     s = prices.parse_section({2: "Pos | Designation | Qty | Unit price | Total €uro\n"
                                  "1 | Training package for technicians | 2 | 2'000.00 | 4'000.00\n"
