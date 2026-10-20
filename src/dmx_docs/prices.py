@@ -171,6 +171,8 @@ _RATE_WORDS = re.compile(r"tageskurs|wechselkurs|taux de change|cours de change|
 _RATE_HINT = re.compile(r"\brates?\b|\bcours\b|kurs|\btaux\b|\bexchange\b", re.I)
 # Budget wording on pages 1-3 or in the file name ('Offre budgétaire', 'Budgetangebot', 'Price indication'). Not
 # 'indicative' or 'estimation' alone: 'prices in EUR are indicative', 'the working time is an estimation'.
+_BUDGET_PHRASE = re.compile(r"\b(?:budgetary|budg[ée]taire|budget[- ]?(?:offer|quotation|proposal|angebot|price)"
+                            r"|richtpreis|richtangebot|preisindikation|price indication|indication de prix)", re.I)
 _BUDGET = re.compile(r"\b(?:budget|budg[ée]taire|richtpreis|richtangebot|preisindikation|price indication"
                      r"|indication de prix|prix indicatifs?|offre indicative|indicative (?:offer|price|quotation|proposal))",
                      re.I)
@@ -343,25 +345,29 @@ def _has_included(text: str) -> bool:
     return any(_included_line(line) == "in" for line in text.split("\n"))
 
 
-def price_pages(pages: dict[int, str]) -> list[int]:
+def price_pages(pages: dict[int, str], legacy: bool = False) -> list[int]:
     """From a page with a price word and 2+ amounts (or 1 amount and an included item: 'Equipement € Inclus',
     'Total € 270'000') through the page holding the total (at most 3 consecutive pages). The first such run that
     ends in a total wins, else the first candidate page alone. A run that ends in a total also takes the pages
     before it that hold 2+ amounts and no total (items listed under 'Proposal' without a price word), within the
     3 pages, and the next page when options are announced after the total ('The following options are also
-    possible:' at the end of the total page or at the top of the next one)."""
-    pages = _prepared(pages)
+    possible:' at the end of the total page or at the top of the next one).
+    legacy=True: the choice before 2026-10-19 (no table, included item or extension rule), only to find the model's
+    answers cached for it."""
+    if not legacy:
+        pages = _prepared(pages)
     first: list[int] = []
     for p in sorted(pages):
         text = pages[p]
         found = amounts_in(text)
-        if not (_PRICE_WORD.search(text) and (len(found) >= 2 or (found and _has_included(text)))):
+        if not (_PRICE_WORD.search(text) and (len(found) >= 2 or (not legacy and found and _has_included(text)))):
             continue
         for k in range(MAX_PAGES):
             if p + k not in pages:
                 break
             if _has_total(pages[p + k]):
-                return _extended(pages, list(range(p, p + k + 1)))
+                run = list(range(p, p + k + 1))
+                return run if legacy else _extended(pages, run)
         first = first or [p]
     return first
 
@@ -890,9 +896,11 @@ def offer_date(pages: dict[int, str]) -> tuple[str, str] | None:
 
 
 def offer_type(pages: dict[int, str], name: str) -> str:
-    """'budget' when pages 1-3 or the file name say budget / budgétaire / Richtpreis / price indication..., else 'firm'."""
-    text = "\n".join(pages.get(p, "") for p in (1, 2, 3)) + "\n" + name
-    return "budget" if _BUDGET.search(text) else "firm"
+    """'budget' when pages 1-2 or the file name say budget / budgétaire / Richtpreis / price indication..., or page 3
+    says it in a budget phrase ('This budgetary proposal', not 'Budget for flow wrapper' in a firm offer), else
+    'firm'."""
+    text = "\n".join(pages.get(p, "") for p in (1, 2)) + "\n" + name
+    return "budget" if _BUDGET.search(text) or _BUDGET_PHRASE.search(pages.get(3, "")) else "firm"
 
 
 MODEL_ROLE = "You read the price section of a sales offer for industrial packaging machines."

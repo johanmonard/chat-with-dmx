@@ -221,9 +221,10 @@ class _Model:
         self.why: str | None = None
         self.checked = self.unavailable = self.time_limited = False
 
-    def _key(self, pages: dict[int, str]) -> str:
-        # The pages parse_with_model sends: the rules' price pages, else the first ones.
-        nums = prices.price_pages(pages) or [p for p in sorted(pages) if p <= prices.MODEL_PAGES]
+    def _key(self, pages: dict[int, str], legacy: bool = False) -> str:
+        # The pages parse_with_model sends: the rules' price pages, else the first ones. legacy: the page choice
+        # before 2026-10-19, whose cached answers stay valid for the pages they were given.
+        nums = prices.price_pages(pages, legacy) or [p for p in sorted(pages) if p <= prices.MODEL_PAGES]
         sent = "\n\n".join(f"[Page {p}]\n{pages[p]}" for p in nums)
         text = f"{MODEL_CACHE_VERSION}\n{self.cfg.vision_model}\n{prices.MODEL_ROLE}\n{prices.MODEL_PROMPT}\n{sent}"
         return hashlib.sha1(text.encode("utf-8")).hexdigest()
@@ -232,6 +233,9 @@ class _Model:
         """(section or None, problem or None)."""
         key = self._key(pages)
         row = self.con.execute("SELECT answer FROM offer_model_cache WHERE text_hash = ?", (key,)).fetchone()
+        if row is None:  # an answer cached for the earlier page choice (no MODEL_CACHE_VERSION bump needed)
+            row = self.con.execute("SELECT answer FROM offer_model_cache WHERE text_hash = ?",
+                                   (self._key(pages, legacy=True),)).fetchone()
         if row:
             try:  # cached answers are cleaned like new ones (amounts of 0, day rates)
                 return prices.clean_model(_load(row[0]), pages), None
@@ -388,7 +392,8 @@ def _merge_versions(folders: dict[str, list]) -> dict[str, list]:
 _OFFER_NAMED = re.compile(r"\b(?:offers?|offres?|angebot|quotation|proposal|proposition|devis)\b")
 # Documents that are not what was sent: internal costing and negotiation sheets, drafts, old copies (folded names).
 _NOT_SENT = re.compile(r"\b(?:nego\w*|calcul\w*|kalkulation|interne?|internal|prix de revient|costs?|kosten"
-                       r"|prices? summary|summary for sales|old|draft|brouillon|entwurf|en cours|copie de|copy of|kopie)\b")
+                       r"|prices? summary|summary for sales|old|draft|brouillon|entwurf|en cours|copie(?: \d+)? de|copy(?: \d+)? of"
+                       r"|kopie)\b")
 _OLD_FOLDERS = {"old", "alt", "archive", "archiv", "ancien", "anciens", "draft", "temp", "tmp", "brouillon", "entwurf"}
 
 

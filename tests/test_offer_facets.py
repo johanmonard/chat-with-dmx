@@ -47,6 +47,7 @@ def test_revision_order():
 @pytest.mark.parametrize("name, country", [
     ("Allemagne", "Germany"), ("Deutschland", "Germany"), ("Germany", "Germany"), ("UK", "United Kingdom"),
     ("TURQUIE", "Turkey"), ("Pays-Bas", "Netherlands"), ("Österreich", "Austria"), ("Dupont Biscuits", None),
+    ("CYPRUS", "Cyprus"), ("Chypre", "Cyprus"), ("Iran", "Iran"), ("Koweit", "Kuwait"), ("Venezuela", "Venezuela"),
 ])
 def test_country_en(name, country):
     assert offerkeys.country_en(name) == country

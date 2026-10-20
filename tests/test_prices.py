@@ -926,6 +926,8 @@ def test_classify_equipment_services_and_deductions(text, kind):
     ({1: "Offre", 2: "Pour les positions 4 et 5, la durée de travail est une estimation."}, "x.pdf", "firm"),
     ({1: "Offer", 2: "Prices in EUR are indicative only, at the rate of the day."}, "x.pdf", "firm"),
     ({1: "Offer", 4: "Budgetary offer"}, "x.pdf", "firm"),  # the wording counts on pages 1-3 only
+    ({1: "Offer", 3: "1 Budget for flow wrapper CHF 400'000.-"}, "x.pdf", "firm"),  # page 3: a budget phrase only
+    ({1: "Offer", 3: "This budgetary proposal is intended as a base for discussion."}, "x.pdf", "budget"),
 ])
 def test_offer_type_wording(pages, name, kind):
     assert prices.offer_type(pages, name) == kind

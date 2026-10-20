@@ -698,7 +698,8 @@ def test_mails_internal_sheets_and_old_copies_lose_to_the_quotation():
     docs = [_doc(REV + r"\3001234_01_Prices summary.docx", 1), _doc(REV + r"\3001234_01_Summary for Sales Nego.docx", 2),
             _doc(REV + r"\3001234_01_Layout & Price.pdf", 7, mtime=5), _doc(REV + r"\3001234_01_Quotation.pdf", 3, mtime=9),
             _doc(REV + r"\3001234_01_Quotation.docx", 4), _doc(REV + r"\ACME - Offre 3001234-01.msg", 5),
-            _doc(REV + r"\OLD\3001234_01_Quotation.pdf", 6), _doc(REV + r"\Copie de 3001234_01_Quotation.pdf", 8)]
+            _doc(REV + r"\OLD\3001234_01_Quotation.pdf", 6), _doc(REV + r"\Copie de 3001234_01_Quotation.pdf", 8),
+            _doc(REV + r"\Copie (2) de 3001234_01_Quotation.pdf", 9)]
     got = sorted(offers._candidates(docs, "3001234"), key=offers._doc_order)
     assert [d["id"] for d in got] == [3, 7]  # the quotation first, then the other customer document
     only = [_doc(REV + r"\3001234_01_Prices summary.docx", 1), _doc(REV + r"\ACME - Offre 3001234-01.msg", 5)]
@@ -737,6 +738,23 @@ def test_a_scanned_pdf_gives_way_to_its_word_document_and_mails_are_no_price_doc
     mail = offers._read(con, _doc(REV + r"\ACME - Offre 3001234-01.msg", 3), _NoModel(), [])
     assert mail.section is None and mail.read_by == "none" and mail.notes == ["mail: not a price document"]
     assert (mail.date, mail.date_source) == ("2020-03-12", "mail")
+
+
+def test_a_model_answer_cached_for_the_earlier_page_choice_still_serves():
+    from types import SimpleNamespace
+    from dmx_docs import prices
+    pages = {2: "1x Paloma 7R CHF 680,000.-\n1 Output conveyor CHF 68,000.-",
+             3: "Packaging CHF 9,700.-\nTOTAL PRICE, net, without taxes, CHF 757,700.-"}
+    assert prices.price_pages(pages) == [2, 3] and prices.price_pages(pages, legacy=True) == [3]
+    con = _pages_db({})
+    offers._create(con)
+    cfg = SimpleNamespace(vision_model="test-vision", vision_url=closed_port_url(), vision_timeout_s=10)
+    model = offers._Model(con, cfg, quiet)
+    answer = prices.PriceSection([prices.PriceLine(1, "Packaging", "service", None, {"CHF": 9700.0}, 3)],
+                                 {"CHF": 757700.0}, [], [3], False)
+    con.execute("INSERT INTO offer_model_cache VALUES (?, ?)", (model._key(pages, legacy=True), offers._dump(answer)))
+    section, problem = model.read(pages)
+    assert problem is None and section.lines[0].amounts == {"CHF": 9700.0} and not model.checked
 
 
 def test_country_skips_the_sellers_address():
