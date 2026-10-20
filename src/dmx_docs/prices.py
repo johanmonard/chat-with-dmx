@@ -65,7 +65,7 @@ _CUR_TOKEN = re.compile(_CUR)
 # "Paloma 4R 1 150 000 €": a quantity may be fused with a space-grouped amount written number first,
 # when what follows the 1-2 digit lead is itself an amount of two 3-digit groups or more.
 _FUSED = re.compile(rf"\d{{1,2}}[{_SP}]\d{{3}}[{_SP}]\d{{3}}")
-_PER = re.compile(rf"[{_SP}]*(?:/[{_SP}]*(?:tag|day|jour|h|hour|stunde|heure)\b"
+_PER = re.compile(rf"[{_SP}]*(?:/[{_SP}]*(?:tage?|days?|jours?|h|hours?|stunden?|heures?)\b"
                   rf"|(?:per|par|pro)[{_SP}]+(?:day|jour|tag|hour|heure|stunde)\b)", re.I)
 # Exchange rates: "1.00 EUR = 1,0244 CHF", "1 Euro = 1.20 CHF", "1 EUR = CHF 1.08", "1 € = 1.08 CHF".
 _RCUR = r"(?:EUR|Euros?|€uros?|USD|CHF|GBP|US\$|€|\$|£)(?![A-Za-z])"  # "1 €uro = 1.20 CHF" is printed too
@@ -171,11 +171,21 @@ _RATE_WORDS = re.compile(r"tageskurs|wechselkurs|taux de change|cours de change|
 _RATE_HINT = re.compile(r"\brates?\b|\bcours\b|kurs|\btaux\b|\bexchange\b", re.I)
 # Budget wording on pages 1-3 or in the file name ('Offre budgétaire', 'Budgetangebot', 'Price indication'). Not
 # 'indicative' or 'estimation' alone: 'prices in EUR are indicative', 'the working time is an estimation'.
-_BUDGET_PHRASE = re.compile(r"\b(?:budgetary|budg[ée]taire|budget[- ]?(?:offer|quotation|proposal|angebot|price)"
-                            r"|richtpreis|richtangebot|preisindikation|price indication|indication de prix)", re.I)
+_BUDGET_PHRASE = re.compile(r"\b(?:budget(?:ary)?[- ]?(?:offer|quotation|proposal|angebot|price)"
+                            r"|offres? budg[ée]taires?|prix budg[ée]taires?|richtpreis|richtangebot|preisindikation"
+                            r"|price indication|indication de prix)", re.I)
+_ESTIMATION = (r"|prix sont (?:une )?estimation|prices? (?:is|are) an estimation|offre estimation|estimation offer"
+               r"|estimation of\b[^\n]{0,80}?(?:CHF|EUR|USD|€)")
 _BUDGET = re.compile(r"\b(?:budget|budg[ée]taire|richtpreis|richtangebot|preisindikation|price indication"
-                     r"|indication de prix|prix indicatifs?|offre indicative|indicative (?:offer|price|quotation|proposal))",
-                     re.I)
+                     r"|indication de prix|prix indicatifs?|offre indicative|indicative (?:offer|price|quotation|proposal)"
+                     + _ESTIMATION + ")", re.I)
+# A budget offer cited by another offer ('remplace l'offre budgétaire n° ...', 'par rapport à l'offre budgétaire
+# B-...', 'following our budgetary offer'): words before the hit, or another offer's number right after it.
+_CITED_BEFORE = re.compile(r"(?:remplac\w*|par rapport [àa]|d[ée]fini\w* dans|replac\w*|following|further to"
+                           r"|with reference to|suite [àa]|r[ée]f[ée]rence [àa]|gem[äa]ss|bezugnehmend auf|ersetzt)"
+                           r"\W+(?:[\w'’]+\W+){0,3}$", re.I)
+_NUMBER_AFTER = re.compile(r"[\w]*\W{1,4}(?:[^\W\d]+\W{1,4})?(?:n[°o]s?\.?\s*|nr\.?\s*|#\s*)?(?:[BFE][- ]?)?(\d{6,7})(?!\d)",
+                           re.I)
 
 
 def parse_number(s: str) -> float | None:
@@ -247,11 +257,12 @@ def _rate_values(text: str) -> set[float]:
 
 # Tables of Word documents ('Pos | Désignation | Qté | Prix/unit. CHF | Total CHF'): the currency is in the header
 # of the price column, the rows hold bare numbers. A row's amount is its last cell, printed as a price ("12'000.00",
-# "944.00"); position, quantity and unit price cells are left out.
+# "600.00"); position, quantity and unit price cells are left out.
 _PRICE_HEADER = re.compile(r"\b(?:prix|price|preis|total|amount|montant|betrag|summe)", re.I)
 _CUR_CELL = re.compile(r"(?<![A-Za-z])(?:CHF|EUR|USD|GBP|US\$|€uros?|euros?|€|\$|£|SFr\.?|Fr\.)(?![A-Za-z])", re.I)
 _CELL_PRICE = re.compile(rf"[{_DASH}]?[{_SP}]*(?:\d{{1,3}}(?:['’ .,]\d{{3}})+(?:[.,]\d{{2}})?|\d+[.,]\d{{2}})"
                          rf"{_END}")
+_CUR_SPLIT = re.compile(rf"({_CUR_CELL.pattern})[{_SP}]*\|[{_SP}]*(?=[{_DASH}]?[{_SP}]*\d)", re.I)
 
 
 def _tables(text: str) -> str:
@@ -261,6 +272,8 @@ def _tables(text: str) -> str:
     out, currency, columns, width = [], None, {}, 0
     for line in text.split("\n"):
         cells = [c.strip() for c in line.split("|")] if "|" in line else []
+        if not cells and line.strip() and (len(line.split()) > 6 or line.rstrip().endswith(".")):
+            currency, columns, width = None, {}, 0  # a sentence: the table has ended ('Engineering :' has not)
         if cells:
             head = [(i, c) for i, c in enumerate(cells)
                     if _PRICE_HEADER.search(c) and _CUR_CELL.search(c) and len(c.split()) <= 4]
@@ -276,6 +289,8 @@ def _tables(text: str) -> str:
                 priced = [f"{cur} {cells[i]}" for cur, i in columns.items() if _CELL_PRICE.fullmatch(cells[i])] \
                     if len(cells) == width else []
                 line = " ".join(words + (priced or [currency, filled[-1]]))
+            else:  # a currency and its amount in two cells: 'Equipement | (EUR | 101'500.--) | CHF | 120'000.--'
+                line = _CUR_SPLIT.sub(lambda m: f"{_currency(m.group(1))} ", line)
         out.append(line)
     return "\n".join(out)
 
@@ -298,7 +313,7 @@ def _split(line: str) -> tuple[list[tuple[str, float, bool]], str, str]:
 
 
 def _prose(line: str) -> bool:
-    """A sentence quoting a price ('Une note de crédit de € 944.- , soit 8 heures, sera émise en faveur de ...'):
+    """A sentence quoting a price ('A credit note of CHF 600.- , that is 4 hours, will be issued with this order ...'):
     12 words or more, and 4 words or more after its last amount. A priced line ends with its amounts."""
     spans = _amount_spans(line)
     return (bool(spans) and len(line.split()) >= 12
@@ -353,7 +368,7 @@ def _has_included(text: str) -> bool:
 
 def price_pages(pages: dict[int, str], legacy: bool = False) -> list[int]:
     """From a page with a price word and 2+ amounts (or 1 amount and an included item: 'Equipement € Inclus',
-    'Total € 270'000') through the page holding the total (at most 3 consecutive pages). The first such run that
+    'Total € 150'000') through the page holding the total (at most 3 consecutive pages). The first such run that
     ends in a total wins, else the first candidate page alone. A run that ends in a total also takes the pages
     before it that hold 2+ amounts and no total (items listed under 'Proposal' without a price word), within the
     3 pages, and the next page when options are announced after the total ('The following options are also
@@ -867,6 +882,8 @@ def parse_section(pages: dict[int, str]) -> PriceSection | None:
         sum_ok = (False if unreadable else None if not any(l.amounts for l in counted)
                   else _sums_match(counted, totals, text))
     else:
+        if not any(l.amounts for l in lines):
+            return None  # only included items, no total: nothing priced, no price section (R38)
         sum_ok = False if unreadable or ambiguous else None
     rates = _rates(text)
     return PriceSection(lines, totals, rates, nums, sum_ok)
@@ -901,12 +918,32 @@ def offer_date(pages: dict[int, str]) -> tuple[str, str] | None:
     return None
 
 
-def offer_type(pages: dict[int, str], name: str) -> str:
-    """'budget' when pages 1-2 or the file name say budget / budgétaire / Richtpreis / price indication..., or page 3
-    says it in a budget phrase ('This budgetary proposal', not 'Budget for flow wrapper' in a firm offer), else
-    'firm'."""
-    text = "\n".join(pages.get(p, "") for p in (1, 2)) + "\n" + name
-    return "budget" if _BUDGET.search(text) or _BUDGET_PHRASE.search(pages.get(3, "")) else "firm"
+def _budget_said(text: str, rx: re.Pattern, own: str | None) -> bool:
+    """A budget word that is not a citation of another offer (_CITED_BEFORE, another offer number after it)."""
+    for m in rx.finditer(text):
+        if _CITED_BEFORE.search(text[max(0, m.start() - 60):m.start()]):
+            continue
+        number = _NUMBER_AFTER.match(text, m.end())
+        if number and own and number.group(1) != own:
+            continue
+        return True
+    return False
+
+
+def offer_type(pages: dict[int, str], name: str, key: str | None = None) -> str:
+    """'budget' when page 1 or the file name say budget / budgétaire / Richtpreis / price indication / 'les prix sont
+    une estimation'..., or page 2 does, or page 3 in a budget phrase ('This budgetary proposal', not 'Budget for flow
+    wrapper' in a firm offer), else 'firm'. A budget offer cited by another offer ('remplace l'offre budgétaire
+    n° ...') does not count. A formal offer (F- number) is budget only by page 1 or its file name."""
+    own = re.search(r"\d{6,7}", key or name)
+    own = own.group() if own else None
+    formal = bool(re.match(r"\W*F[- ]?\d", key or "") or re.search(r"(?<![A-Za-z0-9])F-\d{6,7}", name))
+    if _budget_said(pages.get(1, "") + "\n" + name, _BUDGET, own):
+        return "budget"
+    if formal:
+        return "firm"
+    return "budget" if (_budget_said(pages.get(2, ""), _BUDGET, own)
+                        or _budget_said(pages.get(3, ""), _BUDGET_PHRASE, own)) else "firm"
 
 
 MODEL_ROLE = "You read the price section of a sales offer for industrial packaging machines."

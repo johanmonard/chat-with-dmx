@@ -294,20 +294,33 @@ def _alias_model(text: str, aliases: list[tuple[str, str]]) -> str | None:
 
 
 def _score(section: prices.PriceSection | None) -> int:
-    """How well the rules read a section: none 0, sum check failed 1, no total 2, sum checked 3."""
-    return 0 if section is None else {False: 1, None: 2, True: 3}[section.sum_ok]
+    """How well the rules read a section: none or no amount at all 0, sum check failed 1, no total 2, sum checked 3."""
+    if section is None or not (section.totals or any(l.amounts for l in section.lines)):
+        return 0
+    return {False: 1, None: 2, True: 3}[section.sum_ok]
+
+
+def _offer_of(doc) -> str | None:
+    """The document's offer key (doc_facets.offer), when the row carries it."""
+    return doc["offer"] if "offer" in doc.keys() else None
+
+
+def _priced(section: prices.PriceSection | None) -> bool:
+    """A line of the section carries an amount (not only included items)."""
+    return bool(section) and any(l.amounts for l in section.lines)
 
 
 def _read(con, doc, model: _Model, aliases, twin=None) -> _Read:
     """One document read. A mail is never a price document (its date is the mail's). A PDF the rules cannot read
     (a scan whose OCR lost the numbers, a garbled text layer) gives way to its Word twin (same name) when the rules
-    read the twin better."""
+    read the twin with a checked sum, or read nothing in the PDF. The model is asked when the rules read no section,
+    a failed sum, or no priced line."""
     if doc["status"] != "ok":  # listed, not read: a scan before OCR, a damaged or empty file
         note = (f"file error: {doc['error'] or 'unknown'}" if doc["status"] == "error"
                 else _STATUS_NOTES.get(doc["status"], f"not read (status {doc['status']})"))
         return _Read(doc, {}, notes=[note])
     pages = _pages(con, doc["id"])
-    budget = prices.offer_type(pages, doc["name"]) == "budget"
+    budget = prices.offer_type(pages, doc["name"], _offer_of(doc)) == "budget"
     if doc["ext"] == ".msg":
         r = _Read(doc, pages, notes=["mail: not a price document"], budget=budget)
         found = prices.offer_date(pages)
@@ -318,12 +331,13 @@ def _read(con, doc, model: _Model, aliases, twin=None) -> _Read:
     if twin is not None and _score(section) < 2:
         twin_pages = _pages(con, twin["id"])
         twin_section = prices.parse_section(twin_pages)
-        budget |= prices.offer_type(twin_pages, twin["name"]) == "budget"
-        if _score(twin_section) > _score(section):
+        budget |= prices.offer_type(twin_pages, twin["name"], _offer_of(twin)) == "budget"
+        better, score = _score(twin_section), _score(section)
+        if better > score and (better == 3 or score == 0):  # a checked sum, or the PDF reads nothing
             doc, pages, section, other = twin, twin_pages, twin_section, pages
     r = _Read(doc, pages, budget=budget)
     read_by = "rules"
-    if r.pages and (section is None or section.sum_ok is False):
+    if r.pages and (section is None or section.sum_ok is False or not _priced(section)):
         answer, problem = model.read(r.pages)
         if problem:
             r.notes.append(problem)
@@ -339,6 +353,8 @@ def _read(con, doc, model: _Model, aliases, twin=None) -> _Read:
     r.confidence = _confidence(read_by, section.sum_ok)
     if section.sum_ok is False:
         r.notes.insert(0, "sum check failed")
+    elif not _priced(section):
+        r.notes.insert(0, "no priced line")  # included items and a total only
     ocr = {p for (p,) in con.execute("SELECT page_no FROM ocr_pages WHERE doc_id = ? AND status = 'text'",
                                      (doc["id"],))}
     if r.confidence == "high" and ocr & set(section.pages):
@@ -393,7 +409,7 @@ _OFFER_NAMED = re.compile(r"\b(?:offers?|offres?|angebot|quotation|proposal|prop
 # Documents that are not what was sent: internal costing and negotiation sheets, drafts, old copies (folded names).
 _NOT_SENT = re.compile(r"\b(?:nego\w*|calcul\w*|kalkulation|interne?|internal|prix de revient|costs?|kosten"
                        r"|prices? summary|summary for sales|old|draft|brouillon|entwurf|en cours|copie(?: \d+)? de|copy(?: \d+)? of"
-                       r"|kopie)\b")
+                       r"|kopie|pas envoye|not sent|nicht versendet|annule|cancell?ed|storniert)\b")
 _OLD_FOLDERS = {"old", "alt", "archive", "archiv", "ancien", "anciens", "draft", "temp", "tmp", "brouillon", "entwurf"}
 
 
@@ -460,9 +476,8 @@ def _label_pattern(label: str | None) -> re.Pattern | None:
     return re.compile(rf"(?<![A-Za-z0-9])(?<!\d[./])(?:{alt})(?!\d)(?![./]\d)", re.I)
 
 
-# The seller's letterhead, address and footer (Demaurex, Bosch Packaging, Rotzinger; Romanel, Vufflens, Ecublens).
-_SELLER = re.compile(r"demaurex|bosch\s+packaging|rotzinger|m[ée]sanges|romanel|vufflens|ecublens|\bCH-\d{4}\b|\+41",
-                     re.I)
+# The seller's letterhead, address and footer: its name or its places (a bare CH- postcode or +41 is also a Swiss client).
+_SELLER = re.compile(r"demaurex|bosch\s+packaging|rotzinger|m[ée]sanges|romanel|vufflens|ecublens", re.I)
 
 
 def _first_country(text: str) -> str | None:
@@ -482,7 +497,7 @@ def _country_in(text: str) -> str | None:
     """English name of the first country named on a page (one to three words, starting with a capital;
     abbreviations of 3 letters or fewer only in capitals). The seller's own address is skipped: a cell (between
     '|' or '♦') naming the seller or its address, and Switzerland in the seller's row or the row after it
-    ('Ch. des Mésanges 3, CH-1032 Romanel' + 'Switzerland 27/05/09')."""
+    ('Ch. des Mésanges 3, CH-1032 Romanel' + 'Switzerland 12/03/09')."""
     after_seller = False
     for row in text.split("\n"):
         seller_row = False

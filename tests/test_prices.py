@@ -742,6 +742,13 @@ def test_a_table_with_the_currency_in_its_column_header_is_read():
     assert s.lines[0].text == "Engineering : Prestation interne"  # the position number and quantity cells are left out
 
 
+def test_the_table_currency_ends_with_the_table():
+    text = prices._tables(TABLE_FR + "\nLes dimensions de la cellule sont données dans le plan en annexe.\n"
+                                     "Poids de la machine | 1'250.00")
+    assert text.endswith("Poids de la machine | 1'250.00")  # not 'CHF 1'250.00': another table
+    assert "Prestation interne CHF 12'000.00" in text  # a short label line inside the table keeps it
+
+
 def test_a_table_with_a_column_per_currency_keeps_both():
     s = prices.parse_section({2: "Pos. | Désignation | Qty | Total CHF | Total €uros\n"
                                  "1 | One (1) Complete end-effector | 1 | 6’000.00 | 4’080.00\n"
@@ -965,6 +972,24 @@ def test_an_option_word_deep_in_a_long_description_is_no_option():
     assert prices.classify("2x Erecting x 3 Format versatility: automatic former with an optional extended head", {}) \
         == "machine"
     assert prices.classify("Option: second infeed with its own conveyor and a vision camera on top", {}) == "option"
+
+
+@pytest.mark.parametrize("pages, name, key, kind", [
+    ({1: "Offre formelle F-0903001 V2\nCette offre remplace l'offre budgétaire n° 0902011 V1."}, "x.pdf", "0903001",
+     "firm"),
+    ({2: "Prix en baisse par rapport à l'offre budgétaire B-250001 V1."}, "x.pdf", "B-250099", "firm"),
+    ({1: "Les équipements définis dans les offres budgétaires n° 250001 et 250002"}, "x.pdf", "B-250099", "firm"),
+    ({1: "Offer", 3: "Prices for these products must be understood as budgetary."}, "x.pdf", None, "firm"),
+    ({1: "Offre budgétaire n° 250001 Version 1"}, "x.pdf", "B-250001", "budget"),  # its own number
+    ({1: "Budgetary Proposal #250001 Version 2"}, "x.pdf", "B-250001", "budget"),
+    ({1: "Offre", 2: "Les prix sont une estimation sur la base des échantillons reçus."}, "x.pdf", None, "budget"),
+    ({1: "Offer", 2: "Estimation of the investment: CHF 300'000 to CHF 350'000"}, "x.pdf", None, "budget"),
+    ({1: "ACME - Offre estimation pour une cellule Paloma"}, "x.pdf", None, "budget"),
+    ({1: "Offre formelle", 2: "Prix budgétaire de l'option vision"}, "ACME F-250001 V1.pdf", "F-250001", "firm"),
+    ({1: "Offre budgétaire n° 250001"}, "ACME F-250001 V1.pdf", "F-250001", "budget"),  # the title beats F-
+])
+def test_offer_type_cited_budget_offers_estimations_and_formal_offers(pages, name, key, kind):
+    assert prices.offer_type(pages, name, key) == kind
 
 
 def test_offer_date_with_of_between_day_and_month():

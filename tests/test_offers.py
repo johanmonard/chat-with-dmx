@@ -4,7 +4,7 @@ from datetime import date, datetime
 
 import pytest
 
-from dmx_docs import cli, offers
+from dmx_docs import cli, offers, prices
 from offers_corpus import (VOCABULARY, build_garbled_corpus, build_offers_corpus, build_versions_corpus,
                            closed_port_url, indexed, make_projects_db, quiet, world)
 
@@ -740,6 +740,26 @@ def test_a_scanned_pdf_gives_way_to_its_word_document_and_mails_are_no_price_doc
     assert (mail.date, mail.date_source) == ("2020-03-12", "mail")
 
 
+def test_a_word_twin_with_nothing_priced_never_beats_a_priced_pdf():
+    pdf, word = _doc(REV + r"\3001234_01.pdf", 1), _doc(REV + r"\3001234_01.doc", 2)
+    pdf_page = ("PRIX\nEquipement EUR 101'500.-- CHF 120'000.--\nJours supplémentaires CHF 1'100.- par jour\n"
+                "Prix total net HT CHF 125'000.--")
+    word_page = ("# PRIX\nEquipement | (EUR | 101'500.--) | CHF | 120'000.--\n"
+                 "Un Paloma 4R incluant 1 jour de FAT (Jours additionnels 1100 CHF/Jours) |\n"
+                 "Emballage, transport et assurance | Inclus\nMise en service | Inclus\n")
+    con = _pages_db({1: {1: "ACME Foods", 2: pdf_page}, 2: {1: "ACME Foods", 2: word_page}})
+    r = offers._read(con, pdf, _NoModel(), [], twin=word)
+    assert r.doc["id"] == 1 and r.read_by == "rules" and r.section.sum_ok is False  # the twin: no total, not better
+    assert r.notes == ["sum check failed", "model unavailable"]  # the model is still asked
+    assert prices.amounts_in("(Jours additionnels 1100 CHF/Jours)") == []  # a day rate, also in the plural
+    twin = prices.parse_section({2: word_page})
+    assert twin.lines[0].amounts == {"EUR": 101500.0, "CHF": 120000.0}  # currency and amount in separate cells
+    only_included = prices.parse_section({2: "PRIX\nEmballage, transport et assurance € Inclus\nMise en service € Inclus\n"
+                                             "Une note de crédit de CHF 500.- sera émise pour les 4 heures de formation "
+                                             "données lors de la mise en service."})
+    assert only_included is None  # nothing priced and no total: no price section (R38)
+
+
 def test_a_model_answer_cached_for_the_earlier_page_choice_still_serves():
     from types import SimpleNamespace
     from dmx_docs import prices
@@ -760,13 +780,24 @@ def test_a_model_answer_cached_for_the_earlier_page_choice_still_serves():
 def test_country_skips_the_sellers_address():
     assert offers._country_in("ACME Foods\nBOSCH PACKAGING TECHNOLOGY SA ♦ Chemin des Mésanges 3 ♦ 1032 Romanel-sur-"
                               "Lausanne ♦ Switzerland") is None
-    assert offers._country_in("Pays\nCh. des Mésanges 3, CH-1032 Romanel Page 1 sur 11\nSwitzerland 27/05/09") is None
-    assert offers._country_in("ACME Foods Taikos 88 Kaunas Lithuania | Why Demaurex SA? Over 30 years") == "Lithuania"
+    assert offers._country_in("Pays\nCh. des Mésanges 3, CH-1032 Romanel Page 1 sur 11\nSwitzerland 12/03/09") is None
+    assert offers._country_in("ACME Foods Laisves 12 Vilnius Lithuania | Why Demaurex SA? Over 30 years") == "Lithuania"
     assert offers._country_in("Globex GmbH\nBerlin\nGermany\nDemaurex SA, Route 1, 1030 Romanel, Switzerland") == "Germany"
+
+
+def test_a_swiss_clients_address_is_not_the_seller():
+    assert offers._country_in("ACME Foods SA\nRue du Lac 1, CH-1000 Lausanne\nTel. +41 21 000 00 00\nSwitzerland") \
+        == "Switzerland"
+
+
+def test_documents_marked_as_not_sent_lose_to_the_offer():
+    docs = [_doc(REV + r"\Pas envoyé 3001234_01.doc", 1), _doc(REV + r"\3001234_01 not sent.pdf", 2),
+            _doc(REV + r"\3001234_01 annulé.pdf", 3), _doc(REV + r"\3001234_01.pdf", 4)]
+    assert [d["id"] for d in offers._candidates(docs, "3001234")] == [4]
 
 
 def test_country_from_the_last_revision_first():
     from types import SimpleNamespace as R
     revisions = [(None, 0, R(pages={1: "Supplier quote to Demaurex SA, Vufflens-la-Ville\nGlobex AG\nZürich, Switzerland"})),
-                 ("Q06", 7, R(pages={1: "ACME Foods Kaunas Lithuania"}))]
+                 ("Q06", 7, R(pages={1: "ACME Foods Vilnius Lithuania"}))]
     assert offers._document_country(revisions) == "Lithuania"
