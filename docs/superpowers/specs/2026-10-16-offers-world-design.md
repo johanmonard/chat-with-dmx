@@ -206,8 +206,9 @@ A revision folder can hold several priced documents (designer's call, to check i
 - **Copies issued by the group** (`10 - offre formelle Rotzinger`): treated as a revision like
   any other; the issuing company is kept when the document names it.
 
-Each offer also gets an **offer type**: `firm` or `budget` (words "budget", "Richtpreis",
-"prix indicatif", "indicative", "estimation" on the first pages or in the name), default `firm`.
+Each offer also gets an **offer type**: `firm` or `budget` (words "budget", "budgétaire", "Richtpreis",
+"Richtangebot", "price indication", "prix indicatif" on pages 1-2 or in the name, a budget phrase on page 3;
+not "indicative" or "estimation" alone, 2026-10-19 spot check), default `firm`.
 
 The price page is found by its words
 ("PRICE", "PRIX", "PREIS", "net", "netto", "without taxes", "ohne Steuern", "hors taxes") and
