@@ -272,8 +272,9 @@ def _tables(text: str) -> str:
     out, currency, columns, width = [], None, {}, 0
     for line in text.split("\n"):
         cells = [c.strip() for c in line.split("|")] if "|" in line else []
-        if not cells and line.strip() and (len(line.split()) > 6 or line.rstrip().endswith(".")):
-            currency, columns, width = None, {}, 0  # a sentence: the table has ended ('Engineering :' has not)
+        if (not cells and line.strip() and not line.rstrip().endswith(":")
+                and (len(line.split()) > 6 or line.rstrip().endswith("."))):
+            currency, columns, width = None, {}, 0  # a sentence: the table has ended (a label 'Engineering :' has not)
         if cells:
             head = [(i, c) for i, c in enumerate(cells)
                     if _PRICE_HEADER.search(c) and _CUR_CELL.search(c) and len(c.split()) <= 4]

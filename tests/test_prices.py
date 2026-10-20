@@ -747,6 +747,9 @@ def test_the_table_currency_ends_with_the_table():
                                      "Poids de la machine | 1'250.00")
     assert text.endswith("Poids de la machine | 1'250.00")  # not 'CHF 1'250.00': another table
     assert "Prestation interne CHF 12'000.00" in text  # a short label line inside the table keeps it
+    longer = prices._tables(TABLE_FR.replace("Montage sur site (2 hommes) :",
+                                             "Installation et mise en service sur site (2 hommes) :"))
+    assert "câblage ~100 h CHF 12'000.00" in longer  # so does a longer one ending with ':'
 
 
 def test_a_table_with_a_column_per_currency_keeps_both():
