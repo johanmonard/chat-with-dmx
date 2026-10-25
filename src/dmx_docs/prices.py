@@ -100,6 +100,8 @@ _DESCRIPTION = re.compile(r"[->»•*–▪●◦►➢✓-]|(?:including|
 _INCLUDING_COLON = re.compile(r"\b(?:including|incl\.?|incluant|comprenant|compos[ée]e? de|[ée]quip[ée]e? de|equipped with"
                               r"|einschlie(?:ss|ß)lich|bestehend aus|ausgestattet mit)"
                               r"(?:\s+(?:each|jeweils|chacune?))?\s*:", re.I)
+# A machine named with an article in the cell after a generic price ('Un Paloma D2 Top Loader avec ...', 'A Delfi cell').
+_ARTICLE_ITEM = re.compile(r"^(?:un|une|a|an|one|ein|eine)\s", re.I)
 _NUMBER_WORD = (r"(?:one|two|three|four|five|six|seven|eight|nine|ten|un|une|deux|trois|quatre|cinq|sept|huit"
                 r"|neuf|dix|ein|eine|zwei|drei|vier|fünf|sechs|sieben|acht|neun|zehn)")
 # "2x Paloma", "2 x Paloma", "2xPaloma", "Four (4) Presto": group 1 or group 2 is the quantity.
@@ -141,7 +143,7 @@ _INCOTERMS_WORD = re.compile(r"\bincoterms?\b", re.I)
 _INTRO = re.compile(r"we kindly offer you|nous avons le plaisir de vous propos|wir freuen uns|nous vous proposons"
                     r"|we are pleased to offer|wir schlagen ihnen", re.I)
 _OPTION_INTRO = re.compile(r"following options? (?:is|are) (?:also )?possible|les options suivantes|l.option suivante"
-                           r"|folgenden? optionen?", re.I)
+                           r"|folgenden? optionen?|^\W*(?:options|optionen|optional extras)[\W|]*$", re.I)  # 'Options |'
 # An item line that is an option by its first word ("Option: ...", "Optional ...", "En option ..."): with
 # an option introduction, the only lines after the net total that are extras out of the sum (R35).
 _VARIANT = re.compile(r"^\W*(?:\d+(?:\.\d+)*\.?\s+)?(?:variante?|alternative)\b", re.I)
@@ -316,6 +318,9 @@ def _tables(text: str) -> str:
         cells = [c.strip() for c in line.split("|")] if "|" in line else []
         if tiers and not cells:
             tiers, currency = {}, None
+        if cells and (split := _split_multi(cells)):
+            out.append("\n".join(split))
+            continue
         if not tiers and cells and (tier := _tier_header(cells)):
             currency, tiers = tier
             out.append("PRICES")  # the header row: a price heading, no item's text
@@ -353,6 +358,33 @@ def _tables(text: str) -> str:
                 line = _CUR_SPLIT.sub(lambda m: f"{_currency(m.group(1))} ", line)
         out.append(line)
     return "\n".join(out)
+
+
+_CELL_NUMBER = re.compile(rf"\(?[{_SP}]*(?:\d{{1,3}}(?:['’ .,]\d{{3}})+(?:[.,]\d{{2}})?|\d+[.,]\d{{2}}){_END}\)?")
+_ITEM_START = re.compile(r"(?<=\S)\s+(?=(?:one|two|three|four|five|six|un|une|deux|trois|quatre|ein|eine|zwei|drei|vier"
+                         r"|\d+\s*[x×]?)\s)", re.I)
+
+
+def _split_multi(cells: list[str]) -> list[str] | None:
+    """A Word table row whose cells hold several items' amounts ('Two bucket chains One end-effector | (EUR (EUR |
+    4'900.-) 4'800.-) | CHF CHF | 6'900.- 6'700.-'): one line per item, amounts in order; the names are split before
+    each quantity word when they give as many parts, else numbered. None for any other row."""
+    pairs = []
+    for i in range(len(cells) - 1):
+        curs = _CUR_CELL.findall(cells[i])
+        if len(curs) < 2 or re.sub(_CUR_CELL.pattern, "", cells[i], flags=re.I).strip(" ()"):
+            continue
+        values = _CELL_NUMBER.findall(cells[i + 1])
+        if len(values) == len(curs) and not _CELL_NUMBER.sub("", cells[i + 1]).strip():
+            pairs.append(("(" in cells[i], _currency(curs[0]), [v.strip(" ()") for v in values]))
+    if not pairs or len({len(v) for _, _, v in pairs}) != 1:
+        return None
+    k = len(pairs[0][2])
+    name = next((c for c in cells if c), "")
+    parts = _ITEM_START.split(name)
+    names = parts if len(parts) == k else [f"{name} ({j + 1}/{k})" for j in range(k)]
+    return [" ".join([names[j]] + [f"({cur} {v[j]})" if bracket else f"{cur} {v[j]}" for bracket, cur, v in pairs])
+            for j in range(k)]
 
 
 def _tier_header(cells: list[str]) -> tuple[str, dict[int, str]] | None:
@@ -816,8 +848,9 @@ def _blocks(pages: dict[int, str], nums: list[int]) -> list[_Block]:
                 describing, prev_amounts = True, False
                 continue
             if (not amts and blocks and (just_closed or (describing and blocks[-1].name_line))
-                    and not any(_has_item(x) for x in blocks[-1].label) and _starts_item(stripped)
-                    and ((stripped.endswith(":") and nxt and _is_description(nxt[1])) or _INCLUDING_COLON.search(stripped))):
+                    and blocks[-1].label and not _has_item(blocks[-1].label[-1]) and _starts_item(stripped)
+                    and ((stripped.endswith(":") and nxt and _is_description(nxt[1])) or _INCLUDING_COLON.search(stripped)
+                         or (_ARTICLE_ITEM.match(stripped) and not (nxt and nxt[2] and not nxt[4])))):
                 # 'Equipment CHF 320'000' then '1 Paloma 2R Top Loader cell including each :' and its bullets, or a
                 # Word table cell with its description glued: 'A Delfi Feed Placer cell including: Four Delta Robots ...'
                 blocks[-1].description.append(stripped)

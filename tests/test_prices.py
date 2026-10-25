@@ -1167,3 +1167,22 @@ def test_is_formal():
     assert not prices.is_formal({1: "Unverbindliches Angebot"}, "x.pdf")
     assert not prices.is_formal({1: "a formal proposal is required before any commitment"}, "x.pdf")
     assert not prices.is_formal({1: "avant l'établissement d'une offre formelle"}, "x.pdf")
+
+
+def test_a_table_cell_holding_two_options_gives_two_lines():
+    page = ("Equipment | (EUR | 120’000.-) | CHF | 150’000.-\nA Presto cell including: One Delta robot One HMI |\n"
+            "PRICE, net, without taxes, FCA Ecublens (INCOTERMS 2010) | (EUR | 120’000.-) | CHF | 150’000.-\n\nOptions |\n"
+            "Two Bucket chains One vacuum end-effector | (EUR (EUR | 4’900.-) 4’800.-) | CHF CHF | 6’100.- 6’000.-\n")
+    s = prices.parse_section({4: page})
+    assert [(l.kind, l.text, l.amounts) for l in s.lines[1:]] == [
+        ("option", "Two Bucket chains", {"EUR": 4900.0, "CHF": 6100.0}),
+        ("option", "One vacuum end-effector", {"EUR": 4800.0, "CHF": 6000.0})]
+    assert s.lines[0].family == "Presto" and s.sum_ok is True
+
+
+def test_the_machine_named_with_an_article_in_the_next_cell_after_an_introduction():
+    page = ("Introduction\nPour cette fonction nous vous proposons une cellule Paloma D2.\nProposition\n"
+            "Equipement | | CHF | 300’000.-\nUn Paloma D2 Top Loader avec deux robots et un convoyeur |\n"
+            "Mise en service sur site | | CHF | 30’000.-\nPrix total, net, hors taxe | | CHF | 330’000.-\n")
+    s = prices.parse_section({3: page})
+    assert [(l.kind, l.family) for l in s.lines] == [("machine", "Paloma"), ("service", None)] and s.sum_ok is True
