@@ -95,6 +95,10 @@ _PAGE_NO = re.compile(r"^\s*(?:page|seite)\s+\d+(?:\s*(?:/|of|von|sur|de)\s*\d+)
 # A description line: a bullet (also the Wingdings bullets of Word documents, U+F0xx) or an including-word.
 _DESCRIPTION = re.compile(r"[->»•*–▪●◦►➢✓-]|(?:including|inkl|einschliesslich|einschließlich|y compris"
                           r"|comprenant)\b", re.I)
+# An item name opening its description on the same line: 'A Delfi cell including: Four Delta Robots ...'.
+_INCLUDING_COLON = re.compile(r"\b(?:including|incl\.?|incluant|comprenant|compos[ée]e? de|[ée]quip[ée]e? de|equipped with"
+                              r"|einschlie(?:ss|ß)lich|bestehend aus|ausgestattet mit)"
+                              r"(?:\s+(?:each|jeweils|chacune?))?\s*:", re.I)
 _NUMBER_WORD = (r"(?:one|two|three|four|five|six|seven|eight|nine|ten|un|une|deux|trois|quatre|cinq|sept|huit"
                 r"|neuf|dix|ein|eine|zwei|drei|vier|fünf|sechs|sieben|acht|neun|zehn)")
 # "2x Paloma", "2 x Paloma", "2xPaloma", "Four (4) Presto": group 1 or group 2 is the quantity.
@@ -806,9 +810,10 @@ def _blocks(pages: dict[int, str], nums: list[int]) -> list[_Block]:
                 describing, prev_amounts = True, False
                 continue
             if (not amts and blocks and (just_closed or (describing and blocks[-1].name_line))
-                    and not any(_has_item(x) for x in blocks[-1].label) and stripped.endswith(":")
-                    and _starts_item(stripped) and nxt and _is_description(nxt[1])):
-                # 'Equipment CHF 320'000' then '1 Paloma 2R Top Loader cell including each :' and its bullets
+                    and not any(_has_item(x) for x in blocks[-1].label) and _starts_item(stripped)
+                    and ((stripped.endswith(":") and nxt and _is_description(nxt[1])) or _INCLUDING_COLON.search(stripped))):
+                # 'Equipment CHF 320'000' then '1 Paloma 2R Top Loader cell including each :' and its bullets, or a
+                # Word table cell with its description glued: 'A Delfi Feed Placer cell including: Four Delta Robots ...'
                 blocks[-1].description.append(stripped)
                 blocks[-1].name_line = blocks[-1].name_line or stripped
                 describing, prev_amounts = True, False

@@ -1125,3 +1125,20 @@ def test_angle_bullets_are_description_lines_of_a_delivered_total():
             "Budget Price, FCA Ecublens CHF 270'000.- (€ 240'000.-)\n")
     s = prices.parse_section({1: page})
     assert len(s.lines) == 1 and s.totals == {"CHF": 270000.0, "EUR": 240000.0} and s.sum_ok is True
+
+
+def test_the_machine_named_in_a_table_cell_after_a_generic_equipment_price_belongs_to_it():
+    page = ("Proposal\n\nIn this quotation, we kindly offer you:\n\nEquipment | (EUR | 300’000.-) | CHF | 330’000.-\n"
+            "A Paloma 3R cell including: Three Delta Robots One HMI One Controller (Additional days:1100 CHF/Day) |\n"
+            "Installation and setup | 8-10 % of the equipment price\nPackaging, transport and insurance | Not included\n"
+            "PRICE, net, without taxes, EXW Ecublens (INCOTERMS 2010) | (EUR | 300’000.-) | CHF | 330’000.-\n")
+    s = prices.parse_section({4: page})
+    assert [(l.kind, l.family, l.model) for l in s.lines] == [("machine", "Paloma", "Paloma 3R")] and s.sum_ok is True
+    assert s.lines[0].text.startswith("Equipment") and "A Paloma 3R cell including:" in s.lines[0].text
+
+
+@pytest.mark.parametrize("cell", ["Un Paloma D2 Top Loader Incluant: Deux robots Delta", "Une cellule Astor Twin équipée de : Deux robots"])
+def test_the_machine_named_in_a_french_table_cell_after_equipement(cell):
+    page = f"Equipement | (EUR | 300’000.-) | CHF | 330’000.-\n{cell} |\nPrix, net, hors taxe | (EUR | 300’000.-) | CHF | 330’000.-\n"
+    s = prices.parse_section({4: page})
+    assert s.lines[0].kind == "machine" and s.lines[0].family in ("Paloma", "Astor") and s.sum_ok is True
