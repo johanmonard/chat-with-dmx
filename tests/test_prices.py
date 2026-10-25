@@ -1099,8 +1099,8 @@ def test_a_visit_meeting_or_request_date_is_not_the_offer_date(page):
     ({1: "Angebot"}, "Globex Preisangabe 3001234 V1.pdf", "budget"),
     ({1: "Oferta presupuestaria Nº 3001234 Versión 1"}, "x.pdf", "budget"),
     ({1: "Offerta di budget per ACME"}, "x.pdf", "budget"),
-    ({1: "Offer", 3: "We submit a price together with this description as a base for this discussion, and is therefore "
-                     "not binding."}, "x.pdf", "budget"),
+    ({1: "Offer", 3: "We submit a price for this description. This proposal is therefore not binding."}, "x.pdf",
+     "budget"),
     ({1: "Offre", 10: "This budget price is subject to receipt and approval of product samples."}, "x.pdf", "budget"),
     # guards: firm offers
     ({1: "Angebot", 7: "Die Preisangabe in €URO ist nur informativ, zum Tageskurs."}, "x.pdf", "firm"),
@@ -1143,3 +1143,27 @@ def test_the_machine_named_in_a_french_table_cell_after_equipement(cell):
     page = f"Equipement | (EUR | 300’000.-) | CHF | 330’000.-\n{cell} |\nPrix, net, hors taxe | (EUR | 300’000.-) | CHF | 330’000.-\n"
     s = prices.parse_section({4: page})
     assert s.lines[0].kind == "machine" and s.lines[0].family in ("Paloma", "Astor") and s.sum_ok is True
+
+
+@pytest.mark.parametrize("pages, name, kind", [  # R45
+    ({1: "Formal Quotation ACME 3001234-02", 9: "Validity of the budgetary offer | This budgetary proposal is intended "
+                                               "as a base for discussion"}, "x.pdf", "firm"),
+    ({1: "Offre formelle n° 3001234", 12: "Validité | Cette offre budgétaire vous est fournie"}, "x.pdf", "firm"),
+    ({1: "Angebot", 14: "Dieses Budgetangebot wird Ihnen als Diskussionsgrundlage"}, "Verbindliches Angebot - 3001234_02.docx",
+     "firm"),
+    ({1: "Offer 3001234 is a base for discussion; a formal proposal is required before any commitment.",
+      9: "This budgetary proposal is intended as a base for discussion"}, "x.pdf", "budget"),
+    ({1: "Unverbindliches Angebot ACME 3001234-02", 9: "x"}, "x.pdf", "budget"),
+    ({1: "Offer", 9: "This delivery date is not binding."}, "x.pdf", "firm"),
+    ({1: "Offer", 9: "Our prices are not binding."}, "x.pdf", "budget"),
+])
+def test_a_formal_cover_keeps_a_budget_templates_validity_text_out(pages, name, kind):
+    assert prices.offer_type(pages, name, "3001234") == kind
+
+
+def test_is_formal():
+    assert prices.is_formal({1: "Formal Quotation"}, "x.pdf") and prices.is_formal({1: "x"}, "Offre formelle 3001234.pdf")
+    assert prices.is_formal({1: "Angebot"}, "Verbindliches Angebot - 3001234_02.docx")
+    assert not prices.is_formal({1: "Unverbindliches Angebot"}, "x.pdf")
+    assert not prices.is_formal({1: "a formal proposal is required before any commitment"}, "x.pdf")
+    assert not prices.is_formal({1: "avant l'établissement d'une offre formelle"}, "x.pdf")

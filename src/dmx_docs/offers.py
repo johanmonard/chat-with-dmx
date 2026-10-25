@@ -281,6 +281,7 @@ class _Read:
     twin: _Read | None = None  # the revision's document this one translates
     budget: bool = False  # budget wording (prices.offer_type), in this document or its PDF/Word twin
     other: dict[int, str] = field(default_factory=dict)  # the twin's pages when one was read instead (dates, country)
+    formal: bool = False  # the document calls itself formal (prices.is_formal)
 
 
 def _confidence(read_by: str, sum_ok: bool | None) -> str:
@@ -311,6 +312,28 @@ def _priced(section: prices.PriceSection | None) -> bool:
     return bool(section) and any(l.amounts for l in section.lines)
 
 
+def _amount_lines(section: prices.PriceSection | None) -> int:
+    return sum(1 for l in section.lines if l.amounts) if section else 0
+
+
+def _twin_verdict(pdf_pages, pdf_section, twin_section, pdf, twin) -> str | None:
+    """Whether the Word twin may replace the PDF (R46): None when it may; 'saved after' when it may, the PDF's text having
+    no amount and the Word file being saved after it; else the note why the PDF is kept. A PDF whose text holds amounts
+    keeps them unless the twin prints the same amounts (every line amount and total of the twin is printed in the PDF:
+    a Word source edited after the PDF was printed shows another version's prices) and reads at least as many priced
+    lines (a Word table layout can glue or lose items)."""
+    text = "\n".join(prices._tables(t) for t in pdf_pages.values())
+    if not prices.amounts_in(text):
+        return "saved after" if (twin["mtime"] or 0) > (pdf["mtime"] or 0) else None
+    printed = prices._printed_numbers(text)
+    values = [v for l in twin_section.lines for v in l.amounts.values()] + list(twin_section.totals.values())
+    if any(round(abs(v), 2) not in printed for v in values):
+        return "Word twin differs from the PDF"
+    if _amount_lines(twin_section) < _amount_lines(pdf_section):
+        return "Word twin reads fewer priced lines than the PDF"
+    return None
+
+
 def _read(con, doc, model: _Model, aliases, twin=None) -> _Read:
     """One document read. A mail is never a price document (its date is the mail's). A PDF the rules cannot read
     (a scan whose OCR lost the numbers, a garbled text layer) gives way to its Word twin (same name) when the rules
@@ -328,15 +351,23 @@ def _read(con, doc, model: _Model, aliases, twin=None) -> _Read:
         if found:
             r.date, r.date_source = found[0], "mail"
         return r
-    section, other = prices.parse_section(pages), pages
-    if twin is not None:  # its budget wording counts; it is read when the PDF's sum is not checked
+    formal = prices.is_formal(pages, doc["name"], _offer_of(doc))
+    section, other, notes = prices.parse_section(pages), pages, []
+    if twin is not None and _score(section) < 3:  # the PDF's sum is not checked: its Word twin may read better
         twin_pages = _pages(con, twin["id"])
-        budget |= prices.offer_type(twin_pages, twin["name"], _offer_of(twin)) == "budget"
-        twin_section = prices.parse_section(twin_pages) if _score(section) < 3 else None
+        twin_section = prices.parse_section(twin_pages)
         better, score = _score(twin_section), _score(section)
         if better > score and (better == 3 or score == 0):  # a checked sum, or the PDF reads nothing
-            doc, pages, section, other = twin, twin_pages, twin_section, pages
-    r = _Read(doc, pages, budget=budget, other=other if other is not pages else {})
+            verdict = _twin_verdict(pages, section, twin_section, doc, twin)
+            if verdict in (None, "saved after"):
+                doc, pages, section, other = twin, twin_pages, twin_section, pages
+                # the twin's budget wording counts only when the PDF is not formal (R45)
+                budget |= not formal and prices.offer_type(twin_pages, twin["name"], _offer_of(twin)) == "budget"
+                if verdict:
+                    notes.append("read from the Word twin, saved after the PDF")
+            else:
+                notes.append(verdict)
+    r = _Read(doc, pages, budget=budget, other=other if other is not pages else {}, formal=formal, notes=notes)
     read_by = "rules"
     if r.pages and (section is None or section.sum_ok is False or not _priced(section)):
         answer, problem = model.read(r.pages)
@@ -599,6 +630,12 @@ def _revision(con, key: str, owner: str, docs: list, order: int, history, ctx: _
     return reads
 
 
+def _offer_type(last: list) -> str:
+    """Budget when a document of the last revision has budget wording; a formal variant decides for itself (R45)."""
+    formal = [r for r in last if r.formal]
+    return "budget" if any(r.budget for r in (formal or last)) else "firm"
+
+
 def _build_offer(con, key: str, owner: str, docs: list, others: list[str], ctx: _Context) -> _Offer | None:
     cands = _candidates(docs, key)
     if not cands:
@@ -611,7 +648,7 @@ def _build_offer(con, key: str, owner: str, docs: list, others: list[str], ctx: 
     revisions = [(label, order, r) for order, label in enumerate(labels)
                  for r in _revision(con, key, owner, by_label[label], order, history, ctx, _twins(docs))]
     last = [r for label, _, r in revisions if label == labels[-1]]
-    offer_type = "budget" if any(r.budget for r in last) else "firm"
+    offer_type = _offer_type(last)
 
     first = docs[0]
     # File dates only when no revision has a printed or History date: an annex copied later moves nothing.

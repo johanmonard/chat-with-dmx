@@ -204,8 +204,13 @@ _BUDGET_OWN = re.compile(
     r"|\b(?:cette|la pr[ée]sente)\s+offre\s+budg[ée]taire|validit[ée] de l.offre budg[ée]taire"
     r"|\b(?:dieses|diese|vorliegende[sn]?)\s+(?:budgetangebot|richtangebot|kostenvoranschlag)\b"
     r"|g[üu]ltigkeit des budgetangebot|als budget zu verstehen|\bunverbindliche[sn]?\s+angebot"
-    r"|\b(?:offer|proposal|quotation|price|this)\b[^.\n]{0,60}\b(?:is|are)\s+(?:therefore\s+)?(?:non[- ]binding|not binding)"
+    r"|\b(?:offers?|proposals?|quotations?|prices?)\s+(?:is|are)\s+(?:therefore\s+)?(?:non[- ]binding|not binding)"
     r"|oferta presupuestaria|presupuesto (?:indicativo|orientativo)|offerta (?:di )?budget", re.I)
+# A document calling itself formal on page 1 or in its name ('Formal Quotation', 'Offre formelle', 'Verbindliches
+# Angebot'), not a sentence asking for one ('a formal proposal is required', 'avant l'établissement d'une offre formelle').
+_FORMAL = re.compile(r"(?<!\ba )(?<!\ban )(?<!une )(?<!eine )"
+                     r"\b(?:formal\s+(?:quotation|proposal|offer)|offre\s+formelle|formelles\s+angebot"
+                     r"|verbindliches\s+angebot|oferta\s+formal|offerta\s+formale)\b", re.I)
 # A date cited in the letter (a visit, a meeting, the client's request or letter) is not the offer's date.
 _CITED_DATE = re.compile(r"(?:visite?s?|besuch\w*|r[ée]union|meeting|rencontre|entretien|anfrage|demande|request"
                          r"|inquiry|enquiry|lettre|letter|schreiben|courrier)\b[^.\n]{0,50}?"
@@ -1028,9 +1033,17 @@ def offer_type(pages: dict[int, str], name: str, key: str | None = None) -> str:
         return "budget"
     if formal:
         return "firm"
+    # A formal cover keeps a budget template's validity text out (R45): 'Formal Quotation' + 'This budgetary proposal...'.
+    own_wording = not _FORMAL.search(first) and any(_budget_said(t, _BUDGET_OWN, own) for p, t in pages.items() if p > 1)
     return "budget" if (_budget_said(pages.get(2, ""), _BUDGET, own)
-                        or _budget_said(pages.get(3, ""), _BUDGET_PHRASE, own)
-                        or any(_budget_said(t, _BUDGET_OWN, own) for p, t in pages.items() if p > 1)) else "firm"
+                        or _budget_said(pages.get(3, ""), _BUDGET_PHRASE, own) or own_wording) else "firm"
+
+
+def is_formal(pages: dict[int, str], name: str, key: str | None = None) -> bool:
+    """The document calls itself formal: an F- number, or 'Formal Quotation', 'Offre formelle', 'Verbindliches Angebot'
+    on page 1 or in its file name (R45)."""
+    return bool(re.match(r"\W*F[- ]?\d", key or "") or re.search(r"(?<![A-Za-z0-9])F-\d{6,7}", name)
+                or _FORMAL.search(pages.get(1, "") + "\n" + name))
 
 
 MODEL_ROLE = "You read the price section of a sales offer for industrial packaging machines."

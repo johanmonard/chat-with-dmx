@@ -849,17 +849,54 @@ def test_country_skips_the_sellers_trademark_line_and_reads_provinces():
     assert offers._country_in("Globex Industrial str. 4 Northern district Russian Federation") == "Russia"
 
 
-def test_a_word_twin_with_a_checked_sum_beats_a_pdf_without_total_and_its_budget_wording_counts():
-    pdf, word = _doc(REV + r"\Globex _ACME_ 3001234 V1.pdf", 1), _doc(REV + r"\Globex (ACME) 3001234 V1.doc", 2)
-    con = _pages_db({1: {1: "ACME Foods", 2: "PRIX\nEquipement CHF 300'000.--\nMise en service CHF 20'000.--"},
+def test_a_word_twin_with_a_checked_sum_beats_a_pdf_without_total():
+    pdf, word = (_doc(REV + r"\Globex _ACME_ 3001234 V1.pdf", 1, mtime=5), _doc(REV + r"\Globex (ACME) 3001234 V1.doc", 2,
+                                                                               mtime=9))
+    con = _pages_db({1: {1: "ACME Foods", 2: "PRIX\nEquipement CHF 300'000.--\nMise en service CHF 20'000.--\n"
+                                            "Prix total, net, hors taxe\n320'000.--"},
                      2: {1: "ACME Foods", 2: "PRIX\nEquipement CHF 300'000.--\nMise en service CHF 20'000.--\n"
                                             "Prix total, net, hors taxe CHF 320'000.--",
                          9: "Validité | Cette offre budgétaire vous est fournie afin de servir de base de discussion."}})
     r = offers._read(con, pdf, _NoModel(), [], twin=word)
-    assert r.doc["id"] == 2 and r.section.sum_ok is True and r.budget is True
-    con.execute("UPDATE chunks SET text = text || '\nPrix total, net, hors taxe CHF 320''000.--' WHERE doc_id = 1 AND page_no = 2")
+    assert r.doc["id"] == 2 and r.section.sum_ok is True and r.budget is True and r.notes == []
+    con.execute("UPDATE chunks SET text = 'PRIX\nEquipement CHF 300''000.--\nMise en service CHF 20''000.--\n"
+                "Prix total, net, hors taxe CHF 320''000.--' WHERE doc_id = 1 AND page_no = 2")
     r = offers._read(con, pdf, _NoModel(), [], twin=word)
-    assert r.doc["id"] == 1 and r.section.sum_ok is True and r.budget is True  # the PDF is checked: kept
+    assert r.doc["id"] == 1 and r.section.sum_ok is True and r.budget is False  # the PDF is checked: kept, and its own
+    # wording decides
+
+
+def test_a_word_twin_with_other_amounts_never_replaces_the_pdf():  # R46
+    pdf, word = _doc(REV + r"\3001234_00_Quotation.pdf", 1, mtime=5), _doc(REV + r"\3001234_00_Quotation.docx", 2, mtime=9)
+    con = _pages_db({1: {1: "ACME Foods", 2: "PRIX\n5x Paloma 4R CHF 3'300'000.--\nMise en service CHF 100'000.--"},
+                     2: {1: "ACME Foods", 2: "PRIX\n2x Paloma 4R CHF 3'340'000.--\nMise en service CHF 100'000.--\n"
+                                            "Prix total, net, hors taxe CHF 3'440'000.--"}})
+    r = offers._read(con, pdf, _NoModel(), [], twin=word)
+    assert r.doc["id"] == 1 and "Word twin differs from the PDF" in r.notes
+    assert r.section.lines[0].amounts == {"CHF": 3300000.0}
+
+
+def test_a_word_twin_reading_fewer_priced_lines_never_replaces_the_pdf():
+    pdf, word = _doc(REV + r"\3001234_00.pdf", 1), _doc(REV + r"\3001234_00.doc", 2)
+    con = _pages_db({1: {2: "PRIX\nCellule Paloma 4R CHF 300'000.--\nOption A vision CHF 20'000.--\nOption B CHF 10'000.--"},
+                     2: {2: "PRIX\nCellule Paloma 4R CHF 300'000.--\nPrix total, net, hors taxe CHF 300'000.--"}})
+    r = offers._read(con, pdf, _NoModel(), [], twin=word)
+    assert r.doc["id"] == 1 and "Word twin reads fewer priced lines than the PDF" in r.notes
+
+
+def test_a_pdf_without_amounts_gives_way_to_a_later_word_twin_with_a_note():
+    pdf, word = _doc(REV + r"\3001234_00.pdf", 1, mtime=5), _doc(REV + r"\3001234_00.doc", 2, mtime=9)
+    con = _pages_db({1: {2: "9.6. Price, net, without taxes\nThree robotic cells\nInstallation"},
+                     2: {2: "PRIX\nCellule Paloma 4R CHF 300'000.--\nPrix total, net, hors taxe CHF 300'000.--"}})
+    r = offers._read(con, pdf, _NoModel(), [], twin=word)
+    assert r.doc["id"] == 2 and r.notes == ["read from the Word twin, saved after the PDF"]
+
+
+def test_a_formal_variant_decides_the_offer_type_for_itself():  # R45
+    from types import SimpleNamespace as R
+    budget, formal = R(budget=True, formal=False), R(budget=False, formal=True)
+    assert offers._offer_type([budget, formal]) == "firm"
+    assert offers._offer_type([budget, R(budget=False, formal=False)]) == "budget"
 
 
 def test_the_country_of_a_pdf_whose_word_twin_was_read():
