@@ -439,7 +439,7 @@ def _revision_issue(r) -> str | None:
         return "unread document"
     if any(p.startswith("model not asked") for p in parts):
         return "model not asked"  # the run's time limit: the next run reads it
-    if "no price section" in parts:
+    if any(p.startswith("no price section") for p in parts):  # also '...: price page 13 has no amounts in its text'
         return "no price section"  # the note says when the model could not be asked
     if any(p.startswith("model error: prompt cut") for p in parts):
         return "prompt too long for the model"  # running again does not help: a larger window or fewer pages

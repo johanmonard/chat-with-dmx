@@ -801,3 +801,48 @@ def test_country_from_the_last_revision_first():
     revisions = [(None, 0, R(pages={1: "Supplier quote to Demaurex SA, Vufflens-la-Ville\nGlobex AG\nZürich, Switzerland"})),
                  ("Q06", 7, R(pages={1: "ACME Foods Vilnius Lithuania"}))]
     assert offers._document_country(revisions) == "Lithuania"
+
+
+# --- fixes from the fresh 30-offer spot check (2026-10-25) --------------------------------------------------------
+
+def test_word_twin_whose_name_differs_only_by_separators():
+    pdf, word = _doc(REV + r"\F-3001234_01-L5.pdf", 1), _doc(REV + r"\F-3001234 01 - L5.doc", 2)
+    other = _doc(REV + r"\F-3001234 01 - L6.doc", 3)
+    assert offers._twins([pdf, word, other]) == {1: word}
+    assert [d["id"] for d in offers._candidates([pdf, word, other], "3001234")] == [1, 3]
+
+
+def test_the_price_document_is_read_before_a_drawing():
+    docs = [_doc(REV + r"\3001234-sticks .pdf", 1, mtime=1), _doc(REV + r"\Layout & Price - 3001234_01.docx", 2, mtime=9)]
+    assert [d["id"] for d in sorted(docs, key=offers._doc_order)] == [2, 1]
+
+
+def test_a_price_page_without_amounts_is_named():
+    pdf = _doc(REV + r"\3001234_01.pdf", 1)
+    con = _pages_db({1: {1: "ACME Foods", 13: "9.6. Price, net, without taxes, EXW Romanel (INCOTERMS 2000)\n"
+                                              "Three robotic cells\nInstallation and setup\nNot included"}})
+    r = offers._read(con, pdf, _NoModel(), [])
+    assert r.section is None and r.notes[0] == "no price section: price page 13 has no amounts in its text"
+
+
+def test_cached_model_lines_are_classified_again():
+    from types import SimpleNamespace
+    pages = {1: "garbled 400000 10000 1 Case erector ACME 98000"}
+    con = _pages_db({})
+    offers._create(con)
+    cfg = SimpleNamespace(vision_model="test-vision", vision_url=closed_port_url(), vision_timeout_s=10)
+    model = offers._Model(con, cfg, quiet)
+    answer = prices.PriceSection([prices.PriceLine(1, "Emballage", "other", None, {"CHF": 10000.0}, 1),
+                                  prices.PriceLine(2, "1 Case erector ACME - hotmelt - 20 cpm", "other", None,
+                                                   {"CHF": 98000.0}, 1),
+                                  prices.PriceLine(3, "Spare parts", "other", None, {"CHF": 400000.0}, 1)],
+                                 {}, [], [1], None)
+    con.execute("INSERT INTO offer_model_cache VALUES (?, ?)", (model._key(pages), offers._dump(answer)))
+    section, _ = model.read(pages)
+    assert [l.kind for l in section.lines] == ["service", "machine", "other"]
+
+
+def test_country_skips_the_sellers_trademark_line_and_reads_provinces():
+    assert offers._country_in("Globex Europe Limited\nBOSCH is a registered trademark of Robert Bosch GmbH Germany") is None
+    assert offers._country_in("ACME LLC - Plant 1125 50e Avenue Lachine H8T 3P3 Quebec CA | Why Demaurex SA?") == "Canada"
+    assert offers._country_in("Globex Proizvodstvennaya str. 8 Samara oblast Russian Federation") == "Russia"

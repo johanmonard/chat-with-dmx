@@ -184,7 +184,25 @@ _ESTIMATION = (r"|prix sont (?:une )?estimation|prices? (?:is|are) an estimation
                r"|estimation of\b[^\n]{0,80}?(?:CHF|EUR|USD|€)")
 _BUDGET = re.compile(r"\b(?:budget|budg[ée]taire|richtpreis|richtangebot|preisindikation|price indication"
                      r"|indication de prix|prix indicatifs?|offre indicative|indicative (?:offer|price|quotation|proposal)"
+                     r"|preisangaben?\b(?!\s+in\b)|kostenvoranschlag|oferta presupuestaria|oferta indicativa"
+                     r"|offerta indicativa|preventivo (?:indicativo|di massima)"
                      + _ESTIMATION + ")", re.I)
+# The offer calling itself budget or non-binding, on any page (its validity section: 'This budgetary proposal is
+# intended as a base for discussion', 'Cette offre budgétaire vous est fournie', 'Dieses Budgetangebot', 'Es ist als
+# Budget zu verstehen', 'Unverbindliches Angebot', '... and is therefore not binding'). Not 'brochures are not binding',
+# 'Lieferzeit: unverbindlich', nor another offer ('following this budgetary proposal 3001233', _budget_said).
+_BUDGET_OWN = re.compile(
+    r"\b(?:this|the present)\s+budget(?:ary)?\s+(?:offer|quotation|proposal|price)s?\b"
+    r"|validity of the budgetary (?:offer|quotation|proposal)"
+    r"|\b(?:cette|la pr[ée]sente)\s+offre\s+budg[ée]taire|validit[ée] de l.offre budg[ée]taire"
+    r"|\b(?:dieses|diese|vorliegende[sn]?)\s+(?:budgetangebot|richtangebot|kostenvoranschlag)\b"
+    r"|g[üu]ltigkeit des budgetangebot|als budget zu verstehen|\bunverbindliche[sn]?\s+angebot"
+    r"|\b(?:offer|proposal|quotation|price|this)\b[^.\n]{0,60}\b(?:is|are)\s+(?:therefore\s+)?(?:non[- ]binding|not binding)"
+    r"|oferta presupuestaria|presupuesto (?:indicativo|orientativo)|offerta (?:di )?budget", re.I)
+# A date cited in the letter (a visit, a meeting, the client's request or letter) is not the offer's date.
+_CITED_DATE = re.compile(r"(?:visite?s?|besuch\w*|r[ée]union|meeting|rencontre|entretien|anfrage|demande|request"
+                         r"|inquiry|enquiry|lettre|letter|schreiben|courrier)\b[^.\n]{0,50}?"
+                         r"\b(?:du|vom|of|dated|from|on|am|le)\s*$", re.I)
 # A budget offer cited by another offer ('remplace l'offre budgétaire n° ...', 'par rapport à l'offre budgétaire
 # B-...', 'following our budgetary offer'): words before the hit, or another offer's number right after it.
 _CITED_BEFORE = re.compile(r"(?:remplac\w*|par rapport [àa]|d[ée]fini\w* dans|replac\w*|following|further to"
@@ -434,6 +452,18 @@ def price_pages(pages: dict[int, str], legacy: bool = False) -> list[int]:
                 return run if legacy else _extended(pages, run)
         first = first or [p]
     return first
+
+
+# A price section's title: '9.6. Price, net, without taxes, EXW ...', '10.1. Prix, net, hors taxe', '9.4. BUDGETARY PRICE'.
+_PRICE_TITLE = re.compile(r"^\W*(?:\d+(?:\.\d+)*\.?\s*)?(?:(?:(?:budgetary\s+)?prices?|prix|preise?)\b.{0,40}?"
+                          r"(?:\bnet\b|\bnetto\b|hors\s+taxes?|without\s+taxes|ohne\s+steuern)"
+                          r"|budgetary\s+prices?\b|prix\s+budg[ée]taires?\b|richtpreise?\b)", re.I | re.M)
+
+
+def pages_without_amounts(pages: dict[int, str]) -> list[int]:
+    """Pages holding a price section's title and no amount at all: the numbers are missing from the text (a table
+    the OCR or the PDF's text layer lost), so the section cannot be read from the text; the page image can."""
+    return [p for p in sorted(pages) if _PRICE_TITLE.search(pages[p]) and not amounts_in(_tables(pages[p]))]
 
 
 def _extended(pages: dict[int, str], run: list[int]) -> list[int]:
@@ -958,6 +988,8 @@ def offer_date(pages: dict[int, str]) -> tuple[str, str] | None:
                     in_parens = sentence.rfind("(", 0, start) > sentence.rfind(")", 0, start) and ")" in sentence[end:]
                     if in_parens and (rate_next or _RATE_HINT.search(sentence)):
                         continue
+                    if _CITED_DATE.search(sentence[max(0, start - 80):start]):
+                        continue  # 'votre visite dans nos locaux du 21.07.2003', 'Ihre Anfrage vom ...'
                     return iso, written
     return None
 
@@ -978,16 +1010,19 @@ def offer_type(pages: dict[int, str], name: str, key: str | None = None) -> str:
     """'budget' when page 1 or the file name say budget / budgétaire / Richtpreis / price indication / 'les prix sont
     une estimation'..., or page 2 does, or page 3 in a budget phrase ('This budgetary proposal', not 'Budget for flow
     wrapper' in a firm offer), else 'firm'. A budget offer cited by another offer ('remplace l'offre budgétaire
-    n° ...') does not count. A formal offer (F- number) is budget only by page 1 or its file name."""
+    n° ...') does not count. The offer calling itself budget or non-binding on any page (_BUDGET_OWN: its validity
+    section) is budget. A formal offer (F- number) is budget only by page 1 or its file name."""
     own = re.search(r"\d{6,7}", key or name)
     own = own.group() if own else None
     formal = bool(re.match(r"\W*F[- ]?\d", key or "") or re.search(r"(?<![A-Za-z0-9])F-\d{6,7}", name))
-    if _budget_said(pages.get(1, "") + "\n" + name, _BUDGET, own):
+    first = pages.get(1, "") + "\n" + name
+    if _budget_said(first, _BUDGET, own) or _budget_said(first, _BUDGET_OWN, own):
         return "budget"
     if formal:
         return "firm"
     return "budget" if (_budget_said(pages.get(2, ""), _BUDGET, own)
-                        or _budget_said(pages.get(3, ""), _BUDGET_PHRASE, own)) else "firm"
+                        or _budget_said(pages.get(3, ""), _BUDGET_PHRASE, own)
+                        or any(_budget_said(t, _BUDGET_OWN, own) for p, t in pages.items() if p > 1)) else "firm"
 
 
 MODEL_ROLE = "You read the price section of a sales offer for industrial packaging machines."
@@ -1104,6 +1139,20 @@ def parse_with_model(url: str, model: str, pages: dict[int, str], timeout: float
         if rate and rate not in rates:
             rates.append(rate)
     return clean_model(PriceSection(lines, totals, rates, nums, None), pages, checked=False)
+
+
+def classify_again(section: PriceSection | None) -> PriceSection | None:
+    """A cached model answer's lines of kind 'other' classified again with today's rules (the kinds were stored when
+    the answer was cached), on the item's name: the text up to its first separator ('1 Case erector ACME - hotmelt'
+    -> '1 Case erector ACME'). Family and model are filled when the name gives them; other kinds are kept."""
+    for line in section.lines if section else []:
+        if line.kind != "other":
+            continue
+        name = _item_name(re.split(r"\s+[-–•|]\s+|:|\(|\|", line.text, maxsplit=1)[0])
+        line.kind = classify(name, line.amounts)
+        if line.family is None:
+            line.family, line.model = _machine(name)
+    return section
 
 
 def _model_sum(lines: list[PriceLine], totals: dict[str, float], sent: str) -> bool | None:

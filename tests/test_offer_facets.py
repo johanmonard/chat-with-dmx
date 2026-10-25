@@ -122,12 +122,12 @@ def test_index_stores_offer_facets_and_recomputes_on_profile_change(tmp_path, ma
     run_index(cfg, progress=quiet)
     con = store.connect(cfg.db_path)
     query = "SELECT client, offer, revision, doc_type, category, machine FROM doc_facets"
-    assert store.get_meta(con, "facets_version") == "offers:3"
+    assert store.get_meta(con, "facets_version") == "offers:4"
     assert [tuple(r) for r in con.execute(query)] == [("ACME Foods", "3002113", "02", "offer", "client", None)]
     # Another profile's rules, then the offers rules again: the rows are recomputed.
     store.set_meta(con, "facets_version", "marketing:1")
     assert facets.refresh(con, cfg.roots, "offers") == 1
-    assert store.get_meta(con, "facets_version") == "offers:3"
+    assert store.get_meta(con, "facets_version") == "offers:4"
     row = tuple(con.execute("SELECT client, offer FROM doc_facets").fetchone())
     assert row == ("ACME Foods", "3002113")
     assert facets.refresh(con, cfg.roots, "offers") == 0
@@ -179,3 +179,9 @@ def test_the_offers_own_file_is_an_offer_wherever_it_lies(rel, revision):
 def test_other_files_naming_the_offer_stay_other():
     assert f(r"01_Historique\PROSPECT\France\Dupont Biscuits\250002\Notes B-250002.pdf")["doc_type"] == "other"
     assert f(r"01_Historique\PROSPECT\France\Dupont Biscuits\250002\Layouts\B-250002 V2.pdf")["doc_type"] == "layout"
+
+
+def test_a_version_after_a_dash_in_the_file_name_is_the_revision():
+    got = f(r"01_Historique\PROSPECT\Italie\Globex\250004\B-250004-V2.doc")
+    assert (got["offer"], got["revision"], got["doc_type"]) == ("B-250004", "V2", "offer")
+    assert f(r"ACME Foods\Offres\0904023\0904023-V1.PDF")["revision"] == "V1"

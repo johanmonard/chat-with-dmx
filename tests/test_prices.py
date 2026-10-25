@@ -1075,3 +1075,40 @@ def test_a_model_total_not_printed_is_dropped():  # R40
                                  {"EUR": 840000.0}, [], [1], False)
     s = prices.clean_model(cached, {1: "Delfi 4R EUR 800'000.-\nMise en service EUR 40'000.-"})
     assert s.totals == {} and s.sum_ok is None
+
+
+@pytest.mark.parametrize("page", [
+    "Nous nous référons à votre visite dans nos locaux du 21.07.2025 et vous remercions.\nRédigée par: ACME, le 21 août 2025",
+    "With reference to our meeting of 21.07.2025 we are pleased to offer.\nWritten by Globex, 21 August 2025",
+    "Bezugnehmend auf Ihre Anfrage vom 21.07.2025 unterbreiten wir.\nDatum: 21.08.2025",
+])
+def test_a_visit_meeting_or_request_date_is_not_the_offer_date(page):
+    assert prices.offer_date({1: page})[0] == "2025-08-21"
+
+
+@pytest.mark.parametrize("pages, name, kind", [
+    ({1: "Offer", 9: "Validity of the budgetary offer | This budgetary proposal is intended as a base for discussion"},
+     "x.docx", "budget"),
+    ({1: "Offre", 12: "Validité de l'offre | Cette offre budgétaire vous est fournie afin de servir de base"}, "x.pdf",
+     "budget"),
+    ({1: "Angebot", 14: "Gültigkeit des Budgetangebots | Dieses Budgetangebot wird Ihnen als Diskussionsgrundlage"},
+     "x.pdf", "budget"),
+    ({1: "Angebot", 11: "Es ist als Budget zu verstehen und für ACME nicht bindend."}, "x.pdf", "budget"),
+    ({1: "Unverbindliches Angebot ACME 3001234-02"}, "x.pdf", "budget"),
+    ({1: "ACME – Preisangabe – 3001234 V1 Datum : 23.05.2021"}, "x.doc", "budget"),
+    ({1: "Angebot"}, "Globex Preisangabe 3001234 V1.pdf", "budget"),
+    ({1: "Oferta presupuestaria Nº 3001234 Versión 1"}, "x.pdf", "budget"),
+    ({1: "Offerta di budget per ACME"}, "x.pdf", "budget"),
+    ({1: "Offer", 3: "We submit a price together with this description as a base for this discussion, and is therefore "
+                     "not binding."}, "x.pdf", "budget"),
+    ({1: "Offre", 10: "This budget price is subject to receipt and approval of product samples."}, "x.pdf", "budget"),
+    # guards: firm offers
+    ({1: "Angebot", 7: "Die Preisangabe in €URO ist nur informativ, zum Tageskurs."}, "x.pdf", "firm"),
+    ({1: "Offer", 8: "Unless otherwise agreed upon, brochures and catalogues are not binding."}, "x.pdf", "firm"),
+    ({1: "Angebot", 9: "Lieferzeit: unverbindlich, nach Klärung aller Einzelheiten."}, "x.pdf", "firm"),
+    ({1: "Offer", 9: "This offer replaces our budgetary offer 3001233 of last year."}, "x.pdf", "firm"),
+    ({1: "Offer", 9: "Following this budgetary proposal 3001233 you ordered"}, "x.pdf", "firm"),
+    ({1: "Offre formelle", 9: "Cette offre budgétaire vous est fournie"}, "ACME F-250001 V1.pdf", "firm"),  # R39
+])
+def test_offer_type_own_budget_wording_on_any_page(pages, name, kind):
+    assert prices.offer_type(pages, name, "3001234") == kind

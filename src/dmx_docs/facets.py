@@ -198,7 +198,7 @@ _OFFER_NAME_KINDS = [
 _OFFER_PARTNERS = {"06 offres ipso": "IPSO", "07 offres wyzo": "Wyzo"}
 _ARCHIVE_ANCHORS = ("prospect", "prospects", "client", "clients")
 _VERSION_LABEL = re.compile(r"(?<![A-Za-z0-9])V(\d+)(?!\w)", re.I)
-_NAME_REVISION = re.compile(r"(?:[ _]V(\d+)|_(\d{2}))$", re.I)
+_NAME_REVISION = re.compile(r"(?:[ _-]V(\d+)|_(\d{2}))$", re.I)  # 'B-250306 V2', 'B-250306-V2', '3002113_02'
 # A file named as the offer only: its number and a version ('B-250306 V2', 'F-0903029 V1', '3001234_02').
 _OWN_FILE = re.compile(r"\W*(?:[BFE][- ]?)?\d{6,7}(?:[ _-]*(?:V\d+|Q\d{2}|\d{2}))?\W*", re.I)
 
@@ -297,8 +297,9 @@ def compute_offers(path: str, root: str) -> dict:
 
 RULES = {"projects": compute, "marketing": compute_marketing, "documentation": compute_documentation,
          "offers": compute_offers}
-# offers 2: the archive client by its position under the country folder; 3: the offer's own file wherever it lies.
-PROFILE_VERSIONS = {"marketing": MARKETING_FACETS_VERSION, "documentation": 1, "offers": 3}
+# offers 2: the archive client by its position under the country folder; 3: the offer's own file wherever it lies;
+# 4: a version after a dash in the file name ('B-250306-V2.doc').
+PROFILE_VERSIONS = {"marketing": MARKETING_FACETS_VERSION, "documentation": 1, "offers": 4}
 
 
 def _version(profile: str) -> str:

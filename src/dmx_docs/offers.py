@@ -237,8 +237,8 @@ class _Model:
             row = self.con.execute("SELECT answer FROM offer_model_cache WHERE text_hash = ?",
                                    (self._key(pages, legacy=True),)).fetchone()
         if row:
-            try:  # cached answers are cleaned like new ones (amounts of 0, day rates)
-                return prices.clean_model(_load(row[0]), pages), None
+            try:  # cached answers are cleaned like new ones (amounts of 0, day rates), their 'other' lines classified again
+                return prices.classify_again(prices.clean_model(_load(row[0]), pages)), None
             except (ValueError, KeyError, TypeError, AttributeError) as e:  # damaged entry: asked again
                 log.warning("unreadable cached model answer %s, asked again: %s", key, e)
         if self.deadline is not None and time.perf_counter() > self.deadline:
@@ -347,7 +347,9 @@ def _read(con, doc, model: _Model, aliases, twin=None) -> _Read:
     if found:
         r.date, r.date_source = found[0], "document"
     if section is None:
-        r.notes.insert(0, "no price section")
+        empty = prices.pages_without_amounts(r.pages)
+        r.notes.insert(0, "no price section" + (f": price page {_pages_text(empty)} has no amounts in its text"
+                                                if empty else ""))
         return r
     r.section, r.read_by = section, read_by
     r.confidence = _confidence(read_by, section.sum_ok)
@@ -406,6 +408,8 @@ def _merge_versions(folders: dict[str, list]) -> dict[str, list]:
 
 # Names of the documents sent to the client ('Quotation', 'Offre', 'Angebot'...): read first in a revision.
 _OFFER_NAMED = re.compile(r"\b(?:offers?|offres?|angebot|quotation|proposal|proposition|devis)\b")
+# Then the documents named as prices ('Layout & Price - 3001234_00.docx'), before a drawing named by the number only.
+_PRICE_NAMED = re.compile(r"\b(?:prices?|prix|preise?|preisangaben?|price indication)\b")
 # Documents that are not what was sent: internal costing and negotiation sheets, drafts, old copies (folded names).
 _NOT_SENT = re.compile(r"\b(?:nego\w*|calcul\w*|kalkulation|interne?|internal|prix de revient|costs?|kosten"
                        r"|prices? summary|summary for sales|old|draft|brouillon|entwurf|en cours|copie(?: \d+)? de|copy(?: \d+)? of"
@@ -426,16 +430,24 @@ def _sent_rank(d) -> int:
 
 
 def _doc_order(d) -> tuple:
-    """The documents of a revision: those named as the offer first ('..._Quotation.pdf'), then by file date."""
-    return not _OFFER_NAMED.search(_stem(d)), d["mtime"] or 0, d["path"]
+    """The documents of a revision: those named as the offer first ('..._Quotation.pdf'), then those named as prices
+    ('Layout & Price'), then by file date."""
+    stem = _stem(d)
+    return 0 if _OFFER_NAMED.search(stem) else 1 if _PRICE_NAMED.search(stem) else 2, d["mtime"] or 0, d["path"]
+
+
+def _twin_name(d) -> str:
+    """The document's folder and name without separators: 'F-3001234_01-L5.pdf' and 'F-3001234 01 - L5.doc' are twins."""
+    folder, name = os.path.split(os.path.splitext(d["path"].lower())[0])
+    return os.path.join(folder, re.sub(r"[\W_]+", "", name))
 
 
 def _twins(docs: list) -> dict:
-    """{id of a readable PDF: the readable .doc(x) offer document with the same name}."""
-    words = {os.path.splitext(d["path"].lower())[0]: d for d in docs
+    """{id of a readable PDF: the readable .doc(x) offer document with the same name, separators aside}."""
+    words = {_twin_name(d): d for d in docs
              if d["doc_type"] == "offer" and d["ext"] in (".doc", ".docx") and d["status"] == "ok"}
     return {d["id"]: words[stem] for d in docs if d["doc_type"] == "offer" and d["ext"] == ".pdf"
-            and d["status"] == "ok" and (stem := os.path.splitext(d["path"].lower())[0]) in words}
+            and d["status"] == "ok" and (stem := _twin_name(d)) in words}
 
 
 def _candidates(docs: list, key: str) -> list:
@@ -446,9 +458,8 @@ def _candidates(docs: list, key: str) -> list:
     summary), a draft or an old copy only when nothing else is left, a mail only when it is the only document
     (it is listed, never read for prices)."""
     docs = [d for d in docs if d["doc_type"] == "offer"]
-    pdfs = {os.path.splitext(d["path"].lower())[0] for d in docs if d["ext"] == ".pdf" and d["status"] == "ok"}
-    docs = [d for d in docs
-            if d["ext"] not in (".doc", ".docx") or os.path.splitext(d["path"].lower())[0] not in pdfs]
+    pdfs = {_twin_name(d) for d in docs if d["ext"] == ".pdf" and d["status"] == "ok"}
+    docs = [d for d in docs if d["ext"] not in (".doc", ".docx") or _twin_name(d) not in pdfs]
     numbered = {d["revision"] for d in docs if offerkeys.offer_key(d["name"]) == key}
     docs = [d for d in docs if d["revision"] not in numbered or offerkeys.offer_key(d["name"]) == key]
     best: dict = {}
@@ -477,7 +488,8 @@ def _label_pattern(label: str | None) -> re.Pattern | None:
 
 
 # The seller's letterhead, address and footer: its name or its places (a bare CH- postcode or +41 is also a Swiss client).
-_SELLER = re.compile(r"demaurex|bosch\s+packaging|rotzinger|m[ée]sanges|romanel|vufflens|ecublens", re.I)
+_SELLER = re.compile(r"demaurex|bosch\s+packaging|robert\s+bosch|registered\s+trademark|rotzinger|m[ée]sanges|romanel"
+                     r"|vufflens|ecublens", re.I)
 
 
 def _first_country(text: str) -> str | None:

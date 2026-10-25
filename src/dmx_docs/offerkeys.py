@@ -76,7 +76,7 @@ _COUNTRIES = {
     "Belgium": ["Belgique", "Belgien"],
     "Brazil": ["Bresil", "Brasilien"],
     "Bulgaria": ["Bulgarie", "Bulgarien"],
-    "Canada": ["Kanada"],
+    "Canada": ["Kanada", "Quebec", "Ontario", "British Columbia", "Alberta"],  # provinces in addresses
     "Chile": ["Chili"],
     "China": ["Chine"],
     "Colombia": ["Colombie", "Kolumbien"],
@@ -115,7 +115,7 @@ _COUNTRIES = {
     "Poland": ["Pologne", "Polen", "Polska"],
     "Portugal": [],
     "Romania": ["Roumanie", "Rumanien", "Rumaenien"],
-    "Russia": ["Russie", "Russland"],
+    "Russia": ["Russie", "Russland", "Russian Federation", "Federation de Russie"],
     "Saudi Arabia": ["Arabie saoudite", "Saudi-Arabien", "Saudiarabien", "KSA"],
     "Serbia": ["Serbie", "Serbien"],
     "Singapore": ["Singapour", "Singapur"],
