@@ -55,8 +55,9 @@ _DASH = "-" + chr(0x2013) + chr(0x2212)  # hyphen, en dash, minus
 _CURRENCIES = {"€": "EUR", "$": "USD", "US$": "USD", "£": "GBP", "Fr.": "CHF", "SFr.": "CHF", "SFr": "CHF"}
 # 'Euro', 'EURO', '€uro' before or after the number are EUR too ("Equipement : €uro 410'000.-- (CHF 500'000.--)").
 _CUR = r"(?<![A-Za-z])(?:CHF|EUR|USD|GBP|US\$|SFr\.?|Fr\.|€uros?|€UROS?|(?i:euros?)|€|\$|£)(?![A-Za-z])"
-# After the number, a plain 'Euros' is a sentence's word ('for an amount of 4'000.- Euros'), not a price column.
-_CUR_AFTER = _CUR.replace("|(?i:euros?)", "")
+# After the number, a euro word is a sentence's word ('for an amount of 4'000.- Euros') or the scrambled text of a
+# garbled PDF ('264'500.-- €uro price'), not a price column: only before the number.
+_CUR_AFTER = _CUR.replace("|€uros?|€UROS?|(?i:euros?)", "")
 # Thousands grouped by space, apostrophe, dot or comma, or plain digits; up to 2 decimals; not part
 # of a date or a longer number ("Fr. 12.05.2020").
 _NUM = rf"(?:\d{{1,3}}(?:[{_SP}'’.,]\d{{3}})+(?:[.,]\d{{1,2}})?|\d+(?:[.,]\d{{1,2}})?)(?![.,/]?\d)"

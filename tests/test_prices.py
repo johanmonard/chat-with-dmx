@@ -1003,7 +1003,7 @@ def test_offer_date_with_of_between_day_and_month():
 
 def test_euro_written_as_a_word_before_the_number_is_eur():
     assert prices.amounts_in("Equipement : €uro 410'000.-- (CHF 500'000.--)") == [("EUR", 410000.0), ("CHF", 500000.0)]
-    assert prices.amounts_in("Machine EURO 12'000.- / Euro 13'000.- / 14'000 €uros") == [
+    assert prices.amounts_in("Machine EURO 12'000.- / Euro 13'000.- / €uros 14'000") == [
         ("EUR", 12000.0), ("EUR", 13000.0), ("EUR", 14000.0)]
     assert prices.amounts_in("Le prix en €URO n'a qu'une valeur indicative.") == []
     s = prices.parse_section({9: "10. PRIX\n10.1. Prix, net, hors taxe\nEquipement : €uro 410'000.-- (CHF 500'000.--)\n"
@@ -1116,6 +1116,7 @@ def test_offer_type_own_budget_wording_on_any_page(pages, name, kind):
 
 def test_euros_after_a_number_in_a_sentence_is_no_amount():
     assert prices.amounts_in("• 1 First maintenance kit for an amount of 4'000.- Euros") == []
+    assert prices.amounts_in("will = B-1200001 CHF/day) 264’500.-- €uro price") == []  # a garbled PDF's scrambled words
 
 
 def test_angle_bullets_are_description_lines_of_a_delivered_total():
