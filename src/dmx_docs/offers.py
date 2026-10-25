@@ -313,7 +313,8 @@ def _priced(section: prices.PriceSection | None) -> bool:
 
 
 def _amount_lines(section: prices.PriceSection | None) -> int:
-    return sum(1 for l in section.lines if l.amounts) if section else 0
+    """Priced lines, a line repeated with the same amounts counted once (a PDF text layer printed twice)."""
+    return len({tuple(sorted(l.amounts.items())) for l in section.lines if l.amounts}) if section else 0
 
 
 def _twin_verdict(pdf_pages, pdf_section, twin_section, pdf, twin) -> str | None:
@@ -353,16 +354,17 @@ def _read(con, doc, model: _Model, aliases, twin=None) -> _Read:
         return r
     formal = prices.is_formal(pages, doc["name"], _offer_of(doc))
     section, other, notes = prices.parse_section(pages), pages, []
-    if twin is not None and _score(section) < 3:  # the PDF's sum is not checked: its Word twin may read better
-        twin_pages = _pages(con, twin["id"])
+    twin_pages = _pages(con, twin["id"]) if twin is not None and (not formal or _score(section) < 3) else None
+    if twin_pages is not None and not formal:  # the twin's budget wording counts unless the PDF is formal (R45): a
+        # garbled PDF's own title ('Price indication') may be readable in its Word file only
+        budget |= prices.offer_type(twin_pages, twin["name"], _offer_of(twin)) == "budget"
+    if twin_pages is not None and _score(section) < 3:  # the PDF's sum is not checked: its Word twin may read better
         twin_section = prices.parse_section(twin_pages)
         better, score = _score(twin_section), _score(section)
         if better > score and (better == 3 or score == 0):  # a checked sum, or the PDF reads nothing
             verdict = _twin_verdict(pages, section, twin_section, doc, twin)
             if verdict in (None, "saved after"):
                 doc, pages, section, other = twin, twin_pages, twin_section, pages
-                # the twin's budget wording counts only when the PDF is not formal (R45)
-                budget |= not formal and prices.offer_type(twin_pages, twin["name"], _offer_of(twin)) == "budget"
                 if verdict:
                     notes.append("read from the Word twin, saved after the PDF")
             else:

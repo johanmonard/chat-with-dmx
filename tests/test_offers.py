@@ -862,8 +862,19 @@ def test_a_word_twin_with_a_checked_sum_beats_a_pdf_without_total():
     con.execute("UPDATE chunks SET text = 'PRIX\nEquipement CHF 300''000.--\nMise en service CHF 20''000.--\n"
                 "Prix total, net, hors taxe CHF 320''000.--' WHERE doc_id = 1 AND page_no = 2")
     r = offers._read(con, pdf, _NoModel(), [], twin=word)
-    assert r.doc["id"] == 1 and r.section.sum_ok is True and r.budget is False  # the PDF is checked: kept, and its own
-    # wording decides
+    assert r.doc["id"] == 1 and r.section.sum_ok is True and r.budget is True  # the PDF is checked: kept; the twin's
+    # budget wording counts (the PDF is not formal)
+    formal = _doc(REV + r"\Formal Quotation - 3001234 V1.pdf", 1)
+    r = offers._read(con, formal, _NoModel(), [], twin=word)
+    assert r.budget is False and r.formal is True  # a formal PDF never takes its twin's budget wording (R45)
+
+
+def test_a_pdf_line_printed_twice_does_not_outnumber_its_word_twin():
+    pdf, word = _doc(REV + r"\3001234_00.pdf", 1), _doc(REV + r"\3001234_00.doc", 2)
+    con = _pages_db({1: {2: "PRIX\nCellule Paloma 4R CHF 300'000.--\nCellule Paloma 4R CHF 300'000.--\n300'000.--"},
+                     2: {2: "PRIX\nCellule Paloma 4R CHF 300'000.--\nPrix total, net, hors taxe CHF 300'000.--"}})
+    r = offers._read(con, pdf, _NoModel(), [], twin=word)
+    assert r.doc["id"] == 2 and r.section.sum_ok is True
 
 
 def test_a_word_twin_with_other_amounts_never_replaces_the_pdf():  # R46
