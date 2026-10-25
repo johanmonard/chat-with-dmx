@@ -280,6 +280,7 @@ class _Read:
     variant: str | None = None
     twin: _Read | None = None  # the revision's document this one translates
     budget: bool = False  # budget wording (prices.offer_type), in this document or its PDF/Word twin
+    other: dict[int, str] = field(default_factory=dict)  # the twin's pages when one was read instead (dates, country)
 
 
 def _confidence(read_by: str, sum_ok: bool | None) -> str:
@@ -335,7 +336,7 @@ def _read(con, doc, model: _Model, aliases, twin=None) -> _Read:
         better, score = _score(twin_section), _score(section)
         if better > score and (better == 3 or score == 0):  # a checked sum, or the PDF reads nothing
             doc, pages, section, other = twin, twin_pages, twin_section, pages
-    r = _Read(doc, pages, budget=budget)
+    r = _Read(doc, pages, budget=budget, other=other if other is not pages else {})
     read_by = "rules"
     if r.pages and (section is None or section.sum_ok is False or not _priced(section)):
         answer, problem = model.read(r.pages)
@@ -526,7 +527,8 @@ def _country_in(text: str) -> str | None:
 
 def _document_country(revisions) -> str | None:
     """The country named on page 1 of the offer's documents, the last revision first."""
-    return next((c for _, _, r in reversed(revisions) if (c := _country_in(r.pages.get(1, "")))), None)
+    return next((c for _, _, r in reversed(revisions)
+                 if (c := _country_in(r.pages.get(1, "")) or _country_in(r.other.get(1, "")))), None)
 
 
 def _mtime_date(doc) -> str | None:
@@ -623,7 +625,7 @@ def _build_offer(con, key: str, owner: str, docs: list, others: list[str], ctx: 
         country = _document_country(revisions)
         country_source = "document" if country else None
     for _, _, r in revisions:
-        r.pages = {}  # the text is no longer needed
+        r.pages = r.other = {}  # the text is no longer needed
     name = os.path.basename(owner)
     own_folder = offerkeys.offer_key(name) == key
     row = {"offer_key": key, "number_written": name.split(" - ", 1)[0].strip() if own_folder else key,
