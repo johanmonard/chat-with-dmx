@@ -410,7 +410,7 @@ def _merge_versions(folders: dict[str, list]) -> dict[str, list]:
 # Names of the documents sent to the client ('Quotation', 'Offre', 'Angebot'...): read first in a revision.
 _OFFER_NAMED = re.compile(r"\b(?:offers?|offres?|angebot|quotation|proposal|proposition|devis)\b")
 # Then the documents named as prices ('Layout & Price - 3001234_00.docx'), before a drawing named by the number only.
-_PRICE_NAMED = re.compile(r"\b(?:prices?|prix|preise?|preisangaben?|price indication)\b")
+_PRICE_NAMED = re.compile(r"(?<!sans )(?<!without )(?<!ohne )(?<!no )\b(?:prices?|prix|preise?|preisangaben?|price indication)\b")
 # Documents that are not what was sent: internal costing and negotiation sheets, drafts, old copies (folded names).
 _NOT_SENT = re.compile(r"\b(?:nego\w*|calcul\w*|kalkulation|interne?|internal|prix de revient|costs?|kosten"
                        r"|prices? summary|summary for sales|old|draft|brouillon|entwurf|en cours|copie(?: \d+)? de|copy(?: \d+)? of"

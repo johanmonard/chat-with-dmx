@@ -868,3 +868,9 @@ def test_the_country_of_a_pdf_whose_word_twin_was_read():
                      2: {1: "Offre 3001234", 2: "PRIX\nEquipement CHF 300'000.--\nPrix total, net, hors taxe CHF 300'000.--"}})
     r = offers._read(con, pdf, _NoModel(), [], twin=word)
     assert r.doc["id"] == 2 and offers._document_country([("01", 0, r)]) == "France"
+
+
+def test_a_copy_without_prices_is_not_named_as_prices():
+    docs = [_doc(REV + r"\Globex 3001234 V4 sans prix.pdf", 1, mtime=1), _doc(REV + r"\Globex 3001234 V4.doc", 2, mtime=9),
+            _doc(REV + r"\Prix 3001234 V4.pdf", 3, mtime=5)]
+    assert [d["id"] for d in sorted(docs, key=offers._doc_order)] == [3, 1, 2]
