@@ -88,7 +88,8 @@ For an exact offer number use the number in "double quotes" with `mode="keyword"
 ## Pitfalls
 
 - Variants of one revision are separate points, never summed. Translations are one offer.
-- Budget offers ("Richtpreis", "budget", "budgétaire", "price indication") are in default price trends, marked by the
+- Budget offers ("Richtpreis", "budget", "budgétaire", "price indication", "Preisangabe", or "this budgetary proposal" /
+  non-binding in the validity section) are in default price trends, marked by the
   `offer_type` column: show them as budget points (or filter `offer_type="firm"` to exclude them).
   Partner offers (prices may be to the partner) are not in default price trends.
 - A machine name the register does not know is kept as written: the same model can appear under an

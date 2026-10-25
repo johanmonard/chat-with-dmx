@@ -207,8 +207,11 @@ A revision folder can hold several priced documents (designer's call, to check i
   any other; the issuing company is kept when the document names it.
 
 Each offer also gets an **offer type**: `firm` or `budget` (words "budget", "budgétaire", "Richtpreis",
-"Richtangebot", "price indication", "prix indicatif" on pages 1-2 or in the name, a budget phrase on page 3;
-not "indicative" or "estimation" alone, 2026-10-19 spot check), default `firm`.
+"Richtangebot", "price indication", "prix indicatif", "Preisangabe", "Kostenvoranschlag", "oferta presupuestaria" on
+pages 1-2 or in the name, a budget phrase on page 3; not "indicative" or "estimation" alone, 2026-10-19 spot check;
+on any page the offer calling itself budget or non-binding: "This budgetary proposal", "Validity of the budgetary
+offer", "Cette offre budgétaire", "Dieses Budgetangebot", "als Budget zu verstehen", "Unverbindliches Angebot", "... is
+therefore not binding", 2026-10-25 spot check; a formal F- offer only by page 1 or its name), default `firm`.
 
 The price page is found by its words
 ("PRICE", "PRIX", "PREIS", "net", "netto", "without taxes", "ohne Steuern", "hors taxes") and
