@@ -911,3 +911,18 @@ def test_a_copy_without_prices_is_not_named_as_prices():
     docs = [_doc(REV + r"\Globex 3001234 V4 sans prix.pdf", 1, mtime=1), _doc(REV + r"\Globex 3001234 V4.doc", 2, mtime=9),
             _doc(REV + r"\Prix 3001234 V4.pdf", 3, mtime=5)]
     assert [d["id"] for d in sorted(docs, key=offers._doc_order)] == [3, 1, 2]
+
+
+@pytest.mark.parametrize("page, country", [  # R47
+    ("ACME FOODS USA\nM. John Doe\nSpringfield\nCANADA\n\nDear Sir,", "Canada"),
+    ("Project: Mix drink - Brazil\nGlobex AG\nIndustriestrasse 1\nSwitzerland\nDear Sir,", "Switzerland"),
+    ("Globex GmbH\nIndustriestr. 4\nD-12345 Neustadt\n\nSehr geehrte Damen und Herren,", "Germany"),
+    ("ACME Sp. z o.o.\nul. Polna 1 | Why Demaurex SA?\nPL-00950 Warszawa\nDear Sir,", "Poland"),
+    ("Final Customer: ACME (Lyon) - France\nGlobex AG\nMadame Jane Doe\nNorway\n", "Norway"),
+    ("ACME\nPol. Ind. Norte\n31500 Tudela (Navarra)\nEspaña  We understand your needs", "Spain"),
+    ("Globex Ltd\nDear Sir,\nThe training will take place in Spain.", None),  # after the greeting
+    ("Item | Qty\nF-90001 1,0 INTRAY Buffer 2500 | 1", None),  # an article number, not a postcode
+    ("CANADA l'automation flexible et la robotique\nLECLERC FOODS USA", "Canada"),
+])
+def test_country_from_the_addressee_block(page, country):
+    assert offers._country_in(page) == country

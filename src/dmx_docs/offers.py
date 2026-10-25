@@ -537,23 +537,58 @@ def _first_country(text: str) -> str | None:
     return None
 
 
+# The addressee block ends at the greeting or the subject line; the project line names the final customer, not the
+# addressee ('Final Customer: ACME (Lyon)').
+_GREETING = re.compile(r"^\W*(?:(?:dear|sehr geehrte|estimad[oa]s?|gentil[ei]|egregi|subject|sujet|objet|betreff"
+                       r"|concerne|oggetto|asunto)\b|(?:madame|monsieur|messieurs|mesdames)\b.*,\s*$)", re.I)
+# ('Madame Jane Doe' is the attention line of the address; 'Madame, Monsieur,' is the greeting)
+_PROJECT_LINE = re.compile(r"^\W*(?:final customer|end customer|end user|client final|utilisateur final|endkunde"
+                           r"|cliente final|cliente finale|pays final|final country|endland)\b", re.I)
+# A postcode with a country prefix and a town ('D-12345 Berlin', 'F-75001 Paris', 'NL-3100 AA Town'), not an article
+# number ('F-90001 1,0 ...'); CH- is left to the seller rule.
+_POSTCODE = re.compile(r"(?<![\w-])(D|F|I|E|A|B|NL|L|PL|CZ|SK|DK|S|N|FIN|GB|P|H|SLO|HR|RO|BG|GR)-\s?\d{4,5}"
+                       r"\s+[A-ZÀ-Ý][A-Za-zà-ÿ]")
+_POSTCODE_COUNTRY = {"D": "Germany", "F": "France", "I": "Italy", "E": "Spain", "A": "Austria", "B": "Belgium",
+                     "NL": "Netherlands", "L": "Luxembourg", "PL": "Poland", "CZ": "Czech Republic", "SK": "Slovakia",
+                     "DK": "Denmark", "S": "Sweden", "N": "Norway", "FIN": "Finland", "GB": "United Kingdom",
+                     "P": "Portugal", "H": "Hungary", "SLO": "Slovenia", "HR": "Croatia", "RO": "Romania",
+                     "BG": "Bulgaria", "GR": "Greece"}
+ADDRESS_LINES = 40  # the addressee block is in the first lines of page 1
+
+
 def _country_in(text: str) -> str | None:
-    """English name of the first country named on a page (one to three words, starting with a capital;
-    abbreviations of 3 letters or fewer only in capitals). The seller's own address is skipped: a cell (between
-    '|' or '♦') naming the seller or its address, and Switzerland in the seller's row or the row after it
-    ('Ch. des Mésanges 3, CH-1032 Romanel' + 'Switzerland 12/03/09')."""
-    after_seller = False
-    for row in text.split("\n"):
+    """English name of the addressee's country on page 1 (R47): in the first ADDRESS_LINES lines, before the greeting
+    or subject line, project lines naming the final customer left out. A cell (between '|' or '♦') that is only a
+    country ('CANADA') beats a postcode with a country prefix ('D-12345 Town'), which beats a cell starting with a
+    country (an address line glued to the next column: 'CANADA l'automation flexible ...'), which beats a country
+    word inside a cell ('ACME FOODS USA', 'Project: Mix drink - Brazil'); the first one of the best kind wins. A country is one to three words starting with a capital
+    (abbreviations of 3 letters or fewer only in capitals). The seller's own address is skipped: a cell naming the
+    seller or its address, and Switzerland in the seller's row or the row after it ('Ch. des Mésanges 3, CH-1032
+    Romanel' + 'Switzerland 12/03/09')."""
+    after_seller, found = False, []
+    for i, row in enumerate(text.split("\n")[:ADDRESS_LINES]):
+        if _GREETING.match(row):
+            break
+        if _PROJECT_LINE.match(row):
+            continue
         seller_row = False
         for cell in re.split(r"[|♦]", row):
             if _SELLER.search(cell):
                 seller_row = True
                 continue
-            country = _first_country(cell)
-            if country and not (country == "Switzerland" and (seller_row or after_seller)):
-                return country
+            alone = cell.strip(" \t,.;:()")
+            exact = offerkeys.country_en(alone) if alone and (len(alone) > 3 or alone.isupper()) else None
+            postcode = _POSTCODE.search(cell)
+            lead = " ".join(_WORD.findall(cell)[:3])
+            starts = next((c for n in (3, 2, 1) if (c := offerkeys.country_en(" ".join(lead.split()[:n])))
+                           and (len(" ".join(lead.split()[:n])) > 3 or lead.split()[0].isupper())), None) if lead else None
+            for kind, country in ((0, exact), (1, postcode and _POSTCODE_COUNTRY[postcode.group(1)]), (2, starts),
+                                  (3, _first_country(cell))):
+                if country and not (country == "Switzerland" and (seller_row or after_seller)):
+                    found.append((kind, i, country))
+                    break
         after_seller = seller_row
-    return None
+    return min(found)[2] if found else None
 
 
 def _document_country(revisions) -> str | None:
