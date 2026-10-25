@@ -53,7 +53,8 @@ FIRST_DATE = date(1990, 1, 1)  # an earlier offer date is an empty date cell or 
 _SP = " " + chr(0xA0) + chr(0x202F)  # space, no-break space, narrow no-break space
 _DASH = "-" + chr(0x2013) + chr(0x2212)  # hyphen, en dash, minus
 _CURRENCIES = {"€": "EUR", "$": "USD", "US$": "USD", "£": "GBP", "Fr.": "CHF", "SFr.": "CHF", "SFr": "CHF"}
-_CUR = r"(?<![A-Za-z])(?:CHF|EUR|USD|GBP|US\$|SFr\.?|Fr\.|€|\$|£)(?![A-Za-z])"
+# 'Euro', 'EURO', '€uro' before or after the number are EUR too ("Equipement : €uro 410'000.-- (CHF 500'000.--)").
+_CUR = r"(?<![A-Za-z])(?:CHF|EUR|USD|GBP|US\$|SFr\.?|Fr\.|€uros?|€UROS?|(?i:euros?)|€|\$|£)(?![A-Za-z])"
 # Thousands grouped by space, apostrophe, dot or comma, or plain digits; up to 2 decimals; not part
 # of a date or a longer number ("Fr. 12.05.2020").
 _NUM = rf"(?:\d{{1,3}}(?:[{_SP}'’.,]\d{{3}})+(?:[.,]\d{{1,2}})?|\d+(?:[.,]\d{{1,2}})?)(?![.,/]?\d)"
@@ -65,8 +66,11 @@ _CUR_TOKEN = re.compile(_CUR)
 # "Paloma 4R 1 150 000 €": a quantity may be fused with a space-grouped amount written number first,
 # when what follows the 1-2 digit lead is itself an amount of two 3-digit groups or more.
 _FUSED = re.compile(rf"\d{{1,2}}[{_SP}]\d{{3}}[{_SP}]\d{{3}}")
-_PER = re.compile(rf"[{_SP}]*(?:/[{_SP}]*(?:tage?|days?|jours?|h|hours?|stunden?|heures?)\b"
-                  rf"|(?:per|par|pro)[{_SP}]+(?:day|jour|tag|hour|heure|stunde)\b)", re.I)
+# A rate per day or hour after the amount, also on the next line ('CHF 1'100' + 'pro Zusatztag möglich'), also 'per
+# additional day', 'par jour supplémentaire'.
+_PER = re.compile(rf"[{_SP}]*\n?[{_SP}]*(?:/[{_SP}]*(?:tage?|days?|jours?|h|hours?|stunden?|heures?)\b"
+                  rf"|(?:per|par|pro)[{_SP}]+(?:(?:additional|extra|further|zusätzliche[nrm]?|weitere[nrm]?)[{_SP}]+)?"
+                  rf"(?:day|jour|tag|zusatztag|mehrtag|hour|heure|stunde|zusatzstunde)\b)", re.I)
 # Exchange rates: "1.00 EUR = 1,0244 CHF", "1 Euro = 1.20 CHF", "1 EUR = CHF 1.08", "1 € = 1.08 CHF".
 _RCUR = r"(?:EUR|Euros?|€uros?|USD|CHF|GBP|US\$|€|\$|£)(?![A-Za-z])"  # "1 €uro = 1.20 CHF" is printed too
 _RNUM = r"\d+(?:[.,]\d+)?"
@@ -141,11 +145,13 @@ _DISCOUNT = re.compile(r"\b(?:remise|rabais|rabatt|discount|nachlass|d[ée]ducti
 _OPTION = re.compile(r"\boption", re.I)
 _SERVICE = re.compile(r"\b(?:installation|inbetriebnahme|mise en service|commissioning|training|formation|schulung"
                       r"|travel|reise|déplacement|transport|transportation|documentation|sat|fat|montage|monteur"
-                      r"|supervision|intervention|on[- ]site|I&C)(?![\w&])", re.I)
+                      r"|supervision|intervention|on[- ]site|I&C|engineering|ingénierie|ingenierie|project management"
+                      r"|projektmanagement|projektleitung|gestion de projet)(?![\w&])", re.I)
 # Machine words: a cell or line, and the equipment of an offer ('Equipement (selon §6.2)', conveyors, case packers).
 _MACHINE = re.compile(r"\b(?:cells?|cellules?|zellen?|lines?|lignes?|linien?|robot\w*|equipment|[ée]quipements?"
                       r"|ausrüstung|lieferumfang|conveyors?|convoyeurs?|förder\w*|case ?packers?|encaisseuses?"
-                      r"|erect(?:ors?|ing)|formeuses?|fermeuses?|closers?|denesters?|dépileurs?|sidebots?)\b", re.I)
+                      r"|erect(?:ors?|ing)|formeuses?|fermeuses?|closers?|denesters?|dépileurs?|sidebots?"
+                      r"|cartoners?|cartonneuses?|encartonneuses?|[ée]tuyeuses?|kartonierer|kartoniermaschinen?)\b", re.I)
 # Packaging as the item itself ('Packaging', 'Emballage', 'Packaging for ACME equipment'): crating, a service.
 _PACKING = re.compile(r"^\W*(?:\d+\s*[x×]?\s*)?(?:packaging|emballage|verpackung)\b"
                       r"(?!\s+(?:cells?|lines?|machines?|robots?|systems?|modules?)\b)", re.I)
@@ -215,10 +221,15 @@ def _currency(token: str) -> str:
     return "EUR" if t.startswith(("EURO", "€URO")) else _CURRENCIES.get(token, t)
 
 
-def _blank_rates(text: str) -> str:
+def _blank_rates(text: str, per_day: bool = True) -> str:
     """Exchange rates replaced by spaces, same length and line breaks kept: a rate wrapped after '='
-    ('1 Euro =' then '1.20 CHF.') never leaves an amount on a line of its own."""
-    return _RATE.sub(lambda m: re.sub(r"[^\n]", " ", m.group()), text)
+    ('1 Euro =' then '1.20 CHF.') never leaves an amount on a line of its own. per_day: also the amounts of rates per
+    day or hour, also when the 'per day' words are on the next line ('CHF 1'100' + 'pro Zusatztag möglich.')."""
+    text = _RATE.sub(lambda m: re.sub(r"[^\n]", " ", m.group()), text)
+    if per_day:
+        for start, end in [m.span() for m in _AMOUNT.finditer(text) if _PER.match(text, m.end())]:
+            text = text[:start] + " " * (end - start) + text[end:]
+    return text
 
 
 def _amount_spans(text: str) -> list[tuple[int, int, str, float, bool]]:
@@ -250,7 +261,7 @@ def amounts_in(text: str) -> list[tuple[str, float]]:
 
 def _rate_values(text: str) -> set[float]:
     """Values printed as rates per day or hour ('1100 CHF/Day')."""
-    text = _blank_rates(text)
+    text = _blank_rates(text, per_day=False)
     return {v for m in _AMOUNT.finditer(text) if _PER.match(text, m.end())
             if (v := parse_number(m.group("v1") or m.group("v2"))) is not None}
 
@@ -270,8 +281,26 @@ def _tables(text: str) -> str:
     A row with as many cells as the header takes the last column of each currency ('Total CHF | Total €uros':
     both; 'Prix/unit. CHF | Total CHF': the total); any other row its last cell in the header's last currency."""
     out, currency, columns, width = [], None, {}, 0
+    tiers: dict[int, str] = {}  # a tiered table: column -> tier label ('≥ 10 machines'), in `currency`
     for line in text.split("\n"):
         cells = [c.strip() for c in line.split("|")] if "|" in line else []
+        if tiers and not cells:
+            tiers, currency = {}, None
+        if not tiers and cells and (tier := _tier_header(cells)):
+            currency, tiers = tier
+            out.append("PRICES")  # the header row: a price heading, no item's text
+            continue
+        if tiers:
+            prices_at = [i for i in tiers if i < len(cells) and _CELL_PRICE.fullmatch(cells[i])]
+            if not prices_at:  # a second header row ('| 0% | 10% | 20%'): part of the tier labels
+                for i in tiers:
+                    if i < len(cells) and cells[i]:
+                        tiers[i] = f"{tiers[i]} {cells[i]}"
+                out.append("")
+                continue
+            name = " ".join(c for i, c in enumerate(cells) if c and i not in tiers)
+            out.append("\n".join(f"{name} ({tiers[i]}) {currency} {cells[i]}" for i in prices_at))
+            continue
         if (not cells and line.strip() and not line.rstrip().endswith(":")
                 and (len(line.split()) > 6 or line.rstrip().endswith("."))):
             currency, columns, width = None, {}, 0  # a sentence: the table has ended (a label 'Engineering :' has not)
@@ -294,6 +323,19 @@ def _tables(text: str) -> str:
                 line = _CUR_SPLIT.sub(lambda m: f"{_currency(m.group(1))} ", line)
         out.append(line)
     return "\n".join(out)
+
+
+def _tier_header(cells: list[str]) -> tuple[str, dict[int, str]] | None:
+    """(currency, {column: tier label}) of the header of a tiered price table ('All prices are in CHF * | < 10 machines |
+    ≥ 10 machines | ≥ 20 machines'): one cell names prices and a currency, two or more others are tier labels with a
+    number and neither a currency nor a price word. A row of such a table gives a line per tier (no total: the tiers
+    are alternatives)."""
+    head = [c for c in cells if _PRICE_HEADER.search(c) and _CUR_CELL.search(c) and len(c.split()) <= 8]
+    labels = {i: c for i, c in enumerate(cells)
+              if c and re.search(r"\d", c) and not _CUR_CELL.search(c) and not _PRICE_HEADER.search(c)}
+    if len(head) != 1 or len(labels) < 2 or cells.index(head[0]) in labels:
+        return None
+    return _currency(_CUR_CELL.findall(head[0])[-1]), labels
 
 
 def _prepared(pages: dict[int, str]) -> dict[int, str]:
@@ -743,8 +785,9 @@ def _blocks(pages: dict[int, str], nums: list[int]) -> list[_Block]:
             if label and _total_strength(label[-1]):
                 if amts and label[-1].endswith((",", "-")):  # 'PRICE, net, without taxes,' + 'FCA ... CHF ...'
                     text = label.pop() + " " + text
-                else:
-                    label.pop()  # a total-like sentence without amounts: "Alle Preise verstehen sich netto ab Werk."
+                elif _NUMBERING.match(label.pop()):  # '7.2. Prix du système de convoyeurs, net, hors taxe': a
+                    label = []  # heading; the text before it belongs to no item (a footnote of the section above)
+                # else a total-like sentence without amounts: "Alle Preise verstehen sich netto ab Werk."
             if not amts:
                 inc = _included_line(stripped, following_amounts_only=bool(nxt and nxt[2] and not nxt[4]))
                 if inc == "out":  # 'Packaging, transport and insurance: Not included': no line
@@ -1074,7 +1117,8 @@ def _model_sum(lines: list[PriceLine], totals: dict[str, float], sent: str) -> b
 
 def clean_model(section: PriceSection | None, pages: dict[int, str], checked: bool = True) -> PriceSection | None:
     """A model's section (also a cached one) without what is no price: amounts of 0 (the model's 'no price', never
-    printed as such) and values printed only as rates per day or hour ('1100 CHF/Day'). A line left without amounts
+    printed as such), values printed only as rates per day or hour ('1100 CHF/Day') and totals not printed in the
+    pages sent (the model's own sum, R40: no total rather than a total nobody printed). A line left without amounts
     is dropped, positions follow; None when no line is left. sum_ok is computed again when something was dropped
     (always when checked is False)."""
     if section is None:
@@ -1091,7 +1135,8 @@ def clean_model(section: PriceSection | None, pages: dict[int, str], checked: bo
         changed |= amounts != l.amounts
         if amounts:
             lines.append(PriceLine(len(lines) + 1, l.text, l.kind, l.quantity, amounts, l.page, l.family, l.model))
-    totals = {c: v for c, v in section.totals.items() if price(v)}
+    printed = _printed_numbers(sent)  # a total not printed is the model's own sum: no total (R40)
+    totals = {c: v for c, v in section.totals.items() if price(v) and round(abs(v), 2) in printed}
     changed |= totals != section.totals
     if not lines:
         return None

@@ -426,7 +426,7 @@ def test_model_amounts_must_be_printed_in_the_pages(fake_ollama):
     _model_says(fake_ollama, answer)
     page = "Paloma 4R CHF 300'000.-\nOption CHF 20 000.-"
     s = prices.parse_with_model(fake_ollama.url, "test-vision", {1: page}, timeout=10)
-    assert s.totals == {"CHF": 320000.0} and s.sum_ok is False  # the sum is the model's, not printed
+    assert s.totals == {} and s.sum_ok is None  # the sum is the model's, not printed: no total (R40)
     s = prices.parse_with_model(fake_ollama.url, "test-vision", {1: page + "\nTotal CHF 320 000.-"}, timeout=10)
     assert s.sum_ok is True
     answer["lines"][0]["amounts"] = {"CHF": 310000}
@@ -997,3 +997,81 @@ def test_offer_type_cited_budget_offers_estimations_and_formal_offers(pages, nam
 
 def test_offer_date_with_of_between_day_and_month():
     assert prices.offer_date({1: "Written by ACME, the 10th of February 2006"}) == ("2006-02-10", "10th of February 2006")
+
+
+# --- fixes from the fresh 30-offer spot check (2026-10-25) ------------------------------------------------
+
+def test_euro_written_as_a_word_before_the_number_is_eur():
+    assert prices.amounts_in("Equipement : €uro 410'000.-- (CHF 500'000.--)") == [("EUR", 410000.0), ("CHF", 500000.0)]
+    assert prices.amounts_in("Machine EURO 12'000.- / Euro 13'000.- / 14'000 Euros") == [
+        ("EUR", 12000.0), ("EUR", 13000.0), ("EUR", 14000.0)]
+    assert prices.amounts_in("Le prix en €URO n'a qu'une valeur indicative.") == []
+    s = prices.parse_section({9: "10. PRIX\n10.1. Prix, net, hors taxe\nEquipement : €uro 410'000.-- (CHF 500'000.--)\n"
+                                 "(selon §6.3)\nMise en service : €uro 40'000.-- (CHF 49'000.--)\n"
+                                 "Le seul prix valable est celui en francs suisses (CHF)."})
+    assert [l.amounts for l in s.lines] == [{"EUR": 410000.0, "CHF": 500000.0}, {"EUR": 40000.0, "CHF": 49000.0}]
+
+
+@pytest.mark.parametrize("text", ["Zusätzliche Tage sind auf Anfrage zum Preis von CHF 1'100\npro Zusatztag möglich.",
+                                  "Additional days are possible at CHF 1'100.- per additional day.",
+                                  "Des jours additionnels au tarif de CHF 1'100.- par jour supplémentaire.",
+                                  "Additional FAT days: EUR 1'000 / day"])
+def test_day_rates_in_an_item_description_are_no_amounts(text):
+    assert prices.amounts_in(text) == []
+
+
+def test_a_day_rate_wrapped_in_an_item_description_is_no_line():
+    s = prices.parse_section({3: "1. Angebot\n2 Paloma 4R einschließlich jeweils: CHF 900,000.-\n"
+                                 "• 2 Tage für die Werksabnahme (FAT) vor dem Versand\n"
+                                 "Zusätzliche Tage sind auf Anfrage zum Preis von CHF 1'100\npro Zusatztag möglich.\n"
+                                 "1 Product Conveyor CHF 80,000.-\nPREIS, netto, ohne Steuern, CHF 980,000.-"})
+    assert [l.amounts for l in s.lines] == [{"CHF": 900000.0}, {"CHF": 80000.0}] and s.sum_ok is True
+
+
+def test_a_numbered_price_heading_cuts_the_footnote_above_it():
+    page = ("7. PRIX\n7.1. Prix des cellules Presto, net, hors taxe\n"
+            "Deux (2) cellules Presto €uro 500'000.-- (CHF 600'000.--)\n"
+            "Le seul prix valable est celui en francs suisses (CHF). Le prix en €URO n'a qu'une valeur indicative.\n"
+            "7.2. Prix du système de convoyeurs, net, hors taxe\n"
+            "Système de convoyeur ACME\n€uro 100'000.-- (CHF 120'000.--)\nTransport et Installation inclus\n"
+            "Le seul prix valable est celui en francs suisses (CHF). Le prix en €URO n'a qu'une valeur indicative.\n"
+            "7.3. Prix de l'étuyeuse, net, hors taxe\nEtuyeuse continue Globex ET100 €uro 200'000.-- (CHF 240'000.--)\n")
+    s = prices.parse_section({9: page})
+    assert [l.text for l in s.lines] == ["Deux (2) cellules Presto", "Système de convoyeur ACME",
+                                         "Etuyeuse continue Globex ET100"]
+    assert [l.kind for l in s.lines] == ["machine", "machine", "machine"]
+    assert s.lines[2].amounts == {"EUR": 200000.0, "CHF": 240000.0}
+
+
+@pytest.mark.parametrize("text, kind", [
+    ("Engineering für Flowpack Integration", "service"), ("Equipment Engineering for the ACME solution", "service"),
+    ("Project Management by Globex", "service"), ("Gestion de projet", "service"), ("Ingénierie mécanique", "service"),
+    ("Encartonneuse Globex 500", "machine"), ("Cartoner ACME CT-2", "machine"), ("Kartonierer", "machine"),
+])
+def test_classify_engineering_and_cartoners(text, kind):
+    assert prices.classify(text, {"CHF": 10000.0}) == kind
+
+
+def test_a_tiered_price_table_gives_a_line_per_tier():
+    page = ("1- FRAMEWORK CONTRACT\n\nAll prices are in CHF * | < 10 machines | ≥ 10 machines | ≥ 20 machines\n"
+            "| 0% | 10% | 20%\nACME 2R | 170'000 | 153'000 | 136'000\nACME 1R | 130'000 | 117'000 | 104'000\n\n"
+            "COMMERCIAL CONDITIONS\nDelivery time for 1 machine = 8 weeks")
+    s = prices.parse_section({2: page})
+    assert [(l.text, l.amounts) for l in s.lines] == [
+        ("ACME 2R (< 10 machines 0%)", {"CHF": 170000.0}), ("ACME 2R (≥ 10 machines 10%)", {"CHF": 153000.0}),
+        ("ACME 2R (≥ 20 machines 20%)", {"CHF": 136000.0}), ("ACME 1R (< 10 machines 0%)", {"CHF": 130000.0}),
+        ("ACME 1R (≥ 10 machines 10%)", {"CHF": 117000.0}), ("ACME 1R (≥ 20 machines 20%)", {"CHF": 104000.0})]
+    assert s.totals == {} and s.sum_ok is None
+
+
+def test_a_cost_sheet_with_margins_is_no_tiered_table():
+    page = "Item | Cost CHF | Margin | Price\n2x Paloma 4R | 300'000 | 30% | 390'000\n"
+    assert "(" not in prices._tables(page)
+
+
+def test_a_model_total_not_printed_is_dropped():  # R40
+    cached = prices.PriceSection([prices.PriceLine(1, "Delfi 4R", "machine", None, {"EUR": 800000.0}, 1),
+                                  prices.PriceLine(2, "Mise en service", "service", None, {"EUR": 40000.0}, 1)],
+                                 {"EUR": 840000.0}, [], [1], False)
+    s = prices.clean_model(cached, {1: "Delfi 4R EUR 800'000.-\nMise en service EUR 40'000.-"})
+    assert s.totals == {} and s.sum_ok is None
