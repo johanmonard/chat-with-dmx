@@ -1003,7 +1003,7 @@ def test_offer_date_with_of_between_day_and_month():
 
 def test_euro_written_as_a_word_before_the_number_is_eur():
     assert prices.amounts_in("Equipement : €uro 410'000.-- (CHF 500'000.--)") == [("EUR", 410000.0), ("CHF", 500000.0)]
-    assert prices.amounts_in("Machine EURO 12'000.- / Euro 13'000.- / 14'000 Euros") == [
+    assert prices.amounts_in("Machine EURO 12'000.- / Euro 13'000.- / 14'000 €uros") == [
         ("EUR", 12000.0), ("EUR", 13000.0), ("EUR", 14000.0)]
     assert prices.amounts_in("Le prix en €URO n'a qu'une valeur indicative.") == []
     s = prices.parse_section({9: "10. PRIX\n10.1. Prix, net, hors taxe\nEquipement : €uro 410'000.-- (CHF 500'000.--)\n"
@@ -1112,3 +1112,16 @@ def test_a_visit_meeting_or_request_date_is_not_the_offer_date(page):
 ])
 def test_offer_type_own_budget_wording_on_any_page(pages, name, kind):
     assert prices.offer_type(pages, name, "3001234") == kind
+
+
+def test_euros_after_a_number_in_a_sentence_is_no_amount():
+    assert prices.amounts_in("• 1 First maintenance kit for an amount of 4'000.- Euros") == []
+
+
+def test_angle_bullets_are_description_lines_of_a_delivered_total():
+    page = ("- One (1) Presto cell, including CHF 270'000.- (€ 240'000.-)\n> One (1) Delta robot with 4 axis\n"
+            "> Engineering for the integration of the outgoing flow\n> One (1) HMI\n"
+            "- Installation and setup Not Included (8-10% of equipment price)\n"
+            "Budget Price, FCA Ecublens CHF 270'000.- (€ 240'000.-)\n")
+    s = prices.parse_section({1: page})
+    assert len(s.lines) == 1 and s.totals == {"CHF": 270000.0, "EUR": 240000.0} and s.sum_ok is True

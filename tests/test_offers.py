@@ -846,3 +846,16 @@ def test_country_skips_the_sellers_trademark_line_and_reads_provinces():
     assert offers._country_in("Globex Europe Limited\nBOSCH is a registered trademark of Robert Bosch GmbH Germany") is None
     assert offers._country_in("ACME LLC - Plant 1125 50e Avenue Lachine H8T 3P3 Quebec CA | Why Demaurex SA?") == "Canada"
     assert offers._country_in("Globex Proizvodstvennaya str. 8 Samara oblast Russian Federation") == "Russia"
+
+
+def test_a_word_twin_with_a_checked_sum_beats_a_pdf_without_total_and_its_budget_wording_counts():
+    pdf, word = _doc(REV + r"\Globex _ACME_ 3001234 V1.pdf", 1), _doc(REV + r"\Globex (ACME) 3001234 V1.doc", 2)
+    con = _pages_db({1: {1: "ACME Foods", 2: "PRIX\nEquipement CHF 300'000.--\nMise en service CHF 20'000.--"},
+                     2: {1: "ACME Foods", 2: "PRIX\nEquipement CHF 300'000.--\nMise en service CHF 20'000.--\n"
+                                            "Prix total, net, hors taxe CHF 320'000.--",
+                         9: "Validité | Cette offre budgétaire vous est fournie afin de servir de base de discussion."}})
+    r = offers._read(con, pdf, _NoModel(), [], twin=word)
+    assert r.doc["id"] == 2 and r.section.sum_ok is True and r.budget is True
+    con.execute("UPDATE chunks SET text = text || '\nPrix total, net, hors taxe CHF 320''000.--' WHERE doc_id = 1 AND page_no = 2")
+    r = offers._read(con, pdf, _NoModel(), [], twin=word)
+    assert r.doc["id"] == 1 and r.section.sum_ok is True and r.budget is True  # the PDF is checked: kept

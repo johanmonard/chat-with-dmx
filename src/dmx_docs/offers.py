@@ -328,10 +328,10 @@ def _read(con, doc, model: _Model, aliases, twin=None) -> _Read:
             r.date, r.date_source = found[0], "mail"
         return r
     section, other = prices.parse_section(pages), pages
-    if twin is not None and _score(section) < 2:
+    if twin is not None:  # its budget wording counts; it is read when the PDF's sum is not checked
         twin_pages = _pages(con, twin["id"])
-        twin_section = prices.parse_section(twin_pages)
         budget |= prices.offer_type(twin_pages, twin["name"], _offer_of(twin)) == "budget"
+        twin_section = prices.parse_section(twin_pages) if _score(section) < 3 else None
         better, score = _score(twin_section), _score(section)
         if better > score and (better == 3 or score == 0):  # a checked sum, or the PDF reads nothing
             doc, pages, section, other = twin, twin_pages, twin_section, pages

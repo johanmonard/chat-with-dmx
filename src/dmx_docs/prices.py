@@ -55,13 +55,15 @@ _DASH = "-" + chr(0x2013) + chr(0x2212)  # hyphen, en dash, minus
 _CURRENCIES = {"€": "EUR", "$": "USD", "US$": "USD", "£": "GBP", "Fr.": "CHF", "SFr.": "CHF", "SFr": "CHF"}
 # 'Euro', 'EURO', '€uro' before or after the number are EUR too ("Equipement : €uro 410'000.-- (CHF 500'000.--)").
 _CUR = r"(?<![A-Za-z])(?:CHF|EUR|USD|GBP|US\$|SFr\.?|Fr\.|€uros?|€UROS?|(?i:euros?)|€|\$|£)(?![A-Za-z])"
+# After the number, a plain 'Euros' is a sentence's word ('for an amount of 4'000.- Euros'), not a price column.
+_CUR_AFTER = _CUR.replace("|(?i:euros?)", "")
 # Thousands grouped by space, apostrophe, dot or comma, or plain digits; up to 2 decimals; not part
 # of a date or a longer number ("Fr. 12.05.2020").
 _NUM = rf"(?:\d{{1,3}}(?:[{_SP}'’.,]\d{{3}})+(?:[.,]\d{{1,2}})?|\d+(?:[.,]\d{{1,2}})?)(?![.,/]?\d)"
 _END = rf"(?:\.?[{_DASH}]{{1,2}}(?!\d))?"  # "410 000.-", "410 000.--"
 _AMOUNT = re.compile(
     rf"(?P<n1>[{_DASH}])?(?P<c1>{_CUR})[{_SP}]*(?P<n2>[{_DASH}])?[{_SP}]*(?P<v1>{_NUM}){_END}"
-    rf"|(?P<n3>[{_DASH}])?(?P<v2>{_NUM}){_END}[{_SP}]*(?P<c2>{_CUR})(?![{_SP}]*[{_DASH}]?[{_SP}]*\d)")
+    rf"|(?P<n3>[{_DASH}])?(?P<v2>{_NUM}){_END}[{_SP}]*(?P<c2>{_CUR_AFTER})(?![{_SP}]*[{_DASH}]?[{_SP}]*\d)")
 _CUR_TOKEN = re.compile(_CUR)
 # "Paloma 4R 1 150 000 €": a quantity may be fused with a space-grouped amount written number first,
 # when what follows the 1-2 digit lead is itself an amount of two 3-digit groups or more.
@@ -91,7 +93,7 @@ _HEADING = re.compile(r"(?:\d+(?:\.\d+)*\.?\s*)?(?:prix|prices?|preise?)(?:\s*/\
 _RUNNING = re.compile(r"(?=.*\b(?:offer|offre|angebot))(?=.*\d{5})", re.I)  # "Offer 3001234 - ACME - Paloma 4R"
 _PAGE_NO = re.compile(r"^\s*(?:page|seite)\s+\d+(?:\s*(?:/|of|von|sur|de)\s*\d+)?\s*$", re.I)
 # A description line: a bullet (also the Wingdings bullets of Word documents, U+F0xx) or an including-word.
-_DESCRIPTION = re.compile(r"[-•*–▪●◦►➢✓-]|(?:including|inkl|einschliesslich|einschließlich|y compris"
+_DESCRIPTION = re.compile(r"[->»•*–▪●◦►➢✓-]|(?:including|inkl|einschliesslich|einschließlich|y compris"
                           r"|comprenant)\b", re.I)
 _NUMBER_WORD = (r"(?:one|two|three|four|five|six|seven|eight|nine|ten|un|une|deux|trois|quatre|cinq|sept|huit"
                 r"|neuf|dix|ein|eine|zwei|drei|vier|fünf|sechs|sieben|acht|neun|zehn)")
@@ -245,8 +247,8 @@ def _blank_rates(text: str, per_day: bool = True) -> str:
     day or hour, also when the 'per day' words are on the next line ('CHF 1'100' + 'pro Zusatztag möglich.')."""
     text = _RATE.sub(lambda m: re.sub(r"[^\n]", " ", m.group()), text)
     if per_day:
-        for start, end in [m.span() for m in _AMOUNT.finditer(text) if _PER.match(text, m.end())]:
-            text = text[:start] + " " * (end - start) + text[end:]
+        source = text
+        text = _AMOUNT.sub(lambda m: " " * len(m.group()) if _PER.match(source, m.end()) else m.group(), source)
     return text
 
 
