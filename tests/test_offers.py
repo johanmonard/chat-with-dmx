@@ -845,8 +845,8 @@ def test_cached_model_lines_are_classified_again():
 
 def test_country_skips_the_sellers_trademark_line_and_reads_provinces():
     assert offers._country_in("Globex Europe Limited\nBOSCH is a registered trademark of Robert Bosch GmbH Germany") is None
-    assert offers._country_in("ACME LLC - Plant 1125 50e Avenue Lachine H8T 3P3 Quebec CA | Why Demaurex SA?") == "Canada"
-    assert offers._country_in("Globex Proizvodstvennaya str. 8 Samara oblast Russian Federation") == "Russia"
+    assert offers._country_in("ACME LLC - Plant 12 Maple Road Brookville X1Y 2Z3 Quebec CA | Why Demaurex SA?") == "Canada"
+    assert offers._country_in("Globex Industrial str. 4 Northern district Russian Federation") == "Russia"
 
 
 def test_a_word_twin_with_a_checked_sum_beats_a_pdf_without_total_and_its_budget_wording_counts():

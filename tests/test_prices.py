@@ -1116,7 +1116,7 @@ def test_offer_type_own_budget_wording_on_any_page(pages, name, kind):
 
 def test_euros_after_a_number_in_a_sentence_is_no_amount():
     assert prices.amounts_in("• 1 First maintenance kit for an amount of 4'000.- Euros") == []
-    assert prices.amounts_in("will = B-1200001 CHF/day) 264’500.-- €uro price") == []  # a garbled PDF's scrambled words
+    assert prices.amounts_in("will = B-1200001 CHF/day) 123’400.-- €uro price") == []  # a garbled PDF's scrambled words
 
 
 def test_angle_bullets_are_description_lines_of_a_delivered_total():
