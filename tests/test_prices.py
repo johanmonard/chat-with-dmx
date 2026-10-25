@@ -1186,3 +1186,27 @@ def test_the_machine_named_with_an_article_in_the_next_cell_after_an_introductio
             "Mise en service sur site | | CHF | 30’000.-\nPrix total, net, hors taxe | | CHF | 330’000.-\n")
     s = prices.parse_section({3: page})
     assert [(l.kind, l.family) for l in s.lines] == [("machine", "Paloma"), ("service", None)] and s.sum_ok is True
+
+
+def test_a_per_day_line_with_its_own_amount_does_not_make_the_item_above_a_rate():
+    assert prices.amounts_in("Installation (5 days) CHF 12'000\nper additional day CHF 1'500")[0] == ("CHF", 12000.0)
+    assert prices.amounts_in("zum Preis von CHF 1'100\npro Zusatztag möglich.") == []
+
+
+def test_an_offer_dated_after_a_cited_request_keeps_its_date():
+    assert prices.offer_date({1: "Further to your request, please find our offer dated 12.03.2020"})[0] == "2020-03-12"
+
+
+def test_new_and_cached_model_lines_are_classified_on_the_same_name(fake_ollama):
+    _model_says(fake_ollama, {"lines": [{"name": "1 Case erector ACME - hotmelt - Installation included",
+                                         "amounts": {"CHF": 98000}}]})
+    s = prices.parse_with_model(fake_ollama.url, "test-vision", {1: "98000"}, timeout=10)
+    cached = prices.PriceSection([prices.PriceLine(1, "1 Case erector ACME - hotmelt - Installation included", "other",
+                                                   None, {"CHF": 98000.0}, 1)], {}, [], [1], None)
+    assert s.lines[0].kind == prices.classify_again(cached).lines[0].kind == "machine"
+
+
+def test_a_cover_bullet_naming_prices_is_no_price_page():
+    assert prices.pages_without_amounts({1: "- All prices are net, without taxes\nWhy ACME?",
+                                         2: "The price, net, is based on the samples received.",
+                                         13: "9.6. Price, net, without taxes\nThree robotic cells"}) == [13]

@@ -208,6 +208,7 @@ _BUDGET_OWN = re.compile(
     r"|g[üu]ltigkeit des budgetangebot|als budget zu verstehen|\bunverbindliche[sn]?\s+angebot"
     r"|\b(?:offers?|proposals?|quotations?|prices?)\s+(?:is|are)\s+(?:therefore\s+)?(?:non[- ]binding|not binding)"
     r"|oferta presupuestaria|presupuesto (?:indicativo|orientativo)|offerta (?:di )?budget", re.I)
+_OFFER_WORD = re.compile(r"\b(?:offers?|offres?|angebots?|quotation|proposal|proposition)\b", re.I)
 # A document calling itself formal on page 1 or in its name ('Formal Quotation', 'Offre formelle', 'Verbindliches
 # Angebot'), not a sentence asking for one ('a formal proposal is required', 'avant l'établissement d'une offre formelle').
 _FORMAL = re.compile(r"(?<!\ba )(?<!\ban )(?<!une )(?<!eine )"
@@ -253,6 +254,19 @@ def _currency(token: str) -> str:
     return "EUR" if t.startswith(("EURO", "€URO")) else _CURRENCIES.get(token, t)
 
 
+def _per_rate(text: str, end: int) -> bool:
+    """The amount ending at `end` is a rate per day or hour; its 'per day' words on the next line count only when no
+    amount follows them there ('CHF 1'100' + 'pro Zusatztag möglich', not 'CHF 12'000' + 'per additional day CHF 1'500')."""
+    m = _PER.match(text, end)
+    if not m:
+        return False
+    if "\n" in m.group():
+        line_end = text.find("\n", m.end())
+        if _AMOUNT.search(text[m.end():len(text) if line_end < 0 else line_end]):
+            return False
+    return True
+
+
 def _blank_rates(text: str, per_day: bool = True) -> str:
     """Exchange rates replaced by spaces, same length and line breaks kept: a rate wrapped after '='
     ('1 Euro =' then '1.20 CHF.') never leaves an amount on a line of its own. per_day: also the amounts of rates per
@@ -260,7 +274,7 @@ def _blank_rates(text: str, per_day: bool = True) -> str:
     text = _RATE.sub(lambda m: re.sub(r"[^\n]", " ", m.group()), text)
     if per_day:
         source = text
-        text = _AMOUNT.sub(lambda m: " " * len(m.group()) if _PER.match(source, m.end()) else m.group(), source)
+        text = _AMOUNT.sub(lambda m: " " * len(m.group()) if _per_rate(source, m.end()) else m.group(), source)
     return text
 
 
@@ -272,7 +286,7 @@ def _amount_spans(text: str) -> list[tuple[int, int, str, float, bool]]:
     text = _blank_rates(text)  # same length: spans stay valid
     found = []
     for m in _AMOUNT.finditer(text):
-        if _PER.match(text, m.end()):
+        if _per_rate(text, m.end()):
             continue  # a rate per day or hour, not a price
         raw = m.group("v1") or m.group("v2")
         value = parse_number(raw)
@@ -294,7 +308,7 @@ def amounts_in(text: str) -> list[tuple[str, float]]:
 def _rate_values(text: str) -> set[float]:
     """Values printed as rates per day or hour ('1100 CHF/Day')."""
     text = _blank_rates(text, per_day=False)
-    return {v for m in _AMOUNT.finditer(text) if _PER.match(text, m.end())
+    return {v for m in _AMOUNT.finditer(text) if _per_rate(text, m.end())
             if (v := parse_number(m.group("v1") or m.group("v2"))) is not None}
 
 
@@ -507,7 +521,13 @@ _PRICE_TITLE = re.compile(r"^\W*(?:\d+(?:\.\d+)*\.?\s*)?(?:(?:(?:budgetary\s+)?p
 def pages_without_amounts(pages: dict[int, str]) -> list[int]:
     """Pages holding a price section's title and no amount at all: the numbers are missing from the text (a table
     the OCR or the PDF's text layer lost), so the section cannot be read from the text; the page image can."""
-    return [p for p in sorted(pages) if _PRICE_TITLE.search(pages[p]) and not amounts_in(_tables(pages[p]))]
+    return [p for p in sorted(pages) if not amounts_in(_tables(pages[p]))
+            and any(_PRICE_TITLE.search(line) and not _is_description(line.strip()) and not _VERB.search(line)
+                    for line in pages[p].split("\n"))]
+
+
+# A sentence, not a title: 'All prices are net', 'The price is based on ...' (a cover page bullet).
+_VERB = re.compile(r"\b(?:is|are|will|est|sont|ist|sind|werden)\b", re.I)
 
 
 def _extended(pages: dict[int, str], run: list[int]) -> list[int]:
@@ -1034,8 +1054,10 @@ def offer_date(pages: dict[int, str]) -> tuple[str, str] | None:
                     in_parens = sentence.rfind("(", 0, start) > sentence.rfind(")", 0, start) and ")" in sentence[end:]
                     if in_parens and (rate_next or _RATE_HINT.search(sentence)):
                         continue
-                    if _CITED_DATE.search(sentence[max(0, start - 80):start]):
-                        continue  # 'votre visite dans nos locaux du 21.07.2003', 'Ihre Anfrage vom ...'
+                    cited = _CITED_DATE.search(before := sentence[max(0, start - 80):start])
+                    if cited and not _OFFER_WORD.search(before[cited.start():]):
+                        continue  # 'votre visite dans nos locaux du 21.07.2003', 'Ihre Anfrage vom ...', but not
+                        # 'Further to your request, please find our offer dated 12.03.2020'
                     return iso, written
     return None
 
@@ -1179,8 +1201,9 @@ def parse_with_model(url: str, model: str, pages: dict[int, str], timeout: float
         if not label or not amounts:
             continue
         page = item.get("page")
-        family, model_name = _machine(_item_name(name))
-        lines.append(PriceLine(len(lines) + 1, label, classify(_item_name(name), amounts),
+        name = _model_name(name)
+        family, model_name = _machine(name)
+        lines.append(PriceLine(len(lines) + 1, label, classify(name, amounts),
                                _model_quantity(item.get("quantity")),
                                amounts, page if type(page) is int and page in nums else nums[0],
                                family, model_name))
@@ -1195,6 +1218,12 @@ def parse_with_model(url: str, model: str, pages: dict[int, str], timeout: float
     return clean_model(PriceSection(lines, totals, rates, nums, None), pages, checked=False)
 
 
+def _model_name(text: str) -> str:
+    """The name a model line is classified on, for new and cached answers alike: the item's name up to its first
+    separator ('1 Case erector ACME - hotmelt' -> '1 Case erector ACME'), quantity glued to the name split off."""
+    return _item_name(re.split(r"\s+[-–•|]\s+|:|\(|\|", text, maxsplit=1)[0].strip()) or text
+
+
 def classify_again(section: PriceSection | None) -> PriceSection | None:
     """A cached model answer's lines of kind 'other' classified again with today's rules (the kinds were stored when
     the answer was cached), on the item's name: the text up to its first separator ('1 Case erector ACME - hotmelt'
@@ -1202,7 +1231,7 @@ def classify_again(section: PriceSection | None) -> PriceSection | None:
     for line in section.lines if section else []:
         if line.kind != "other":
             continue
-        name = _item_name(re.split(r"\s+[-–•|]\s+|:|\(|\|", line.text, maxsplit=1)[0])
+        name = _model_name(line.text)
         line.kind = classify(name, line.amounts)
         if line.family is None:
             line.family, line.model = _machine(name)
