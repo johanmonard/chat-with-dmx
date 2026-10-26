@@ -16,16 +16,17 @@ from __future__ import annotations
 import itertools
 import json
 import re
+import time
 from collections import Counter
 
-from . import offerkeys, store
+from . import offerkeys, store, verified
 from .offer_status import KINDS, OFFER_TYPES, STATUSES
 from .register import fold
 
 EMPTY_REGISTER = ("The offer register is empty on this index: run the offers step (dmx-docs offers, "
                   "or launcher 7 for the offers world).")
 LINE_COLUMNS = ("date", "offer", "revision", "variant", "kind", "client", "country", "status", "offer_type", "quantity",
-                "amount", "unit_price", "currency", "line", "path", "page", "confidence")
+                "amount", "unit_price", "currency", "line", "path", "page", "confidence", "verified")
 DEFAULT_KIND_NOTE = "kind machine (default with machine=)"
 UNCHECKED = "{} offers in scope have no readable prices and could not be checked for this machine"
 GROUP_KEYS = ("year", "country", "client", "machine", "status", "author", "partner", "offer_type", "category")
@@ -141,20 +142,21 @@ def _allowed(allows, path: str | None) -> bool:
     return allows is None or (bool(path) and allows(store.path_key(path)))
 
 
-def _load(con, allows=None) -> list[_Offer]:
-    """The register; with `allows` (Config.allows), revisions in folders excluded since the register was
-    built are dropped, and the offers left without any revision (or whose folder is excluded)."""
+def _load(con, allows=None, loaded=None) -> list[_Offer]:
+    """The register as plain dicts; with `allows` (Config.allows), revisions in folders excluded since the
+    register was built are dropped, and the offers left without any revision (or whose folder is excluded).
+    With `loaded` (verified.load), verified records stand in place of the register's reading."""
     revisions: dict[str, list] = {}
     dropped: set[str] = set()
     for r in con.execute("SELECT * FROM offer_revisions WHERE translation_of IS NULL "
                          "ORDER BY offer_key, rev_order, id"):
         if _allowed(allows, r["path"]):
-            revisions.setdefault(r["offer_key"], []).append(r)
+            revisions.setdefault(r["offer_key"], []).append(dict(r))
         else:
             dropped.add(r["offer_key"])
     lines: dict[int, list] = {}
     for l in con.execute("SELECT * FROM offer_lines ORDER BY revision_id, position, id"):
-        lines.setdefault(l["revision_id"], []).append(l)
+        lines.setdefault(l["revision_id"], []).append(dict(l))
     machines: dict[str, set] = {}
     for offer, names, path in con.execute("SELECT f.offer, f.machine, d.path FROM doc_facets f JOIN docs d "
                                           "ON d.id = f.doc_id WHERE f.offer IS NOT NULL AND f.machine IS NOT NULL"):
@@ -164,17 +166,19 @@ def _load(con, allows=None) -> list[_Offer]:
     for o in con.execute("SELECT * FROM offers ORDER BY offer_key"):
         key = o["offer_key"]
         if key in revisions or (key not in dropped and _allowed(allows, o["folder"])):
-            out.append(_Offer(o, revisions.get(key, []), lines, machines.get(key, set())))
+            out.append(_Offer(dict(o), revisions.get(key, []), lines, machines.get(key, set())))
+    if loaded is not None:
+        verified.overlay(con, out, loaded)
     return out
 
 
 def _offers(con, client=None, country=None, machine=None, statuses=None, types=None, categories=None,
-            text=None, allows=None) -> list[_Offer]:
+            text=None, allows=None, loaded=None) -> list[_Offer]:
     """The offers passing the filters: client, country, machine (family or model of a line, or in the
     documents' paths) and text are substrings (case and accents ignored, comma = or); the sets are exact."""
     by_client, by_country, by_machine, by_text = map(_matcher, (client, country, machine, text))
     out = []
-    for o in _load(con, allows):
+    for o in _load(con, allows, loaded):
         r = o.row
         if ((by_client and not by_client(r["client"])) or (by_country and not by_country(r["country"]))
                 or (statuses and r["status"] not in statuses) or (types and r["offer_type"] not in types)
@@ -201,7 +205,9 @@ class _Coverage:
     With a machine filter, `unchecked` names the offers in scope that have no readable prices: whether
     they quote that machine cannot be told. `notes` are added to the coverage line."""
 
-    def __init__(self):
+    def __init__(self, loaded=None):
+        self.loaded = loaded
+        self.used: list[tuple[_Offer, dict]] = []  # the (offer, revision) pairs the answer is built on
         self.matched: list[_Offer] = []
         self.left: list[tuple[str, str]] = []
         self.unchecked: list[str] = []
@@ -210,13 +216,23 @@ class _Coverage:
     def leave(self, name: str, reason: str) -> None:
         self.left.append((name, reason))
 
+    def use(self, o: _Offer, revisions) -> None:
+        seen = {r["id"] for _, r in self.used}
+        self.used += [(o, r) for r in revisions if r["id"] not in seen]
+
+    def _verified_note(self) -> list[str]:
+        if self.loaded is None or self.loaded.source == "none":
+            return []
+        v, u, e, d = verified.tally([r for _, r in self.used])
+        return [f"{v} verified, {u} not verified ({e} expired, {d} disputed)"] + ([self.loaded.note] if self.loaded.note else [])
+
     def lines(self) -> list[str]:
         counts = Counter(why for _, why in self.left)
         reasons = ", ".join(f"{n} {why}" for why, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
         clauses = [UNCHECKED.format(len(self.unchecked))] if self.unchecked else []
         out = ["; ".join([f"Coverage: {len(self.matched)} offers matched; {sum(o.readable for o in self.matched)} "
                           f"with readable prices; left out: {len(self.left)} ({reasons or 'none'})"]
-                         + clauses + self.notes)]
+                         + clauses + self.notes + self._verified_note())]
         if self.left:
             out.append("Left out: " + _named([f"{name} ({why})" for name, why in self.left]))
         if self.unchecked:
@@ -228,6 +244,72 @@ def _unchecked(o: _Offer, year_from, year_to) -> bool:
     """An offer without readable prices that the year filter does not exclude (its year may be unknown)."""
     year = o.row["year"]
     return not o.readable and (year is None or _in_years(year, year_from, year_to))
+
+
+# --- The bounded "To verify" list -----------------------------------------------------------------
+
+RELIST_AFTER_S = 1800   # a revision listed to a chat is not listed again before this
+OUTLIER_SHARE = 0.30    # an amount farther than this from the median of its model is listed first
+
+
+def _main_amount(o: _Offer, r) -> tuple[str, float] | None:
+    """(model or kind, first CHF amount) of a revision's first machine line, else of its first priced line."""
+    for l in sorted(o.lines(r), key=lambda l: l["kind"] != "machine"):
+        a = _amounts(l["amounts"]).get("CHF")
+        if a:
+            return (l["model"] or l["family"] or l["kind"] or "?"), a
+    return None
+
+
+def to_verify(offers: list[_Offer], used: list[tuple[str, int]], limit: int, listed: dict, now: float) -> list[str]:
+    """Lines of the revisions the answer used (offer key, revision id) that no current record covers (expired
+    ones included, disputed ones not), at most `limit`: outliers first (an amount far from the median of the
+    same model), then won offers, then the newest. Revisions listed less than RELIST_AFTER_S ago are skipped;
+    the ones returned are recorded in `listed` (identity -> time)."""
+    by_key = {o.key: o for o in offers}
+    pairs = [(by_key[k], r) for k, rid in used if k in by_key for r in by_key[k].revisions if r["id"] == rid]
+    pending = [(o, r) for o, r in pairs if r.get("verification", "none") in ("none", "expired")]
+    groups: dict[str, list[float]] = {}
+    mains = {}
+    for o, r in pairs:
+        main = mains[r["id"]] = _main_amount(o, r)
+        if main:
+            groups.setdefault(main[0], []).append(main[1])
+    medians = {k: sorted(v)[len(v) // 2] for k, v in groups.items() if len(v) >= 3}
+
+    def outlier(r) -> bool:
+        main = mains.get(r["id"])
+        return bool(main and main[0] in medians and abs(main[1] - medians[main[0]]) > OUTLIER_SHARE * medians[main[0]])
+
+    pending.sort(key=lambda p: p[1]["date"] or "", reverse=True)    # newest first
+    pending.sort(key=lambda p: p[0].row["status"] != "won")         # then the won ones
+    pending.sort(key=lambda p: not outlier(p[1]))                   # outliers first
+    out = []
+    for o, r in pending:
+        ident = verified.identity(o.key, r["revision"] or "", r["variant"])
+        if len(out) >= max(0, int(limit)) or now - listed.get(ident, now - RELIST_AFTER_S - 1) < RELIST_AFTER_S:
+            continue
+        listed[ident] = now
+        out.append(f"offer {o.key} rev {r['revision'] or '?'}" + (f" (variant {r['variant']})" if r["variant"] else "")
+                   + f": {r['path']}" + (f" pages {r['pages']}" if r["pages"] else ""))
+    return out
+
+
+def _to_verify_section(cov: _Coverage, offers: list[_Offer], limit: int, listed: dict | None,
+                       now: float | None) -> list[str]:
+    if not limit or cov.loaded is None or cov.loaded.source == "none":
+        return []
+    pending = [r for _, r in cov.used if r.get("verification", "none") in ("none", "expired")]
+    if not pending:
+        return []
+    shown = to_verify(offers, [(o.key, r["id"]) for o, r in cov.used], limit,
+                      listed if listed is not None else {}, time.time() if now is None else now)
+    head = f"To verify ({len(shown)} of {len(pending)} unverified)"
+    if not shown:
+        return [head + ": all were listed a moment ago; ask again later or filter differently."]
+    return [head + ":"] + [f"- {line}" for line in shown] + [
+        "Check each on its price pages (view_page / read_document) and call offer_verify; "
+        "say continue for the next ones."]
 
 
 # --- list_offers ----------------------------------------------------------------------------------
@@ -247,7 +329,7 @@ def _totals(r) -> str:
     return ", ".join(_money(c, v) for c, v in _amounts(r["totals"]).items())
 
 
-def _list_line(o: _Offer) -> str:
+def _list_line(o: _Offer, loaded=None) -> str:
     r = o.row
     priced = [(rev, _totals(rev)) for rev in o.last if _totals(rev)]
     if len(priced) > 1:  # variants side by side, never summed
@@ -262,20 +344,28 @@ def _list_line(o: _Offer) -> str:
                        _plural(len({rev["rev_order"] for rev in o.usable}), "revision"),
                        ", ".join(_machine_lines(o)) or "machine ?", total, status,
                        " / ".join(rev["path"] + (f" p.{rev['pages']}" if rev["pages"] else "") for rev in source)
-                       or "no revision"))
+                       or "no revision", *_list_mark(source, loaded)))
+
+
+def _list_mark(source: list, loaded) -> tuple:
+    """The verification mark at the end of a list line: verified, partly verified or not verified."""
+    if loaded is None or loaded.source == "none" or not source:
+        return ()
+    v, u, _, _ = verified.tally(source)
+    return ("verified" if not u else "not verified" if not v else "partly verified",)
 
 
 def list_offers(con, client: str | None = None, country: str | None = None, machine: str | None = None,
                 status: str | None = None, year_from: int | None = None, year_to: int | None = None,
-                text: str | None = None, limit: int = 100, allows=None) -> str:
+                text: str | None = None, limit: int = 100, allows=None, loaded=None) -> str:
     """One line per offer, newest first, ending with the last revision's document and pages; then the
     coverage line. `allows` (Config.allows) hides the folders excluded since the register was built."""
     statuses = _choices(status, STATUSES, "status")
     if not _ready(con):
         return EMPTY_REGISTER
     found = _offers(con, client=client, country=country, machine=machine, statuses=statuses, text=text,
-                    allows=allows)
-    cov, shown = _Coverage(), []
+                    allows=allows, loaded=loaded)
+    cov, shown = _Coverage(loaded), []
     for o in sorted(found, key=lambda o: (o.row["last_date"] or "", o.key), reverse=True):
         if year_from or year_to:
             if o.row["year"] is None:
@@ -289,7 +379,9 @@ def list_offers(con, client: str | None = None, country: str | None = None, mach
     limit = max(1, int(limit))
     for o in shown[limit:]:
         cov.leave(o.key, "over the limit")
-    out = [_list_line(o) for o in shown[:limit]] or ["No offer matches these filters."]
+    for o in shown[:limit]:
+        cov.use(o, o.last)
+    out = [_list_line(o, loaded) for o in shown[:limit]] or ["No offer matches these filters."]
     if len(shown) > limit:
         out.append(f"... {len(shown) - limit} more offers (raise limit=)")
     return "\n".join(out + cov.lines())
@@ -305,13 +397,13 @@ def _card_line(l) -> str:
     return "  " + " · ".join(p for p in parts if p) + page + (" (corrected)" if l["read_by"] == "correction" else "")
 
 
-def _revision_line(r) -> str:
+def _revision_line(r, marked: bool = False) -> str:
     label = (r["revision"] or "?") + (f" ({r['variant']})" if r["variant"] else "")
     bits = [label, f"{r['date']} ({r['date_source']})" if r["date"] else "date ?",
             r["path"] + (f" p.{r['pages']}" if r["pages"] else ""),
             f"totals {_totals(r)}" if _totals(r) else "no total read",
             f"confidence {r['confidence']}", f"read by {r['read_by']}", r["note"],
-            "ignored by correction" if r["ignored"] else None]
+            "ignored by correction" if r["ignored"] else None, verified.mark(r) if marked else None]
     return "- " + " · ".join(b for b in bits if b)
 
 
@@ -345,7 +437,7 @@ def _facts(o, allows=None) -> list[str]:
     return [line for line in out if line]
 
 
-def offer_card(con, offer: str, allows=None) -> str:
+def offer_card(con, offer: str, allows=None, loaded=None) -> str:
     """Everything the register knows about one offer: facts, status and evidence, each revision with its
     lines, rates and translations, the corrections, and the offer's other documents. `allows`
     (Config.allows) hides the folders excluded since the register was built."""
@@ -365,7 +457,6 @@ def offer_card(con, offer: str, allows=None) -> str:
                 + (f" Indexed documents carrying this number, none of them an offer document: {'; '.join(docs)}"
                    if docs else ""))
     key = o["offer_key"]
-    out = _facts(o, allows)
     ids = [r["id"] for r in revisions]
     marks = ",".join("?" * len(ids)) or "NULL"
     lines: dict[int, list] = {}
@@ -375,10 +466,15 @@ def offer_card(con, offer: str, allows=None) -> str:
     if store.has_table(con, "offer_rates"):
         for t in con.execute(f"SELECT * FROM offer_rates WHERE revision_id IN ({marks})", ids):
             rates.setdefault(t["revision_id"], []).append(t)
-    out.append("\nRevisions (oldest first):")
-    for r in (r for r in revisions if r["translation_of"] is None):
-        out.append(_revision_line(r))
-        out += [_card_line(l) for l in lines.get(r["id"], [])]
+    shown = _Offer(dict(o), [dict(r) for r in revisions if r["translation_of"] is None],
+                   {k: [dict(l) for l in v] for k, v in lines.items()}, set())
+    if loaded is not None:
+        verified.overlay(con, [shown], loaded)
+    out = _facts(shown.row, allows) + ["", "Revisions (oldest first):"]
+    marked = loaded is not None and loaded.source != "none"
+    for r in shown.revisions:
+        out.append(_revision_line(r, marked))
+        out += [_card_line(l) for l in shown.lines(r)]
         out += [f"  rate: 1 {t['base']} = {t['rate']:g} {t['quote']}"
                 + (f" ({t['date_written']})" if t["date_written"] else "") for t in rates.get(r["id"], [])]
         out += [f"  translation: {t['path']} (same totals, no lines of its own)"
@@ -439,7 +535,8 @@ def _parts_left_out(o: _Offer, chosen: list, undated: list, wanted, cur: str, la
 def offer_lines(con, machine: str | None = None, kind: str | None = None, client: str | None = None,
                 country: str | None = None, status: str | None = None, offer_type: str | None = None,
                 category: str | None = "client,archive", year_from: int | None = None, year_to: int | None = None,
-                currency: str = "CHF", revisions: str = "last", limit: int = 500, allows=None) -> str:
+                currency: str = "CHF", revisions: str = "last", limit: int = 500, allows=None, loaded=None,
+                verify_limit: int = 0, listed: dict | None = None, now: float | None = None) -> str:
     """The rows of a price chart: one per priced line with an amount in `currency` (never converted), of
     the last revision of each offer (every variant of it) or of every revision, firm and budget offers
     (the offer_type column marks them; offer_type='firm' leaves budget offers out); then the coverage line,
@@ -464,10 +561,10 @@ def offer_lines(con, machine: str | None = None, kind: str | None = None, client
         return (by_machine is None or by_machine(l["model"], l["family"])) and (not kinds or l["kind"] in kinds)
 
     last = revisions == "last"
-    cov, rows = _Coverage(), []
+    cov, rows = _Coverage(loaded), []
     if default_kind:
         cov.notes.append(DEFAULT_KIND_NOTE)
-    for o in _offers(con, client=client, country=country, statuses=statuses, allows=allows):
+    for o in _offers(con, client=client, country=country, statuses=statuses, allows=allows, loaded=loaded):
         facet_match = by_machine and (not kinds or default_kind) and by_machine(*o.facet_machines)
         if (by_machine or kinds) and not (any(wanted(l) for l in o.all_lines()) or facet_match):
             in_scope = ((not types or o.row["offer_type"] in types)
@@ -513,19 +610,21 @@ def offer_lines(con, machine: str | None = None, kind: str | None = None, client
             continue
         for name, why in _parts_left_out(o, chosen, undated, wanted, cur, last, year_from, year_to):
             cov.leave(name, why)
+        cov.use(o, [r for r in chosen if any(pr is r for pr, _, _ in priced)])
         for r, l, amount in priced:
             q = l["quantity"]
             rows.append(((r["date"] or "9999", o.key, r["rev_order"], r["id"], l["position"]),
                          [r["date"], o.key, r["revision"], r["variant"], l["kind"], o.row["client"], o.row["country"],
                           o.row["status"], o.row["offer_type"], _num(q), _num(amount),
                           _num(round(amount / q, 2)) if q else "", cur,
-                          " ".join((l["text"] or "").split()), r["path"], _num(l["page"]), l["confidence"]]))
+                          " ".join((l["text"] or "").split()), r["path"], _num(l["page"]), l["confidence"],
+                          r.get("verified_on", "no")]))
     rows.sort(key=lambda kr: kr[0])
     limit = max(1, int(limit))
     out = [";".join(LINE_COLUMNS)] + [";".join(_cell(v) for v in cells) for _, cells in rows[:limit]]
     if len(rows) > limit:
         out.append(f"... {len(rows) - limit} more rows (raise limit=)")
-    return "\n".join(out + cov.lines())
+    return "\n".join(out + cov.lines() + _to_verify_section(cov, cov.matched, verify_limit, listed, now))
 
 
 # --- offer_stats ----------------------------------------------------------------------------------
@@ -542,7 +641,8 @@ def _group_values(o: _Offer, key: str) -> list[str]:
 def offer_stats(con, group_by: str, client: str | None = None, country: str | None = None,
                 machine: str | None = None, status: str | None = None, offer_type: str | None = None,
                 category: str | None = None, year_from: int | None = None, year_to: int | None = None,
-                allows=None) -> str:
+                allows=None, loaded=None, verify_limit: int = 0, listed: dict | None = None,
+                now: float | None = None) -> str:
     """Offers and revisions counted by one or two keys (every offer, all types and categories unless
     filtered), sorted by keys; then the coverage line. With `machine`, the offers in scope without readable
     prices are named: they could not be checked. `allows` (Config.allows) hides the folders excluded since
@@ -555,9 +655,9 @@ def offer_stats(con, group_by: str, client: str | None = None, country: str | No
     categories = _choices(category, None, "category")
     if not _ready(con):
         return EMPTY_REGISTER
-    cov, offers, revisions = _Coverage(), Counter(), Counter()
+    cov, offers, revisions = _Coverage(loaded), Counter(), Counter()
     found = _offers(con, client=client, country=country, machine=machine, statuses=statuses, types=types,
-                    categories=categories, allows=allows)
+                    categories=categories, allows=allows, loaded=loaded)
     if _matcher(machine):  # the offers the machine filter could not judge
         matched = {o.key for o in found}
         cov.unchecked = [o.key for o in _offers(con, client=client, country=country, statuses=statuses, types=types,
@@ -572,6 +672,7 @@ def offer_stats(con, group_by: str, client: str | None = None, country: str | No
             if not _in_years(o.row["year"], year_from, year_to):
                 continue
         cov.matched.append(o)
+        cov.use(o, o.usable)
         n = len({r["rev_order"] for r in o.usable})
         for combo in itertools.product(*(_group_values(o, k) for k in keys)):
             offers[combo] += 1
@@ -581,4 +682,82 @@ def offer_stats(con, group_by: str, client: str | None = None, country: str | No
         out.append(";".join([_cell(v) for v in combo] + [str(offers[combo]), str(revisions[combo])]))
     if "machine" in keys:
         out.append("(machines of the last revision: an offer with several machines is counted under each)")
-    return "\n".join(out + cov.lines())
+    return "\n".join(out + cov.lines() + _to_verify_section(cov, cov.matched, verify_limit, listed, now))
+
+
+# --- offer_health ---------------------------------------------------------------------------------
+
+HEALTH_CURRENCIES = ("CHF", "EUR", "USD", "GBP")
+
+
+def offer_health(con, loaded, machine: str | None = None, client: str | None = None, year_from: int | None = None,
+                 year_to: int | None = None, allows=None) -> str:
+    """How much of the register is verified: a ';'-table with one row for everything, then per year, category
+    and machine model (offers, revisions, lines, and the printed totals per currency); then the records by the
+    way they were checked, the expired, disputed and revoked ones and the damaged files. With filters it
+    starts with the backlog of that scope. The numbers count the revisions of the scope that are not ignored."""
+    if not _ready(con):
+        return EMPTY_REGISTER
+    found = _offers(con, client=client, machine=machine, allows=allows, loaded=loaded)
+    if year_from or year_to:
+        found = [o for o in found if o.row["year"] is not None and _in_years(o.row["year"], year_from, year_to)]
+    scopes: dict[str, dict] = {}
+
+    def bucket(name: str) -> dict:
+        return scopes.setdefault(name, {"offers": set(), "offers_ok": set(), "revisions": 0, "revisions_ok": 0,
+                                        "lines": 0, "lines_ok": 0, "printed": Counter(), "checked": Counter()})
+
+    by_check, expired, disputed = Counter(), 0, 0
+    for o in found:
+        if not o.usable:
+            continue
+        last_ok = bool(o.last) and all(r.get("verification") == "verified" for r in o.last)
+        names = ["all", f"year {o.row['year']}" if o.row["year"] else "year unknown",
+                 f"category {o.row['category'] or 'unknown'}"]
+        for r in o.usable:
+            models = {l["model"] or l["family"] for l in o.lines(r) if l["kind"] == "machine"} - {None}
+            ok = r.get("verification") == "verified"
+            expired += r.get("verification") == "expired"
+            disputed += r.get("verification") == "disputed"
+            if ok:
+                by_check[r["record"].checked_on] += 1
+            for name in names + [f"machine {m}" for m in sorted(models)]:
+                b = bucket(name)
+                b["offers"].add(o.key)
+                if last_ok:
+                    b["offers_ok"].add(o.key)
+                b["revisions"] += 1
+                b["revisions_ok"] += ok
+                n = len(o.lines(r))
+                b["lines"] += n
+                b["lines_ok"] += n if ok else 0
+                for cur, v in _amounts(r["totals"]).items():
+                    b["printed"][cur] += v
+                    b["checked"][cur] += v if ok else 0
+    present = [c for c in HEALTH_CURRENCIES if any(b["printed"][c] for b in scopes.values())]
+    header = ["scope", "offers", "offers verified", "revisions", "revisions verified", "lines", "lines verified"]
+    header += [f"{c} {w}" for c in present for w in ("printed", "verified")]
+    order = sorted(scopes, key=lambda n: (n != "all", n.split(" ")[0], n))
+    out = []
+    if machine or client or year_from or year_to:
+        b = scopes.get("all")
+        scope = ", ".join(x for x in (f"machine {machine}" if machine else "", f"client {client}" if client else "",
+                                      f"years {year_from or ''}-{year_to or ''}" if year_from or year_to else "") if x)
+        out.append(f"Backlog for {scope}: {b['revisions_ok'] if b else 0} of {b['revisions'] if b else 0} revisions "
+                   "verified")
+    out.append(";".join(header))
+    for name in order:
+        b = scopes[name]
+        cells = [name, len(b["offers"]), len(b["offers_ok"]), b["revisions"], b["revisions_ok"], b["lines"],
+                 b["lines_ok"]]
+        cells += [_num(b[w][c]) for c in present for w in ("printed", "checked")]
+        out.append(";".join(_cell(c) for c in cells))
+    if loaded is not None and loaded.source != "none":
+        out.append("Checked on: " + (", ".join(f"{k} {v}" for k, v in sorted(by_check.items())) or "nothing yet"))
+        out.append(f"Expired (the document changed): {expired}; disputed: {disputed}; revoked: {loaded.revoked}")
+        out.append("Damaged record files: " + (", ".join(loaded.damaged) or "none"))
+        if loaded.note:
+            out.append(loaded.note)
+    else:
+        out.append("Verification is not configured on this index (set verified in [worlds.offers]).")
+    return "\n".join(out)

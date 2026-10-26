@@ -330,6 +330,19 @@ shared folder):
   unknown offer folder, stale correction. Fix what is wrong in `corrections.csv`; add the old names
   of machines to the `## machines` section of `knowledge\vocabulary.md`.
 
+**Verified records.** The agent can check an offer revision against its price pages and store what it
+saw (`offer_verify`): one JSON file per record in the folder set by `verified` in `[worlds.offers]`
+(normally `worlds\offers\verified\` of the shared folder; without the setting verification is off). The
+server only stores a record when every amount and quantity is printed on the page named and no amount
+the register read there is missing. Records are never written into the register: the register tools
+overlay them at read time (precedence: `corrections.csv`, then the verified record, then the register's
+reading), so a revoke or an expiry (the document changed) needs no rebuild. The launchers' pull mirrors
+`verified\` to `C:\dmx-rag\data\offers\verified\`, which serves when the share is out of reach. Answers
+of `offer_lines` and `offer_stats` end with a bounded "To verify" list (`verify_per_request`, default
+15); `offer_health` reports the backlog; `review.csv` lists where a record differs from the register's
+reading. `dmx-docs --world offers verify-seed <folder>...` stores the fully right offers of earlier
+spot checks as records.
+
 **Won or not.** An offer is `won` when a project of the projects world carries its number in a path
 (a file or folder name), or in its text when the project's client (machine register) or machine
 family is the offer's. A number found only in the text of another client's project with another

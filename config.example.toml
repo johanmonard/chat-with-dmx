@@ -114,6 +114,10 @@ max_read_chars = 40000
 # roots = ['\\DMX-FS01.rotzingerag.local\Daten$\RMA_ORG\SAL\Clients']
 # # The user's own statuses and amounts for the offer register (default: data_dir\offers\corrections.csv):
 # # corrections = 'C:\dmx-rag\data\offers\corrections.csv'
+# # The shared folder of verified offer records (one JSON file per record, written by offer_verify);
+# # without it verification is off. The pull mirrors it to data_dir\offers\verified:
+# verified = '\\server\share\DMX-RAG\worlds\offers\verified'
+# verify_per_request = 15   # revisions listed under "To verify" per answer
 
 # OCR of scanned PDF pages (`dmx-docs ocr`, part of launcher 7). Uses the Tesseract engine built
 # into PyMuPDF; only the language files are needed (tessdata_best from

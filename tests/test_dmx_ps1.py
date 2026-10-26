@@ -489,3 +489,21 @@ def test_a_lock_error_without_an_owner_is_reported_as_it_is(ready):
     r = run(shared, local, "index", "-World", "marketing", env=env)
     assert r.returncode != 0 and "in use by another machine" not in text(r), r.stdout + r.stderr
     assert "Could not find a part of the path" in text(r), r.stdout + r.stderr   # the error itself
+
+
+def test_pull_mirrors_verified_folder(ready):
+    shared, local, env = ready
+    records = shared / "worlds" / "offers" / "verified"
+    records.mkdir()
+    (records / "a.json").write_text("{}", encoding="utf-8")
+    (records / "a.json.tmp").write_text("half", encoding="utf-8")          # a record being written is not copied
+    mine = local / "data" / "offers" / "verified"
+    mine.mkdir(parents=True)
+    (mine / "old.json").write_text("{}", encoding="utf-8")                  # revoked by deleting it on the share
+    r = run(shared, local, "pull", "-World", "offers", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert sorted(p.name for p in mine.iterdir()) == ["a.json"]
+    assert not (records / "old.json").exists()                              # never copied back
+    r = run(shared, local, "pull", "-World", "projects", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (local / "data" / "projects" / "verified").exists()

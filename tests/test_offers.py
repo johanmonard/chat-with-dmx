@@ -558,7 +558,7 @@ def test_run_offers_links_and_writes_the_review(offers_world, tmp_path):
 def test_review_not_written_keeps_the_run(offers_world, monkeypatch):
     cfg, _ = offers_world
 
-    def locked(con, path):
+    def locked(con, path, loaded=None):
         raise PermissionError(13, "Permission denied", path)
 
     monkeypatch.setattr(offers, "write_review", locked)  # review.csv open in Excel
@@ -937,3 +937,24 @@ def test_a_copy_without_prices_is_not_named_as_prices():
 ])
 def test_country_from_the_addressee_block(page, country):
     assert offers._country_in(page) == country
+
+
+def test_review_lists_verified_differences(offers_world, tmp_path):
+    from dmx_docs import verified
+
+    cfg, con = offers_world
+    cfg.corrections_path = _corrections(tmp_path, "3006666;00;1;amount:CHF;170000;;JM;2026-10-26")
+    offers.run_offers(cfg, progress=quiet)
+    r = con.execute("SELECT r.path, d.size, d.mtime FROM offer_revisions r JOIN docs d ON d.id = r.doc_id "
+                    "WHERE r.offer_key = '3006666' AND r.revision = '00'").fetchone()
+    shared = tmp_path / "shared"
+    verified.write(str(shared), verified.Record(
+        offer="3006666", revision="00", variant=None, path=r["path"], size=r["size"], mtime=r["mtime"], pages=[2],
+        lines=[{"text": "Another machine text", "kind": "machine", "model": "Paloma 2R", "quantity": None,
+                "amounts": {"CHF": 21000.0}, "page": 2}], totals={"CHF": 21000.0}, checked_by="claude-test",
+        checked_at="2026-10-26T10:00:00", user="jdoe"))
+    cfg.verified_dir = str(shared)
+    offers.run_offers(cfg, review=True, progress=quiet)
+    rows = (cfg.world_dir / "review.csv").read_text(encoding="utf-8-sig").splitlines()
+    assert any(";verified differs;" in x and "CHF 170000" in x and "CHF 21000" in x for x in rows)
+    assert any(";stale correction;" in x and x.startswith("3006666;00;") for x in rows)

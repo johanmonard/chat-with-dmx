@@ -13,7 +13,7 @@ import time
 import urllib.request
 from datetime import datetime
 
-from . import facets, knowledge, machines, offer_tools, register, sources, store, worldmap
+from . import facets, knowledge, machines, offer_tools, register, sources, store, verified, worldmap
 from .config import Config
 from .extract import PICTURE_EXTS, docx_picture_names, extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
@@ -347,6 +347,7 @@ class DocTools:
         self.searcher = Searcher(cfg)
         self._overview: tuple[float, worldmap.Overview] | None = None  # world_map's live part, cached
         self.knowledge = knowledge.Knowledge(cfg.knowledge_path)  # written project cards
+        self._listed: dict[tuple, float] = {}  # offers world: revisions listed under "To verify" (identity -> time)
 
     def _con(self):
         con = store.connect(self.cfg.db_path, create=False)
@@ -533,31 +534,98 @@ class DocTools:
     # ---------------------------------------------------------- offers world
     # The register keeps rows of folders excluded since it was built: cfg.allows hides them (after
     # _con() has loaded the current root and excluded folders).
+    def _to_verify(self) -> dict:
+        """The settings of the bounded "To verify" list: off when no shared folder is configured."""
+        return {"verify_limit": self.cfg.verify_per_request if self.cfg.verified_dir else 0, "listed": self._listed}
+
+    def offer_health(self, **filters) -> str:
+        con = self._con()
+        try:
+            return offer_tools.offer_health(con, verified.load(self.cfg, con), **filters, allows=self.cfg.allows)
+        finally:
+            con.close()
+
+    def offer_verify(self, offer: str, revision: str, path: str, pages: str, lines: list | None = None,
+                     checked_on: str = "image", checked_by: str = "", variant: str | None = None,
+                     totals: dict | None = None, date: str | None = None, country: str | None = None,
+                     offer_type: str | None = None, not_prices: list | None = None,
+                     not_price_pages: dict | None = None, note: str | None = None, dispute: bool = False,
+                     revoke: bool = False, reason: str | None = None) -> str:
+        """Store what the agent saw on one revision's price pages as a verified record (shared at once), after
+        the server's check; or dispute / revoke the revision's record. The answer says what was stored or what
+        the agent has to fix. Writes only into the shared folder of the offers world."""
+        if not self.cfg.verified_dir:
+            return "Verification is not configured: set verified in [worlds.offers] of config.toml. Nothing was stored."
+        folder = self.cfg.verified_dir
+        if not os.path.isdir(folder):
+            return f"The shared folder {folder} cannot be reached (VPN?): nothing was stored."
+        if (dispute or revoke) and not (reason or "").strip():
+            return "Not stored: dispute and revoke need a reason."
+        try:
+            sub = verified.Submission(
+                offer=offer, revision=revision, variant=variant, path=path, pages=verified.parse_pages(pages),
+                lines=list(lines or []), totals=dict(totals or {}), date=date, country=country,
+                offer_type=offer_type, checked_on=checked_on, checked_by=checked_by,
+                not_prices=list(not_prices or []), not_price_pages=dict(not_price_pages or {}), note=note or "",
+                checked_at=datetime.now().replace(microsecond=0).isoformat(), user=os.environ.get("USERNAME", ""))
+        except (ValueError, TypeError) as e:
+            return f"Not stored: {e}"
+        con = self._con()
+        try:
+            label = f"offer {offer} rev {revision}" + (f" variant {variant}" if variant else "")
+            if dispute or revoke:
+                if revoke and verified.identity(offer, revision, variant) not in verified.load(self.cfg, con).records:
+                    return f"Not stored: {label} has no current verified record to revoke."
+                try:
+                    record = (verified.revoke if revoke else verified.dispute)(con, self.cfg, sub, reason)
+                except ValueError as e:
+                    return f"Not stored: {e}"
+                verb = "revoked" if revoke else "disputed"
+            else:
+                verdict = verified.check(con, self.cfg, sub)
+                if not verdict.ok:
+                    return ("Not stored:\n" + "\n".join(f"- {p}" for p in verdict.problems)
+                            + "\nRe-read the pages and call again, or call with dispute=true and the reason.")
+                record, verb = verdict.record, "verified"
+            try:
+                verified.write(folder, record)
+            except OSError as e:
+                return f"The shared folder {folder} cannot be written ({e}): nothing was stored."
+            if verb != "verified":
+                return f"Recorded as {verb}: {label}. Shared with every user."
+            totals_text = ", ".join(f"{c} {v:,.2f}" for c, v in record.totals.items()) or "no total"
+            return (f"Verified: {label}: {len(record.lines)} lines, totals {totals_text}, checked on "
+                    f"{record.checked_on}; shared with every user.")
+        finally:
+            con.close()
+
     def list_offers(self, **filters) -> str:
         con = self._con()
         try:
-            return offer_tools.list_offers(con, **filters, allows=self.cfg.allows)
+            return offer_tools.list_offers(con, **filters, allows=self.cfg.allows, loaded=verified.load(self.cfg, con))
         finally:
             con.close()
 
     def offer_card(self, offer: str) -> str:
         con = self._con()
         try:
-            return offer_tools.offer_card(con, offer, allows=self.cfg.allows)
+            return offer_tools.offer_card(con, offer, allows=self.cfg.allows, loaded=verified.load(self.cfg, con))
         finally:
             con.close()
 
     def offer_lines(self, **filters) -> str:
         con = self._con()
         try:
-            return offer_tools.offer_lines(con, **filters, allows=self.cfg.allows)
+            return offer_tools.offer_lines(con, **filters, allows=self.cfg.allows, loaded=verified.load(self.cfg, con),
+                                           **self._to_verify())
         finally:
             con.close()
 
     def offer_stats(self, group_by: str, **filters) -> str:
         con = self._con()
         try:
-            return offer_tools.offer_stats(con, group_by, **filters, allows=self.cfg.allows)
+            return offer_tools.offer_stats(con, group_by, **filters, allows=self.cfg.allows,
+                                           loaded=verified.load(self.cfg, con), **self._to_verify())
         finally:
             con.close()
 

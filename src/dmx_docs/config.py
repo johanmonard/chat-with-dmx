@@ -50,6 +50,9 @@ class Config:
     expand_synonyms: bool = False       # expand keyword searches with the thesaurus
     register_path: str | None = None    # register.csv (installed machines) next to config.toml by default
     corrections_path: str | None = None  # corrections.csv (offers world: the user's own statuses and amounts)
+    verified_dir: str | None = None     # offers world: the shared folder of verified offer records (verified.py)
+    verified_mirror: str | None = None  # offers world: the pull's local copy of it, read when the share is unreachable
+    verify_per_request: int = 15        # offers world: revisions listed under "To verify" per answer
     map_path: str | None = None         # world map text (maps\<world>.md next to config.toml), see worldmap.py
     knowledge_path: str | None = None   # knowledge cards (knowledge\ next to config.toml), see knowledge.py
     export_dir: str | None = None  # where export_image saves files (default: ~\Claude\dmx-images)
@@ -226,6 +229,12 @@ def load_config(path: str | os.PathLike, world: str | None = None) -> Config:
             if corrections:
                 cp = Path(os.path.expandvars(str(corrections)))
                 kwargs["corrections_path"] = str(cp if cp.is_absolute() else data_dir / name / cp)
+            kwargs["verified_mirror"] = str(data_dir / name / "verified")
+            if w.get("verified"):  # the shared folder of verified records; relative = next to config.toml
+                vp = Path(os.path.expandvars(str(w["verified"])))
+                kwargs["verified_dir"] = str(vp if vp.is_absolute() else path.parent / vp)
+            if "verify_per_request" in w:
+                kwargs["verify_per_request"] = int(w["verify_per_request"])
     else:
         register = srch.get("register", "register.csv")
         if register:

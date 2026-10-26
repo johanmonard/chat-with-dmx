@@ -20,7 +20,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 
-from . import facets, knowledge, machines, offerkeys, prices, sources, store, vision
+from . import facets, knowledge, machines, offerkeys, prices, sources, store, verified, vision
 from .config import Config
 from .offer_status import apply_corrections, link_projects, number_forms, write_review  # noqa: F401 - offers.*
 from .register import fold
@@ -821,7 +821,7 @@ def run_offers(cfg: Config, projects_db: str | None = None, review: bool = False
         if review:
             path = cfg.world_dir / "review.csv"
             try:
-                progress(f"Review list: {write_review(con, str(path))} rows in {path}")
+                progress(f"Review list: {write_review(con, str(path), verified.load(cfg, con))} rows in {path}")
             except OSError as e:  # open in Excel
                 progress(f"review.csv not written: {e}")
                 log.warning("review.csv not written: %s", e)

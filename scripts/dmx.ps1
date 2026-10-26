@@ -417,6 +417,17 @@ function Copy-MasterToLocal {
     $localCorrections = Join-Path $LocalWorld 'corrections.csv'
     if (Test-Path $corrections) { Copy-Item $corrections $localCorrections -Force }
     else { Remove-Item $localCorrections -Force -ErrorAction SilentlyContinue }
+    # Verified offer records (offers world): the shared folder is the one that counts; the local copy only
+    # serves when the share is out of reach, and is never copied back.
+    $verified = Join-Path $SharedWorld 'verified'
+    $localVerified = Join-Path $LocalWorld 'verified'
+    if (Test-Path $verified) {
+        New-Item -ItemType Directory -Force $localVerified | Out-Null
+        Get-ChildItem $localVerified -File -ErrorAction SilentlyContinue |
+            Where-Object { -not (Test-Path (Join-Path $verified $_.Name)) } | Remove-Item -Force
+        Get-ChildItem $verified -File -Filter '*.json' | Copy-Item -Destination $localVerified -Force
+    }
+    else { Remove-Item $localVerified -Recurse -Force -ErrorAction SilentlyContinue }
     Remove-Item (Join-Path $LocalWorld 'review.csv') -Force -ErrorAction SilentlyContinue   # only a review written by this run goes back
 }
 

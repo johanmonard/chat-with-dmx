@@ -1,4 +1,4 @@
-"""Command line: dmx-docs web | index | ocr | describe | embed | offers | status | search | read | serve."""
+"""Command line: dmx-docs web | index | ocr | describe | embed | offers | verify-seed | status | search | read | serve."""
 
 from __future__ import annotations
 
@@ -68,6 +68,11 @@ def main(argv: list[str] | None = None) -> None:
                    help="projects index used for won / not won (default: the config's projects world)")
     p.add_argument("--max-minutes", type=float,
                    help="stop asking the model after this many minutes (the register is still written; run again)")
+
+    p = sub.add_parser("verify-seed", help="store the fully right offers of earlier spot checks as verified "
+                                           "records (offers world)")
+    p.add_argument("folders", nargs="+", metavar="FOLDER", help="folders holding batch<n>.json / result<n>.json")
+    p.add_argument("--dry-run", action="store_true", help="say what would be seeded, write nothing")
 
     sub.add_parser("status", help="show index statistics")
     sub.add_parser("map", help="print the world map (map file + live overview), as the world_map tool returns it")
@@ -171,6 +176,18 @@ def main(argv: list[str] | None = None) -> None:
             print("Stopped. Run `dmx-docs offers` again (the model answers read so far are kept).")
             sys.exit(130)
         print(f"Done in {(time.monotonic() - started) / 60:.1f} min: {stats.summary()}")
+    elif args.command == "verify-seed":
+        if cfg.profile != "offers" or not cfg.verified_dir:
+            print("Needs an offers world with `verified` set in [worlds.offers]: nothing to do.")
+            sys.exit(1)
+        from . import verified
+        from .tools import DocTools
+        con = DocTools(cfg)._con()
+        try:
+            for line in verified.seed_from_spot_checks(con, cfg, args.folders, dry_run=args.dry_run):
+                print(line)
+        finally:
+            con.close()
     elif args.command == "status":
         from .tools import DocTools
         print(DocTools(cfg).index_status())

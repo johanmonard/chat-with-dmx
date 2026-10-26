@@ -24,6 +24,11 @@ Each ends with a **coverage line** (offers matched, with readable prices, left o
 offers named): show it under every chart or count. With `machine=` it also names the offers without
 readable prices, which could not be checked for that machine. Currencies are never converted.
 
+## Verified records
+A revision whose price pages were looked at and checked by the server is **verified**: its values
+stand in place of the register's own reading (marked in `offer_lines`, `offer_card` and the coverage
+line). `offer_verify` stores a record, `offer_health` shows how much of the register is verified.
+
 ## Kinds of information
 | Kind | Where | Filter | Answers questions like |
 |---|---|---|---|

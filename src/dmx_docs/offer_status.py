@@ -559,10 +559,14 @@ def _cell(v) -> str:
     return re.sub(r"[\r\n]+", " ", text).replace(";", ",")
 
 
-def write_review(con, path: str) -> int:
+def write_review(con, path: str, loaded=None) -> int:
     """review.csv (UTF-8 with BOM, ';'-separated, for Excel): one row per thing to check, with the offer,
     revision, client, issue, detail, path and page. Returns the number of rows."""
     rows = _revision_issues(con) + _offer_issues(con) + _folder_issues(con)
+    if loaded is not None:  # verified records against the register's reading (verified.py)
+        from . import verified
+
+        rows += verified.review_rows(con, loaded)
     rows.sort(key=lambda r: tuple(_cell(v) for v in (r[0], r[1], r[3], r[5])))
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8-sig", newline="") as f:

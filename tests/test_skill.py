@@ -120,3 +120,17 @@ def test_build_skill_zip_uses_forward_slashes(tmp_path):
     assert "dmx-research/SKILL.md" in names and "dmx-research/references/projects.md" in names
     assert "dmx-research/references/offers.md" in names
     assert not any("\\" in n for n in names)
+
+
+def test_verification_workflow_is_taught_in_both_places(schemas):
+    from dmx_docs.server import OFFERS_INSTRUCTIONS
+
+    text = (SKILL / "references/offers.md").read_text(encoding="utf-8")
+    for tool in ("offer_verify", "offer_health"):
+        assert tool in schemas["offers"] and tool in text
+        assert all(tool not in tools for world, tools in schemas.items() if world != "offers"), tool
+    flat = lambda t: " ".join(t.split())  # noqa: E731
+    for step in ("Ask the register tool; read its \"To verify\" list.",
+                 "dispute=true and the reason. Never force values.",
+                 "never verify part of a revision."):
+        assert step in flat(text) and step in flat(OFFERS_INSTRUCTIONS), step

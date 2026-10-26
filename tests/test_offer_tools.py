@@ -63,14 +63,14 @@ def test_offer_lines_chart_rows(offers_world_linked):
     out = offer_tools.offer_lines(con, machine="Paloma")
     assert all(r.split(";")[12] == "CHF" for r in rows(out)) and len(rows(out)) == 6
     assert out.splitlines()[0] == ("date;offer;revision;variant;kind;client;country;status;offer_type;quantity;amount;"
-                                   "unit_price;currency;line;path;page;confidence")
+                                   "unit_price;currency;line;path;page;confidence;verified")
     assert "Coverage: 5 offers matched; 5 with readable prices; left out: 1 (1 no readable prices)" in out
     assert rows(out, "B-250306")[0].split(";")[8] == "budget"  # budget offers are in, and marked
     assert "3002222/00 annex (no readable prices)" in out  # an unread document of the last revision
     won = rows(out, "3001234")[0].split(";")
     assert won[:11] == ["2020-05-14", "3001234", "03", "Vandelay", "machine", "ACME Foods", "", "won", "firm", "",
                         "180000"]
-    assert won[13].startswith("A Paloma 2R Top Loader") and won[14].endswith("Vandelay.pdf") and won[15:] == ["2", "high"]
+    assert won[13].startswith("A Paloma 2R Top Loader") and won[14].endswith("Vandelay.pdf") and won[15:] == ["2", "high", "no"]
     firm = offer_tools.offer_lines(con, machine="Paloma", offer_type="firm")
     assert len(rows(firm)) == 5 and "B-250306 (budget)" in firm
 
@@ -177,7 +177,7 @@ def test_table_cells_are_safe(offers_world_linked):
     con.execute("UPDATE offer_lines SET text = '=cmd|x; type\nX' WHERE kind = 'machine' AND revision_id = "
                 "(SELECT id FROM offer_revisions WHERE offer_key = '0904099')")
     row = rows(offer_tools.offer_lines(con, client="ACME", kind="machine"), "0904099")[0]
-    assert ";'=cmd|x, type X;" in row and len(row.split(";")) == 17
+    assert ";'=cmd|x, type X;" in row and len(row.split(";")) == 18
 
 
 def test_machine_charts_show_machine_lines_unless_a_kind_is_asked(offers_world_linked):
@@ -315,3 +315,264 @@ def test_offers_search_filters(offers_world_linked):
     assert "Dupont B-250306 V1.pdf" in tools.search("Paloma", offer="B-250306 V1, 9999999", mode="keyword")
     assert "No results" in tools.search("Paloma", status="lost", mode="keyword")
     assert "No results" in tools.search("Paloma", partner="Initech", mode="keyword")
+
+
+# --- verified records: the overlay ------------------------------------------------------------------
+
+import json  # noqa: E402
+
+from dmx_docs import verified  # noqa: E402
+
+MACHINE = "A Paloma 2R Top Loader cell including: robots, frame, HMI"
+
+
+def _record(con, offer, revision, variant=None, amount=21000.0, text=MACHINE, **kw):
+    r = con.execute("SELECT r.*, d.size, d.mtime FROM offer_revisions r JOIN docs d ON d.id = r.doc_id "
+                    "WHERE r.offer_key = ? AND r.revision = ? AND ifnull(r.variant, '') = ?",
+                    (offer, revision, variant or "")).fetchone()
+    base = dict(offer=offer, revision=revision, variant=variant, path=r["path"], size=r["size"], mtime=r["mtime"],
+                pages=[2], not_price_pages={}, not_prices=[], totals={"CHF": amount},
+                lines=[{"text": text, "kind": "machine", "model": "Paloma 2R", "quantity": None,
+                        "amounts": {"CHF": amount}, "page": 2}],
+                facts={"date": "2021-07-02", "country": "Italy", "offer_type": "budget"}, checked_on="image",
+                checked_by="claude-test", checked_at="2026-10-26T10:00:00", user="jdoe", note="", state="verified",
+                file="")
+    base.update(kw)
+    return verified.Record(**base)
+
+
+def _loaded(cfg, con, tmp_path, *records):
+    shared = tmp_path / "shared"
+    shared.mkdir(exist_ok=True)
+    for rec in records:
+        verified.write(str(shared), rec)
+    cfg.verified_dir = str(shared)
+    return verified.load(cfg, con)
+
+
+def _machine_rows(out, offer):
+    return [r.split(";") for r in rows(out, offer)]
+
+
+def test_offer_lines_uses_verified_values(offers_world_linked, tmp_path):
+    cfg, con = offers_world_linked
+    loaded = _loaded(cfg, con, tmp_path, _record(con, "3006666", "00"))
+    out = offer_tools.offer_lines(con, machine="Paloma", loaded=loaded)
+    row = _machine_rows(out, "3006666")[0]
+    assert row[10] == "21000" and row[-1] == "image" and row[6] == "Italy" and row[8] == "budget"
+    assert "1 verified, " in out and " not verified (0 expired, 0 disputed)" in out
+    assert _machine_rows(out, "3002222")[0][-1] == "no"
+    plain = offer_tools.offer_lines(con, machine="Paloma")
+    assert _machine_rows(plain, "3006666")[0][10] == "180000" and "verified," not in plain
+
+
+def test_correction_beats_verified(offers_world_linked, tmp_path):
+    cfg, con = offers_world_linked
+    con.execute("INSERT INTO offer_corrections(offer, revision, line, field, value, applied) "
+                "VALUES('3006666', '00', 1, 'amount:CHF', '999', 1)")
+    loaded = _loaded(cfg, con, tmp_path, _record(con, "3006666", "00"))
+    out = offer_tools.offer_lines(con, machine="Paloma", loaded=loaded)
+    assert _machine_rows(out, "3006666")[0][10] == "999"
+
+
+def test_stale_line_correction_not_applied(offers_world_linked, tmp_path):
+    cfg, con = offers_world_linked
+    con.execute("INSERT INTO offer_corrections(offer, revision, line, field, value, applied) "
+                "VALUES('3006666', '00', 1, 'amount:CHF', '999', 1)")
+    loaded = _loaded(cfg, con, tmp_path, _record(con, "3006666", "00", text="Completely other machine Paloma 2R"))
+    out = offer_tools.offer_lines(con, machine="Paloma", loaded=loaded)
+    assert _machine_rows(out, "3006666")[0][10] == "21000"
+    stale = verified.stale_corrections(con, loaded)
+    assert [(s[0], s[1], s[2], s[3]) for s in stale] == [("3006666", "00", 1, "amount:CHF")]
+
+
+def test_offer_level_correction_beats_verified_fact(offers_world_linked, tmp_path):
+    cfg, con = offers_world_linked
+    con.execute("INSERT INTO offer_corrections(offer, revision, line, field, value, applied) "
+                "VALUES('3006666', NULL, NULL, 'country', 'France', 1)")
+    con.execute("UPDATE offers SET country = 'France' WHERE offer_key = '3006666'")
+    loaded = _loaded(cfg, con, tmp_path, _record(con, "3006666", "00"))
+    row = _machine_rows(offer_tools.offer_lines(con, machine="Paloma", loaded=loaded), "3006666")[0]
+    assert row[6] == "France" and row[8] == "budget"
+
+
+def test_offer_card_marks_revisions(offers_world_linked, tmp_path):
+    cfg, con = offers_world_linked
+    loaded = _loaded(cfg, con, tmp_path, _record(con, "3006666", "00"),
+                     _record(con, "3002222", "00", state="disputed", note="the page shows other amounts"))
+    assert "verified (image, 2026-10-26, claude-test)" in offer_tools.offer_card(con, "3006666", loaded=loaded)
+    assert "verification disputed: the page shows other amounts" in offer_tools.offer_card(con, "3002222", loaded=loaded)
+    card = offer_tools.offer_card(con, "3001234", loaded=loaded)
+    assert "not verified" in card and "verified (" not in card
+    assert "not verified" not in offer_tools.offer_card(con, "3001234")  # no marks without verification
+    assert "verified" in offer_tools.list_offers(con, client="Globex", loaded=loaded)
+
+
+def test_overlay_ignores_expired_and_revoked(offers_world_linked, tmp_path):
+    cfg, con = offers_world_linked
+    old = _record(con, "3006666", "00")
+    old.size += 1
+    gone = _record(con, "3002222", "00")
+    loaded = _loaded(cfg, con, tmp_path, old, gone,
+                     _record(con, "3002222", "00", state="revoked", checked_at="2026-10-26T11:00:00"))
+    out = offer_tools.offer_lines(con, machine="Paloma", loaded=loaded)
+    assert _machine_rows(out, "3006666")[0][10] == "180000" and _machine_rows(out, "3006666")[0][-1] == "no"
+    assert "1 expired" in out and "0 verified" in out
+
+
+# --- the bounded "To verify" list ----------------------------------------------------------------------
+
+def _to_verify_lines(out):
+    return [l for l in out.splitlines() if l.startswith("- offer ")]
+
+
+def test_to_verify_caps_and_orders(offers_world_linked, tmp_path):
+    cfg, con = offers_world_linked
+    con.execute("UPDATE offer_lines SET amounts = '{\"CHF\": 900000.0}' WHERE kind = 'machine' AND revision_id = "
+                "(SELECT id FROM offer_revisions WHERE offer_key = '3006666')")
+    loaded = _loaded(cfg, con, tmp_path)
+    listed = {}
+    out = offer_tools.offer_lines(con, machine="Paloma", revisions="all", loaded=loaded, verify_limit=3,
+                                  listed=listed, now=1000.0)
+    shown = _to_verify_lines(out)
+    assert len(shown) == 3 and len(listed) == 3
+    assert shown[0].startswith("- offer 3006666 rev 00")          # the outlier first
+    assert "offer 3001234" in shown[1]                            # then the won offer
+    assert "unverified)" in out and "say continue for the next ones" in out
+    first = {s.split(":")[0] for s in shown}
+    again = offer_tools.offer_lines(con, machine="Paloma", revisions="all", loaded=loaded, verify_limit=3,
+                                    listed=listed, now=1500.0)
+    assert first.isdisjoint({s.split(":")[0] for s in _to_verify_lines(again)})   # skipped for 30 minutes
+    later = offer_tools.offer_lines(con, machine="Paloma", revisions="all", loaded=loaded, verify_limit=3,
+                                    listed=listed, now=1000.0 + 1801)
+    assert _to_verify_lines(later)[0].startswith("- offer 3006666 rev 00")      # may come back after 30 minutes
+
+
+def test_offer_stats_appends_list_offer_card_does_not(offers_world_linked, tmp_path):
+    cfg, con = offers_world_linked
+    loaded = _loaded(cfg, con, tmp_path)
+    stats = offer_tools.offer_stats(con, "year", loaded=loaded, verify_limit=2, listed={}, now=0.0)
+    assert len(_to_verify_lines(stats)) == 2 and "To verify (2 of " in stats
+    assert "To verify" not in offer_tools.offer_card(con, "3006666", loaded=loaded)
+    assert "To verify" not in offer_tools.list_offers(con, loaded=loaded)
+
+
+def test_no_list_when_all_verified_or_off(offers_world_linked, tmp_path):
+    cfg, con = offers_world_linked
+    loaded = _loaded(cfg, con, tmp_path, _record(con, "3006666", "00"))
+    out = offer_tools.offer_lines(con, client="Globex", machine="Paloma", loaded=loaded, verify_limit=5,
+                                  listed={}, now=0.0)
+    assert "To verify" not in out and "1 verified, 0 not verified" in out
+    off = offer_tools.offer_lines(con, machine="Paloma", loaded=verified.Loaded(), verify_limit=5, listed={}, now=0.0)
+    assert "To verify" not in off
+
+
+# --- offer_verify and offer_health ------------------------------------------------------------------------
+
+def _register_submission(con, offer="3006666", revision="00"):
+    """The register's own lines of a revision, submitted back as what the agent saw."""
+    r = con.execute("SELECT * FROM offer_revisions WHERE offer_key = ? AND revision = ?", (offer, revision)).fetchone()
+    lines = [{"text": l["text"], "kind": l["kind"], "model": l["model"], "quantity": l["quantity"],
+              "amounts": json.loads(l["amounts"]), "page": l["page"]}
+             for l in con.execute("SELECT * FROM offer_lines WHERE revision_id = ? ORDER BY position", (r["id"],))]
+    return dict(offer=offer, revision=revision, path=r["path"], pages=r["pages"], lines=lines,
+                totals=json.loads(r["totals"]), checked_on="image", checked_by="claude-test")
+
+
+@pytest.fixture
+def verifying(offers_world_linked, tmp_path):
+    cfg, con = offers_world_linked
+    cfg.verified_dir = str(tmp_path / "shared")
+    (tmp_path / "shared").mkdir()
+    return cfg, con, DocTools(cfg), tmp_path / "shared"
+
+
+def test_offer_verify_stores_and_shares(verifying):
+    cfg, con, tools, shared = verifying
+    out = tools.offer_verify(**_register_submission(con))
+    assert out.startswith("Verified: offer 3006666 rev 00: 4 lines") and "checked on image" in out
+    assert len(list(shared.glob("*.json"))) == 1
+    chart = tools.offer_lines(machine="Paloma")
+    assert [r.split(";")[-1] for r in rows(chart, "3006666")] == ["image"]
+    assert "1 verified, " in chart
+
+
+def test_offer_verify_refusal_lists_problems(verifying):
+    cfg, con, tools, shared = verifying
+    sub = _register_submission(con)
+    sub["lines"][0]["amounts"] = {"CHF": 21000.0}
+    out = tools.offer_verify(**sub)
+    assert out.startswith("Not stored:") and "page 2: CHF 21'000 is not printed there" in out
+    assert "dispute=true" in out and not list(shared.glob("*.json"))
+
+
+def test_verify_refused_without_shared_folder(verifying, tmp_path):
+    cfg, con, tools, shared = verifying
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    cfg.verified_mirror = str(mirror)
+    cfg.verified_dir = str(tmp_path / "gone")
+    out = tools.offer_verify(**_register_submission(con))
+    assert "cannot be reached" in out and "nothing was stored" in out and not list(mirror.glob("*"))
+    cfg.verified_dir = None
+    assert "not configured" in tools.offer_verify(**_register_submission(con))
+
+
+def test_offer_verify_dispute_and_revoke(verifying):
+    cfg, con, tools, shared = verifying
+    sub = _register_submission(con)
+    assert "need a reason" in tools.offer_verify(**sub, dispute=True)
+    assert tools.offer_verify(**sub, dispute=True, reason="other amounts on the page").startswith("Recorded as disputed")
+    assert "verification disputed: other amounts on the page" in tools.offer_card("3006666")
+    # a later verified record, then revoked
+    sub["checked_on"] = "image"
+    import time
+    time.sleep(1.1)  # records are ordered by the second
+    assert tools.offer_verify(**sub).startswith("Verified:")
+    assert "verified (image" in tools.offer_card("3006666")
+    time.sleep(1.1)
+    assert tools.offer_verify(**sub, revoke=True, reason="wrong").startswith("Recorded as revoked")
+    assert "not verified" in tools.offer_card("3006666")
+
+
+def test_offer_health_counts(verifying):
+    cfg, con, tools, shared = verifying
+    assert tools.offer_verify(**_register_submission(con)).startswith("Verified:")
+    bad = _record(con, "3002222", "00")
+    bad.size += 1                                                   # expired
+    verified.write(str(shared), bad)
+    (shared / "broken.json").write_text("{", encoding="utf-8")
+    out = tools.offer_health()
+    first = out.splitlines()[0].split(";")
+    assert first[:7] == ["scope", "offers", "offers verified", "revisions", "revisions verified", "lines",
+                         "lines verified"] and "CHF printed" in first and "CHF verified" in first
+    allrow = [l for l in out.splitlines() if l.startswith("all;")][0].split(";")
+    assert allrow[2] == "1" and allrow[4] == "1"
+    assert any(l.startswith("year 2021;") for l in out.splitlines()) and any(l.startswith("category ") for l in out.splitlines())
+    assert "Checked on: image 1" in out and "Expired (the document changed): 1" in out
+    assert "Damaged record files: broken.json" in out
+    scoped = tools.offer_health(machine="Paloma 2R")
+    assert scoped.startswith("Backlog for machine Paloma 2R: 1 of ") and "revisions verified" in scoped.splitlines()[0]
+
+
+def test_offers_profile_tools(offers_cfg):
+    names = tool_names(server.build_server(offers_cfg))
+    assert {"offer_verify", "offer_health"} <= names
+
+    async def annotations():
+        async with _client(server.build_server(offers_cfg)) as client:
+            return {t.name: t.annotations for t in (await client.list_tools()).tools}
+
+    ann = asyncio.run(annotations())
+    assert ann["offer_verify"] is None or not ann["offer_verify"].read_only_hint
+    assert ann["offer_health"].read_only_hint
+    other = make_offers_cfg(offers_cfg.roots[0], offers_cfg.data_dir, offers_cfg.knowledge_path)
+    other.profile = "marketing"
+    assert not {"offer_verify", "offer_health"} & tool_names(server.build_server(other))
+
+
+def test_offer_card_header_shows_verified_facts(offers_world_linked, tmp_path):
+    cfg, con = offers_world_linked
+    loaded = _loaded(cfg, con, tmp_path, _record(con, "3006666", "00"))
+    card = offer_tools.offer_card(con, "3006666", loaded=loaded)
+    assert "country Italy" in card and "type budget" in card and "2021-07-02..2021-07-02" in card
