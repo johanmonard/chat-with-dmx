@@ -198,16 +198,16 @@ _OFFER_NAME_KINDS = [
 _OFFER_PARTNERS = {"06 offres ipso": "IPSO", "07 offres wyzo": "Wyzo"}
 _ARCHIVE_ANCHORS = ("prospect", "prospects", "client", "clients")
 _VERSION_LABEL = re.compile(r"(?<![A-Za-z0-9])V(\d+)(?!\w)", re.I)
-_NAME_REVISION = re.compile(r"(?:[ _-]V(\d+)|_(\d{2}))$", re.I)  # 'B-250306 V2', 'B-250306-V2', '3002113_02'
+_NAME_REVISION = re.compile(r"(?:[ _-]V(?P<v>\d+)|_(?P<n>\d{2})|[ _-](?P<q>Q\d{2}))$", re.I)  # 'B-250306 V2', '3002113_02', 'PRJ-2014-02259-Q01'
 # A file named as the offer only: its number and a version ('B-250306 V2', 'F-0903029 V1', '3001234_02').
-_OWN_FILE = re.compile(r"\W*(?:[BFE][- ]?)?\d{6,7}(?:[ _-]*(?:V\d+|Q\d{2}|\d{2}))?\W*", re.I)
+_OWN_FILE = re.compile(r"\W*(?:(?:[BFE][- ]?)?\d{6,7}|PRJ[-_ ]?\d{4}[-_ ]?\d{5})(?:[ _-]*(?:V\d+|Q\d{2}|\d{2}))?\W*", re.I)
 
 
 def _offer_structural(folder: str) -> bool:
     """A folder that is neither a client nor a site: 'Offres', a revision, a kind of document."""
     from . import offerkeys, register
 
-    return (register.fold(folder) == "offres" or offerkeys.revision_of(folder) is not None
+    return (register.fold(folder) in ("offres", "old") or offerkeys.revision_of(folder) is not None
             or register.fold(folder) in _OFFER_FOLDER_KINDS)
 
 
@@ -261,7 +261,10 @@ def compute_offers(path: str, root: str) -> dict:
 
     # Revision: the folder under the offer folder, else a version in the offer folder name or file name.
     rev = None
-    candidates = folders[offer_idx + 1:offer_idx + 2] if offer_idx is not None else folders[1:]
+    first = offer_idx + 1 if offer_idx is not None else 1
+    while offer_idx is not None and first < len(folders) and offerkeys.offer_key(folders[first]) == key:
+        first += 1  # 'PRJ-2016-04753_Cerealis Portugal\PRJ-2016-04753\Q08': the same number twice
+    candidates = folders[first:first + 1] if offer_idx is not None else folders[1:]
     for folder in candidates:
         r = offerkeys.revision_of(folder)
         if r:
@@ -272,7 +275,7 @@ def compute_offers(path: str, root: str) -> dict:
         rev = f"V{m.group(1)}" if m else None
     if rev is None and key and offerkeys.offer_key(stem) == key:  # the offer's own file: Angebot - 3002113_02.pdf
         m = _NAME_REVISION.search(stem)
-        rev = (f"V{m.group(1)}" if m.group(1) else m.group(2)) if m else None
+        rev = (f"V{m['v']}" if m['v'] else m['n'] or m['q'].upper()) if m else None
     out["revision"] = rev
 
     # Kind of document: the deepest kind folder, then words of the file name, then the extension.
@@ -298,8 +301,8 @@ def compute_offers(path: str, root: str) -> dict:
 RULES = {"projects": compute, "marketing": compute_marketing, "documentation": compute_documentation,
          "offers": compute_offers}
 # offers 2: the archive client by its position under the country folder; 3: the offer's own file wherever it lies;
-# 4: a version after a dash in the file name ('B-250306-V2.doc').
-PROFILE_VERSIONS = {"marketing": MARKETING_FACETS_VERSION, "documentation": 1, "offers": 4}
+# 4: a version after a dash in the file name ('B-250306-V2.doc'); 5: PRJ-YYYY-NNNNN project numbers.
+PROFILE_VERSIONS = {"marketing": MARKETING_FACETS_VERSION, "documentation": 1, "offers": 5}
 
 
 def _version(profile: str) -> str:

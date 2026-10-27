@@ -22,6 +22,9 @@ def f(rel):
     ("B-250306 V1", "B-250306"), ("F-1103018 V1", "1103018"), ("ACME Foods B-1110021 V1.pdf", "1110021"),
     ("Angebot - 3002113_02.pdf", "3002113"), ("Offre_5034569_01.pdf", "5034569"),
     ("3006904-CPL01-Q01_.pdf", "3006904"),  # the letter after the dash is not a suffix when more follows
+    ("PRJ-2014-02259 Mars France Steinburg (Barres glacées)", "PRJ-2014-02259"),
+    ("PRJ-2016-04753_Cerealis Portugal", "PRJ-2016-04753"), ("PRJ-2014-02259-Q01.pdf", "PRJ-2014-02259"),
+    ("Layout PRJ-2014-02259-Q01.pdf", "PRJ-2014-02259"), ("prj-2013-03403", "PRJ-2013-03403"),
     ("NNNNNNN-DESCRIPTION", None), ("YYMMNNN", None), ("Specification", None), ("Paloma 2R WD _JLT", None),
 ])
 def test_offer_key(name, key):
@@ -57,6 +60,19 @@ def test_client_offer_revision():
     got = f(r"ACME Foods\Offres\3002113 - Line 5\02\Angebot - 3002113_02.pdf")
     assert (got["category"], got["client"], got["site"], got["offer"], got["revision"], got["doc_type"]) == \
            ("client", "ACME Foods", None, "3002113", "02", "offer")
+
+
+def test_project_numbered_offers_of_2013_2017():
+    got = f(r"Mars\Offres\PRJ-2014-02259 Mars France Steinburg (Barres glacées)\Q01\PRJ-2014-02259-Q01.pdf")
+    assert (got["client"], got["site"], got["offer"], got["revision"], got["doc_type"]) == \
+           ("Mars", None, "PRJ-2014-02259", "Q01", "offer")
+    # the number twice, under an OLD folder: the revision is the folder under the inner one
+    got = f(r"PANT\Offres\OLD\PRJ-2016-04753_Cerealis Portugal\PRJ-2016-04753\Q07\PRJ-2016-04753-Q07-Signed.pdf")
+    assert (got["client"], got["site"], got["offer"], got["revision"]) == ("PANT", None, "PRJ-2016-04753", "Q07")
+    # a supplier quote filed inside the project folder belongs to it
+    assert f(r"Mars\Offres\PRJ-2014-02259 Mars\Q01\Quote 5024692.pdf")["offer"] == "PRJ-2014-02259"
+    # the revision from the file name when no folder carries it
+    assert f(r"Codan\Offres\PRJ-2015-00954 Codan\PRJ-2015-00954-Q02.pdf")["revision"] == "Q02"
 
 
 def test_site_and_kinds():
