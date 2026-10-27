@@ -10,6 +10,7 @@ stored per currency exactly as printed, never converted.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import logging
@@ -758,6 +759,23 @@ def _write(con, built: list[_Offer]) -> None:
                             [(cur.lastrowid, t.base, t.quote, t.rate, t.date_written) for t in s.rates])
 
 
+def write_unkeyed(con, path: str) -> tuple[int, str]:
+    """Offer documents the register cannot place: indexed as offers (by name or folder) but with no offer number.
+    Writes them to a CSV (category, client, extension, path) and returns their count with a one-line breakdown by
+    category and extension, so that a numbering scheme nobody listed shows up at the next run."""
+    rows = con.execute("SELECT f.category, f.client, d.ext, d.path FROM docs d JOIN doc_facets f ON f.doc_id = d.id "
+                       "WHERE f.offer IS NULL AND f.doc_type = 'offer' AND f.category IN "
+                       "('client', 'archive', 'partner', 'unknown_client') ORDER BY f.category, f.client, d.path").fetchall()
+    with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.writer(fh, delimiter=";")
+        writer.writerow(["category", "client", "extension", "path"])
+        writer.writerows(tuple(r) for r in rows)
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[f"{r['category']} {r['ext']}"] = counts.get(f"{r['category']} {r['ext']}", 0) + 1
+    return len(rows), ", ".join(f"{k} {n}" for k, n in sorted(counts.items(), key=lambda kv: -kv[1])[:8])
+
+
 def run_offers(cfg: Config, projects_db: str | None = None, review: bool = False, max_minutes: float | None = None,
                progress=print) -> OfferStats:
     """Rebuild the register from the index: every table but the model cache, then the statuses from the
@@ -786,6 +804,13 @@ def run_offers(cfg: Config, projects_db: str | None = None, review: bool = False
                 continue
             folder = _offer_folder(d["path"], os.path.relpath(d["path"], root).split(os.sep), root)
             groups.setdefault(d["offer"], {}).setdefault(folder, []).append(d)
+
+        try:
+            unkeyed_path = cfg.world_dir / "unkeyed.csv"
+            n, breakdown = write_unkeyed(con, str(unkeyed_path))
+            progress(f"{n} offer documents have no recognised offer number ({breakdown or 'none'}): {unkeyed_path}")
+        except OSError as e:  # open in Excel
+            progress(f"unkeyed.csv not written: {e}")
 
         vocabulary = os.path.join(cfg.knowledge_path, "vocabulary.md") if cfg.knowledge_path else ""
         model = _Model(con, cfg, progress, deadline)

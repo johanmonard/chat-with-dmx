@@ -24,7 +24,7 @@ def f(rel):
     ("3006904-CPL01-Q01_.pdf", "3006904"),  # the letter after the dash is not a suffix when more follows
     ("PRJ-2014-02259 Mars France Steinburg (Barres glacées)", "PRJ-2014-02259"),
     ("PRJ-2016-04753_Cerealis Portugal", "PRJ-2016-04753"), ("PRJ-2014-02259-Q01.pdf", "PRJ-2014-02259"),
-    ("Layout PRJ-2014-02259-Q01.pdf", "PRJ-2014-02259"), ("prj-2013-03403", "PRJ-2013-03403"),
+    ("Layout PRJ-2014-02259-Q01.pdf", "PRJ-2014-02259"), ("PRJ-2013- 05150 (Sanitarium, Australia)", "PRJ-2013-05150"), ("prj-2013-03403", "PRJ-2013-03403"),
     ("NNNNNNN-DESCRIPTION", None), ("YYMMNNN", None), ("Specification", None), ("Paloma 2R WD _JLT", None),
 ])
 def test_offer_key(name, key):
@@ -201,3 +201,22 @@ def test_a_version_after_a_dash_in_the_file_name_is_the_revision():
     got = f(r"01_Historique\PROSPECT\Italie\Globex\250004\B-250004-V2.doc")
     assert (got["offer"], got["revision"], got["doc_type"]) == ("B-250004", "V2", "offer")
     assert f(r"ACME Foods\Offres\0904023\0904023-V1.PDF")["revision"] == "V1"
+
+
+def test_unkeyed_offer_documents_are_listed(tmp_path):
+    import sqlite3
+    from dmx_docs import offers
+
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.executescript("CREATE TABLE docs(id INTEGER PRIMARY KEY, path TEXT, ext TEXT);"
+                      "CREATE TABLE doc_facets(doc_id INTEGER, category TEXT, client TEXT, offer TEXT, doc_type TEXT);")
+    for i, (path, ext, cat, offer, kind) in enumerate([
+            ("a/x.pdf", ".pdf", "client", None, "offer"), ("a/y.msg", ".msg", "archive", None, "offer"),
+            ("a/z.pdf", ".pdf", "client", "3001234", "offer"), ("a/w.pdf", ".pdf", "client", None, "layout"),
+            ("a/n.pdf", ".pdf", "nda", None, "offer")], 1):
+        con.execute("INSERT INTO docs VALUES(?,?,?)", (i, path, ext))
+        con.execute("INSERT INTO doc_facets VALUES(?,?,?,?,?)", (i, cat, "ACME", offer, kind))
+    n, text = offers.write_unkeyed(con, str(tmp_path / "unkeyed.csv"))
+    assert n == 2 and "client .pdf 1" in text and "archive .msg 1" in text
+    assert (tmp_path / "unkeyed.csv").read_text(encoding="utf-8-sig").count("\n") == 3

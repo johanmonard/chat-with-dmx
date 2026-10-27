@@ -22,7 +22,7 @@ _EXTENSION = re.compile(r"\.[A-Za-z0-9]{2,5}$")
 # Archive numbers: B-250306 (offer), F-... and E-... prefixes, six digits, anywhere in the name.
 _ARCHIVE = re.compile(r"(?<![A-Za-z0-9])([BFE])-(\d{6})(?!\d)")
 # Project numbers of 2013-2017: PRJ-2014-02259 (the revision, Q01, is a folder or the end of a file name).
-_PROJECT = re.compile(r"(?<![A-Za-z0-9])PRJ[-_ ]?(\d{4})[-_ ]?(\d{5})(?!\d)", re.I)
+_PROJECT = re.compile(r"(?<![A-Za-z0-9])PRJ[-_ ]*(\d{4})[-_ ]*(\d{5})(?!\d)", re.I)  # also 'PRJ-2013- 05150'
 # 7-digit numbers (0909009), 12-digit numbers (IPSO); a `-A` suffix only when the letter ends the word.
 _NUMBER = re.compile(r"(?<!\d)(\d{7}|\d{12})(?!\d)(-[A-Z](?=$|[\s_.)]))?")
 

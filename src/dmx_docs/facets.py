@@ -200,7 +200,7 @@ _ARCHIVE_ANCHORS = ("prospect", "prospects", "client", "clients")
 _VERSION_LABEL = re.compile(r"(?<![A-Za-z0-9])V(\d+)(?!\w)", re.I)
 _NAME_REVISION = re.compile(r"(?:[ _-]V(?P<v>\d+)|_(?P<n>\d{2})|[ _-](?P<q>Q\d{2}))$", re.I)  # 'B-250306 V2', '3002113_02', 'PRJ-2014-02259-Q01'
 # A file named as the offer only: its number and a version ('B-250306 V2', 'F-0903029 V1', '3001234_02').
-_OWN_FILE = re.compile(r"\W*(?:(?:[BFE][- ]?)?\d{6,7}|PRJ[-_ ]?\d{4}[-_ ]?\d{5})(?:[ _-]*(?:V\d+|Q\d{2}|\d{2}))?\W*", re.I)
+_OWN_FILE = re.compile(r"\W*(?:(?:[BFE][- ]?)?\d{6,7}|PRJ[-_ ]*\d{4}[-_ ]*\d{5})(?:[ _-]*(?:V\d+|Q\d{2}|\d{2}))?\W*", re.I)
 
 
 def _offer_structural(folder: str) -> bool:
