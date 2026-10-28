@@ -75,6 +75,20 @@ def test_project_numbered_offers_of_2013_2017():
     assert f(r"Codan\Offres\PRJ-2015-00954 Codan\PRJ-2015-00954-Q02.pdf")["revision"] == "Q02"
 
 
+def test_archive_offers_numbered_by_the_date_of_their_folder():
+    a = f(r"01_Historique\PROSPECT\France\Valpiform\E-2007_07_23 V1\Demande d'offre Valpiform.msg")
+    b = f(r"01_Historique\PROSPECT\France\Jos Peron\E-2007_07_23 V1\Demande d'offre Peron.msg")
+    assert (a["offer"], a["client"], a["revision"]) == ("20070723@Valpiform", "Valpiform", "V1")
+    assert b["offer"] == "20070723@Jos Peron"  # the same date under another client is another offer
+    got = f(r"01_Historique\PROSPECT\France\Arrivé\E-2007_10_31 - Cordons bleus\E-2007_10_31 V2\Offre.pdf")
+    assert (got["offer"], got["revision"]) == ("20071031@Arrivé", "V2")
+    got = f(r"01_Historique\PROSPECT\USA\Doboy\Danone\211105\211105 Offre budgétaire.doc")
+    assert (got["offer"], got["client"], got["doc_type"]) == ("211105@Doboy", "Doboy", "offer")
+    # a real offer number still wins, and a file with no dated folder stays without a number
+    assert f(r"01_Historique\PROSPECT\USA\McKee\B-250306 V1\x.doc")["offer"] == "B-250306"
+    assert f(r"01_Historique\PROSPECT\USA\McKee\McKee creme pies offer.doc")["offer"] is None
+
+
 def test_site_and_kinds():
     assert f(r"ACME Foods\ACME Polska\Offres\3006464\00\x.pdf")["site"] == "ACME Polska"
     assert f(r"ACME Foods\Offres\3002113\02\Mail\FW Projekt.msg")["doc_type"] == "mail"

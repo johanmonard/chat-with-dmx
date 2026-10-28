@@ -22,6 +22,8 @@ _EXTENSION = re.compile(r"\.[A-Za-z0-9]{2,5}$")
 # Archive numbers: B-250306 (offer), F-... and E-... prefixes, six digits, anywhere in the name.
 _ARCHIVE = re.compile(r"(?<![A-Za-z0-9])([BFE])-(\d{6})(?!\d)")
 # Project numbers of 2013-2017: PRJ-2014-02259 (the revision, Q01, is a folder or the end of a file name).
+# Archive offers numbered by their date in the folder name only: E-2008_10_10 V1, 2005-11-25, B 271201 V1, 210913.
+_ARCHIVE_DATE = re.compile(r"(?<![A-Za-z0-9])(?:[BFE][- ]?)?(\d{4}[_.-]\d{2}[_.-]\d{2}|\d{6})(?!\d)")
 _PROJECT = re.compile(r"(?<![A-Za-z0-9])PRJ[-_ ]*(\d{4})[-_ ]*(\d{5})(?!\d)", re.I)  # also 'PRJ-2013- 05150'
 # 7-digit numbers (0909009), 12-digit numbers (IPSO); a `-A` suffix only when the letter ends the word.
 _NUMBER = re.compile(r"(?<!\d)(\d{7}|\d{12})(?!\d)(-[A-Z](?=$|[\s_.)]))?")
@@ -42,7 +44,20 @@ def offer_key(name: str) -> str | None:
     return None
 
 
-_REVISION_PATTERNS = (re.compile(r"(\d{2})(?:\s*-\s*(.+))?"), re.compile(r"(V\d+)", re.I), re.compile(r"(Q\d{2})", re.I))
+def archive_token(name: str) -> str | None:
+    """The date written in an archive folder name ('E-2008_10_10 V1' -> '20081010', '210913' -> '210913')."""
+    m = _ARCHIVE_DATE.search(name)
+    return re.sub(r"[_.-]", "", m.group(1)) if m else None
+
+
+def archive_offer_index(folders: list[str], start: int) -> int | None:
+    """Index of the outermost folder from `start` on whose name carries an archive date: the offer's folder when
+    no folder or file name carries an offer number. Its key is then '<date>@<client>': a date alone is shared by
+    offers of different clients sent the same day."""
+    return next((i for i in range(start, len(folders)) if archive_token(folders[i])), None)
+
+
+_REVISION_PATTERNS =(re.compile(r"(\d{2})(?:\s*-\s*(.+))?"), re.compile(r"(V\d+)", re.I), re.compile(r"(Q\d{2})", re.I))
 
 
 def revision_of(name: str) -> tuple[str, str | None] | None:

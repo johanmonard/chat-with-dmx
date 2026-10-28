@@ -259,6 +259,12 @@ def compute_offers(path: str, root: str) -> dict:
         out["client"] = chain[0] if chain else None
         out["site"] = chain[1] if len(chain) > 1 else None
 
+    if key is None and category == "archive" and out["client"]:  # numbered by the date of its folder: one offer per client
+        idx = offerkeys.archive_offer_index(folders, folders.index(out["client"]) + 1)
+        if idx is not None:
+            offer_idx, key = idx, f"{offerkeys.archive_token(folders[idx])}@{out['client']}"
+            out["offer"] = key
+
     # Revision: the folder under the offer folder, else a version in the offer folder name or file name.
     rev = None
     first = offer_idx + 1 if offer_idx is not None else 1
@@ -272,6 +278,9 @@ def compute_offers(path: str, root: str) -> dict:
             break
     if rev is None and offer_idx is not None:
         m = _VERSION_LABEL.search(folders[offer_idx])
+        if m is None and key and "@" in key and offer_idx + 1 < len(folders) \
+                and offerkeys.archive_token(folders[offer_idx + 1]) == key.split("@")[0]:
+            m = _VERSION_LABEL.search(folders[offer_idx + 1])  # 'E-2007_10_31 - Cordons bleus\E-2007_10_31 V1'
         rev = f"V{m.group(1)}" if m else None
     if rev is None and key and offerkeys.offer_key(stem) == key:  # the offer's own file: Angebot - 3002113_02.pdf
         m = _NAME_REVISION.search(stem)
@@ -301,8 +310,9 @@ def compute_offers(path: str, root: str) -> dict:
 RULES = {"projects": compute, "marketing": compute_marketing, "documentation": compute_documentation,
          "offers": compute_offers}
 # offers 2: the archive client by its position under the country folder; 3: the offer's own file wherever it lies;
-# 4: a version after a dash in the file name ('B-250306-V2.doc'); 5: PRJ-YYYY-NNNNN project numbers.
-PROFILE_VERSIONS = {"marketing": MARKETING_FACETS_VERSION, "documentation": 1, "offers": 5}
+# 4: a version after a dash in the file name ('B-250306-V2.doc'); 5: PRJ-YYYY-NNNNN project numbers;
+# 6: archive offers numbered by a date in the folder name ('<date>@<client>').
+PROFILE_VERSIONS = {"marketing": MARKETING_FACETS_VERSION, "documentation": 1, "offers": 6}
 
 
 def _version(profile: str) -> str:

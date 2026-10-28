@@ -406,11 +406,13 @@ def _read(con, doc, model: _Model, aliases, twin=None) -> _Read:
 
 # --- One offer ------------------------------------------------------------------------------------
 
-def _offer_folder(path: str, rel_parts: list[str], root: str) -> str:
+def _offer_folder(path: str, rel_parts: list[str], root: str, key: str | None = None) -> str:
     """The first folder below the top one that carries an offer number (as facets.compute_offers),
-    else the document's folder."""
+    else the folder carrying the date of an archive offer's key ('20081010@Client'), else the document's folder."""
     folders = rel_parts[:-1]
     idx = next((i for i in range(1, len(folders)) if offerkeys.offer_key(folders[i])), None)
+    if idx is None and key and "@" in key:
+        idx = next((i for i in range(1, len(folders)) if offerkeys.archive_token(folders[i]) == key.split("@")[0]), None)
     return os.path.join(root, *folders[:idx + 1]) if idx is not None else os.path.dirname(path)
 
 
@@ -802,7 +804,7 @@ def run_offers(cfg: Config, projects_db: str | None = None, review: bool = False
             root = facets.root_of(d["path_key"], root_keys)
             if not root:
                 continue
-            folder = _offer_folder(d["path"], os.path.relpath(d["path"], root).split(os.sep), root)
+            folder = _offer_folder(d["path"], os.path.relpath(d["path"], root).split(os.sep), root, d["offer"])
             groups.setdefault(d["offer"], {}).setdefault(folder, []).append(d)
 
         try:
