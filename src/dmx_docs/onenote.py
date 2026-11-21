@@ -3,19 +3,26 @@ and the reading of a section through OneNote desktop (COM) in its own pass of th
 
 OneNote writes into every file it opens, so it is only ever given a copy, in a temporary folder
 opened as a notebook (a folder can be closed again by script, a section file alone cannot).
+OneNote is driven through Windows PowerShell, not pywin32: with a 32-bit Office, whose type library
+is registered for 32-bit callers only, OneNote refuses pywin32's calls from a 64-bit Python
+("Library not registered") while PowerShell's COM binding works.
 The MCP server never reads a section: it serves the index.
 XML elements are matched by local name so that any schema year works.
 """
 from __future__ import annotations
 
+import base64
 import html
+import json
 import logging
 import multiprocessing
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -32,8 +39,11 @@ POLL_S = 2
 MAX_TIMEOUTS_IN_ROW = 5  # this many sections in a row not finished: OneNote is stuck, stop the pass
 NOT_INSTALLED = "OneNote desktop is not installed on this machine"
 SERVER_ONLY = "OneNote sections are read by the index run only"
+CALL_TIMEOUT_S = 120     # one PowerShell call to OneNote
+CLOSE_TIMEOUT_S = 60     # closing the notebooks left by a reading that was ended
+_HS_NOTEBOOKS = 2        # HierarchyScope.hsNotebooks
 _HS_PAGES = 4            # HierarchyScope.hsPages
-_SECTION_LOCKED = (0x8004201B, 0x8004201B - (1 << 32))  # hrSectionEncryptedAndLocked, unsigned and signed
+_SECTION_LOCKED = "8004201b"  # hrSectionEncryptedAndLocked
 
 _TAG = re.compile(r"<[^>]*>")
 _BR = re.compile(r"<br\s*/?>", re.IGNORECASE)
@@ -198,9 +208,133 @@ def _wait_for_pages(app, nb: str, name: str, load_timeout_s: float, poll_s: floa
         time.sleep(poll_s)
 
 
+# OneNote's session, in one PowerShell process: OneNote loads a notebook in the background only
+# while a client holds it, and quits when the last one lets go (measured: one powershell.exe per call
+# left the section unloaded after 120 s). Fixed text, never built from arguments: each request is a
+# line of base64 (ASCII) of a UTF-8 JSON object on stdin; the result or the error goes to a UTF-8 file
+# named in the request (stdout would depend on the code page); stdout only answers "ok" or "err".
+_PS_SESSION = r"""
+$ErrorActionPreference = 'Stop'
+$utf8 = New-Object System.Text.UTF8Encoding $false
+$on = New-Object -ComObject OneNote.Application
+while ($true) {
+    $line = [Console]::In.ReadLine()
+    if ([string]::IsNullOrEmpty($line)) { break }
+    $r = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line)) | ConvertFrom-Json
+    try {
+        $x = ''
+        switch ($r.op) {
+            'OpenHierarchy'  { $on.OpenHierarchy($r.a, '', [ref]$x, [int]$r.b) }
+            'GetHierarchy'   { $on.GetHierarchy($r.a, [int]$r.b, [ref]$x) }
+            'GetPageContent' { $on.GetPageContent($r.a, [ref]$x, [int]$r.b) }
+            'CloseNotebook'  { $on.CloseNotebook($r.a) }
+            default          { throw "unknown operation $($r.op)" }
+        }
+        [IO.File]::WriteAllText($r.out, [string]$x, $utf8)
+        [Console]::Out.WriteLine('ok')
+    } catch {
+        [IO.File]::WriteAllText($r.err, $_.Exception.Message, $utf8)
+        [Console]::Out.WriteLine('err')
+    }
+    [Console]::Out.Flush()
+}
+"""
+_PS_ENCODED = base64.b64encode(_PS_SESSION.encode("utf-16-le")).decode("ascii")
+
+
+def _read_utf8(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+class PowerShellOneNote:
+    """The four OneNote methods used here, served by one `powershell.exe` that holds OneNote until
+    `close()`. `work_dir` holds the result files of the calls (each removed after its call)."""
+
+    command = ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", _PS_ENCODED]
+
+    def __init__(self, work_dir: str, timeout_s: float = CALL_TIMEOUT_S):
+        self.work_dir, self.timeout_s = work_dir, timeout_s
+        self._proc = None
+        self._lines: queue.Queue = queue.Queue()
+
+    def _pump(self, stream) -> None:
+        for raw in stream:
+            self._lines.put(raw.decode("utf-8", "replace").strip())
+        self._lines.put(None)
+
+    def _call(self, op: str, a: str, b: int | str = "") -> str:
+        if self._proc is None:
+            self._proc = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                          stderr=subprocess.STDOUT,
+                                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            threading.Thread(target=self._pump, args=(self._proc.stdout,), daemon=True).start()
+        base = os.path.join(self.work_dir, uuid.uuid4().hex)
+        out, err = base + ".out", base + ".err"
+        request = json.dumps({"op": op, "a": a, "b": str(b), "out": out, "err": err}).encode("utf-8")
+        noise: list[str] = []  # anything else PowerShell printed (its errors)
+        try:
+            try:
+                self._proc.stdin.write(base64.b64encode(request) + b"\n")
+                self._proc.stdin.flush()
+            except OSError:
+                pass  # PowerShell has ended: its output says why
+            deadline = time.monotonic() + self.timeout_s
+            while True:
+                try:
+                    line = self._lines.get(timeout=max(0.0, deadline - time.monotonic()))
+                except queue.Empty:
+                    self.close(kill=True)
+                    raise TimeoutError(f"OneNote {op} did not answer in {self.timeout_s:.0f} s") from None
+                if line == "ok":
+                    return _read_utf8(out)
+                if line == "err":
+                    raise RuntimeError(f"OneNote {op}: {_read_utf8(err).strip()}")
+                if line is None:
+                    self.close()
+                    raise RuntimeError(f"OneNote {op}: PowerShell ended: " + " ".join(noise)[-400:])
+                if line:
+                    noise.append(line)
+        finally:
+            for f in (out, err):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
+    def close(self, kill: bool = False) -> None:
+        """End the PowerShell process, which lets go of OneNote (kill: it is stuck in a call)."""
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        try:
+            if kill:
+                proc.kill()
+            else:
+                proc.stdin.close()  # the end of the input ends its loop
+            proc.wait(timeout=30)
+        except Exception:  # noqa: BLE001
+            proc.kill()
+
+    def OpenHierarchy(self, path: str, parent: str, obj_id: str, create: int) -> str:  # parent: always ""
+        return self._call("OpenHierarchy", path, create)
+
+    def GetHierarchy(self, node: str, scope: int, xml: str) -> str:
+        return self._call("GetHierarchy", node, scope)
+
+    def GetPageContent(self, page_id: str, xml: str, info: int) -> str:
+        return self._call("GetPageContent", page_id, info)
+
+    def CloseNotebook(self, node: str) -> None:
+        self._call("CloseNotebook", node)
+
+
 def _protected(e: Exception) -> bool:
-    return ("password" in str(e).lower()
-            or bool(getattr(e, "args", None)) and e.args[0] in _SECTION_LOCKED)
+    text = str(e).lower()
+    return "password" in text or _SECTION_LOCKED in text
 
 
 def read_section(path: str, tmp_root: str, app=None, load_timeout_s: float = LOAD_TIMEOUT_S,
@@ -209,15 +343,12 @@ def read_section(path: str, tmp_root: str, app=None, load_timeout_s: float = LOA
     name = os.path.splitext(os.path.basename(path))[0]
     tmp = os.path.join(tmp_root, uuid.uuid4().hex)
     nb = None
+    own = app is None
     try:
         os.makedirs(tmp)
         shutil.copy2(fs_path(path), os.path.join(tmp, os.path.basename(path)))
-        if app is None:
-            import pythoncom
-            import win32com.client
-
-            pythoncom.CoInitialize()
-            app = win32com.client.Dispatch("OneNote.Application")
+        if own:
+            app = PowerShellOneNote(tmp_root)
         nb = app.OpenHierarchy(tmp, "", "", 0)  # the copy's folder, never `path`
         pages = _wait_for_pages(app, nb, name, load_timeout_s, poll_s)
         if not pages:
@@ -236,6 +367,8 @@ def read_section(path: str, tmp_root: str, app=None, load_timeout_s: float = LOA
                 app.CloseNotebook(nb)
             except Exception as e:  # noqa: BLE001
                 log.warning("could not close the OneNote notebook %s: %s", tmp, e)
+        if own and app is not None:
+            app.close()
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -259,10 +392,38 @@ def _read_in_process(path: str, tmp_root: str, limit_s: float) -> Extracted:
         else:
             for proc in list((getattr(pool, "_processes", None) or {}).values()):
                 try:
+                    if sys.platform == "win32":  # with its powershell.exe call, which would wait on OneNote
+                        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                                       capture_output=True, timeout=60)
                     proc.terminate()
                 except Exception:  # noqa: BLE001
                     pass
             pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _close_left_notebooks(tmp_root: str, app=None) -> int:
+    """Best effort: close the notebooks OneNote still has open from tmp_root (left by a reading that
+    was ended), so that they do not stay in the user's list of notebooks. Returns how many."""
+    root = os.path.normcase(os.path.abspath(tmp_root)).rstrip("\\/")
+    closed = 0
+    own = app is None
+    try:
+        if own:
+            app = PowerShellOneNote(tmp_root, timeout_s=CLOSE_TIMEOUT_S)
+        for e in ET.fromstring(app.GetHierarchy("", _HS_NOTEBOOKS, "")).iter():
+            nb_path = os.path.normcase(os.path.abspath(e.get("path") or "")) if _local(e) == "Notebook" else ""
+            if nb_path.startswith(root + os.sep):
+                try:
+                    app.CloseNotebook(e.get("ID", ""))
+                    closed += 1
+                except Exception as ex:  # noqa: BLE001
+                    log.warning("could not close the OneNote notebook %s: %s", nb_path, ex)
+    except Exception as ex:  # noqa: BLE001
+        log.warning("could not list the notebooks open in OneNote: %s", ex)
+    finally:
+        if own and app is not None:
+            app.close()
+    return closed
 
 
 def _end_automation_onenote() -> None:
@@ -279,9 +440,17 @@ def run_pass(cfg, items: list[tuple[str, int, float, bool]], save, progress, che
         return
     tmp_root = str(cfg.world_dir / "onenote-tmp")
     os.makedirs(tmp_root, exist_ok=True)
-    for entry in os.scandir(tmp_root):  # left by a run that was killed
+    left_over = list(os.scandir(tmp_root))  # left by a run that was killed
+    if left_over and installed():
+        _close_left_notebooks(tmp_root)  # OneNote keeps their files open
+    for entry in left_over:
         if entry.is_dir(follow_symlinks=False):
             shutil.rmtree(entry.path, ignore_errors=True)
+        else:
+            try:
+                os.remove(entry.path)
+            except OSError:
+                pass
     if not installed():
         for path, size, mtime, existed in items:
             save(path, size, mtime, Extracted(status="skipped", error=NOT_INSTALLED), existed)
@@ -302,6 +471,7 @@ def run_pass(cfg, items: list[tuple[str, int, float, bool]], save, progress, che
                 save(path, size, mtime, Extracted(
                     status="error", error=f"timeout: OneNote did not finish in {limit:.0f} s"), existed)
                 left = len(items) - i - 1
+                _close_left_notebooks(tmp_root)  # the ended reading could not close its notebook
                 if was_running:
                     progress(f"WARNING: OneNote did not finish {path}. OneNote was already open (the user's "
                              f"own), so it is left alone; the {left} remaining sections are left for the "

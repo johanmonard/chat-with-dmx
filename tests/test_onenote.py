@@ -75,7 +75,9 @@ def test_level_three_title_and_malformed_xml():
         onenote.page_text("<one:Page", "T", "", "")
 
 
+import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -145,6 +147,7 @@ def pass_env(tmp_path, make_cfg, monkeypatch):
     monkeypatch.setattr(onenote, "installed", lambda: True)
     monkeypatch.setattr(onenote, "running", lambda: False)
     monkeypatch.setattr(onenote, "kill_office_automation", lambda *names: killed.append(names))
+    monkeypatch.setattr(onenote, "_close_left_notebooks", lambda tmp_root, app=None: 0)  # no real OneNote
     cfg = make_cfg(tmp_path / "root", world="engineering", profile="engineering")
     items = [(f"\\\\srv\\share\\S{i}.one", 10, 1.0, False) for i in range(8)]
     save = lambda path, size, mtime, result, existed: saved.append((path, result.status, result.error))
@@ -228,3 +231,122 @@ def test_real_section(tmp_path):
     before = (src.stat().st_mtime, src.stat().st_size)
     r = onenote.read_section(str(src), str(tmp_path / "t"))
     assert r.status in ("ok", "empty") and (src.stat().st_mtime, src.stat().st_size) == before
+
+
+def test_pass_closes_the_notebook_of_a_reading_that_timed_out(pass_env, monkeypatch):
+    cfg, items, save, saved, killed = pass_env
+    closed = []
+    monkeypatch.setattr(onenote, "running", lambda: True)
+    monkeypatch.setattr(onenote, "_close_left_notebooks", lambda tmp_root, app=None: closed.append(tmp_root))
+    def read(path, tmp_root, limit):
+        raise TimeoutError()
+    run(cfg, items, save, read)
+    assert closed == [str(cfg.world_dir / "onenote-tmp")] and killed == []
+
+
+class FakeNotebooks:
+    def __init__(self, listing):
+        self.listing, self.closed = listing, []
+    def GetHierarchy(self, node, scope, xml):
+        assert (node, scope) == ("", 2)
+        return self.listing
+    def CloseNotebook(self, node):
+        self.closed.append(node)
+
+
+def test_close_left_notebooks_closes_only_the_temporary_ones(tmp_path):
+    tmp_root = tmp_path / "onenote-tmp"
+    listing = (f'<one:Notebooks {NS}>'
+               f'<one:Notebook name="Mine" ID="user" path="{tmp_path / "Documents" / "Mine"}"/>'
+               f'<one:Notebook name="x" ID="left" path="{tmp_root / "0123abcd"}"/>'
+               f'<one:Notebook name="y" ID="near" path="{tmp_path / "onenote-tmp2" / "z"}"/>'
+               '</one:Notebooks>')
+    app = FakeNotebooks(listing)
+    assert onenote._close_left_notebooks(str(tmp_root), app=app) == 1 and app.closed == ["left"]
+
+
+# Speaks the PowerShell session's protocol: base64 JSON requests on stdin, results in files, ok/err.
+FAKE_SESSION = '''
+import base64, json, sys, time
+print("#< CLIXML noise", flush=True)
+for line in sys.stdin:
+    if not line.strip():
+        break
+    r = json.loads(base64.b64decode(line).decode("utf-8"))
+    if r["op"] == "GetHierarchy":
+        with open(r["out"], "w", encoding="utf-8") as f:
+            f.write(json.dumps([r["a"], r["b"], "é"]))
+        print("ok", flush=True)
+    elif r["op"] == "GetPageContent":
+        time.sleep(30)
+    elif r["op"] == "CloseNotebook":
+        sys.exit("PowerShell broke")
+    else:
+        with open(r["err"], "w", encoding="utf-8") as f:
+            f.write("Exception from HRESULT: 0x8004201B")
+        print("err", flush=True)
+'''
+
+
+@pytest.fixture
+def fake_session(tmp_path, monkeypatch):
+    script = tmp_path / "bin" / "fake_session.py"
+    script.parent.mkdir()
+    script.write_text(FAKE_SESSION, encoding="utf-8")
+    monkeypatch.setattr(onenote.PowerShellOneNote, "command", [sys.executable, str(script)])
+    work = tmp_path / "work"
+    work.mkdir()
+    return work
+
+
+def test_powershell_session_passes_arguments_as_data(fake_session):
+    tricky = str(fake_session / "a'; Remove-Item x; '$(b) é")
+    app = onenote.PowerShellOneNote(str(fake_session))
+    try:
+        assert json.loads(app.GetHierarchy(tricky, 4, "")) == [tricky, "4", "é"]
+        assert json.loads(app.GetHierarchy("", 2, "")) == ["", "2", "é"]     # same process, still alive
+        with pytest.raises(RuntimeError, match="0x8004201B"):
+            app.OpenHierarchy("x", "", "", 0)
+    finally:
+        app.close()
+    assert not any(tricky in c for c in onenote.PowerShellOneNote.command)
+    assert os.listdir(fake_session) == []                                    # result files are removed
+    assert onenote._protected(RuntimeError("OneNote OpenHierarchy: Exception from HRESULT: 0x8004201B"))
+
+
+def test_powershell_session_timeout_and_end(fake_session):
+    app = onenote.PowerShellOneNote(str(fake_session), timeout_s=1)
+    with pytest.raises(TimeoutError):
+        app.GetPageContent("p1", "", 0)
+    assert app._proc is None                                                 # the stuck process is ended
+    with pytest.raises(RuntimeError, match="PowerShell ended"):
+        app.CloseNotebook("nb1")
+    app.close()
+
+
+def test_a_section_the_pass_does_not_reach_stays_in_the_index(tmp_path, make_cfg, monkeypatch):   # R8
+    from dmx_docs.indexer import run_index
+    from dmx_docs.tools import DocTools
+    first = section_file(tmp_path)
+    second = first.parent / "copie" / "Pompes.one"               # same section name: FakeOneNote lists it
+    second.parent.mkdir()
+    second.write_bytes(b"other section")
+    monkeypatch.setattr(onenote, "installed", lambda: True)
+    monkeypatch.setattr(onenote, "running", lambda: True)
+    monkeypatch.setattr(onenote, "_close_left_notebooks", lambda tmp_root, app=None: 0)
+    monkeypatch.setattr(onenote, "_read_in_process", lambda path, tmp_root, limit: onenote.read_section(
+        path, tmp_root, app=FakeOneNote(late=0), poll_s=0))
+    cfg = make_cfg(first.parent, extensions=[".one"])
+    run_index(cfg, progress=lambda *a, **k: None)
+    first.write_bytes(b"changed 1")
+    second.write_bytes(b"changed 2")
+    reached = []
+    def stuck(path, tmp_root, limit):
+        reached.append(path)
+        raise TimeoutError()
+    monkeypatch.setattr(onenote, "_read_in_process", stuck)
+    run_index(cfg, progress=lambda *a, **k: None)          # the user's OneNote is open: the pass stops
+    assert len(reached) == 1
+    not_reached = second if reached[0] == str(first) else first
+    text = DocTools(cfg).read_document(str(not_reached))
+    assert "Le débit d'air s'additionne" in text and "changed since it was indexed on" in text
