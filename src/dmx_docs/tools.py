@@ -19,7 +19,7 @@ from .extract import PICTURE_EXTS, docx_picture_names, extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
 
 TYPE_LABEL = {".pdf": "PDF", ".docx": "Word", ".doc": "Word 97-2003",
-              ".pptx": "PowerPoint", ".ppt": "PowerPoint 97-2003", ".md": "Markdown"}
+              ".pptx": "PowerPoint", ".ppt": "PowerPoint 97-2003", ".md": "Markdown", ".txt": "Text"}
 TYPE_LABEL.update(dict.fromkeys(PICTURE_EXTS, "Picture"))
 SLIDE_EXTS = (".pptx", ".ppt")
 
@@ -291,7 +291,7 @@ def _size(n: int | None) -> str:
 def _page_label(ext: str) -> str:
     if ext in SLIDE_EXTS:
         return "slide"
-    return "page" if ext in (".pdf", ".md") or ext in PICTURE_EXTS else "page (approx.)"
+    return "page" if ext in (".pdf", ".md", ".txt") or ext in PICTURE_EXTS else "page (approx.)"
 
 
 def _units(ext: str) -> str:

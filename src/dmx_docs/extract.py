@@ -90,6 +90,8 @@ def extract_file(path: str, options: dict | None = None) -> Extracted:
             return extract_msg(fs)
         if ext == ".md":
             return extract_md(fs)
+        if ext == ".txt":
+            return extract_txt(fs)
         if ext in PICTURE_EXTS:
             return extract_picture_file(path)
         return Extracted(status="skipped", error=f"unsupported extension {ext}")
@@ -811,3 +813,32 @@ def extract_md(path: str) -> Extracted:
     if not body:
         return Extracted(status="empty", n_pages=1, title=title)
     return Extracted(status="ok", pages=[(1, body)], n_pages=1, title=title)
+
+
+# --------------------------------------------------------------------- TXT
+# Plain text files are read up to this many bytes; the rest is cut off.
+TXT_MAX_BYTES = 2 * 1024 * 1024
+
+
+def extract_txt(path: str) -> Extracted:
+    with open(path, "rb") as f:
+        raw = f.read(TXT_MAX_BYTES + 1)
+    cut = len(raw) > TXT_MAX_BYTES
+    if cut:
+        raw = raw[:TXT_MAX_BYTES]
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):  # UTF-16 with byte order mark
+        text = raw.decode("utf-16", errors="replace")
+    else:
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError as e:
+            if cut and e.start >= len(raw) - 3:  # the cut split the last UTF-8 character
+                text = raw[:e.start].decode("utf-8-sig")
+            else:
+                text = raw.decode("cp1252", errors="replace")
+    body = clean_text(text)
+    if cut:
+        body = (body + "\n\n[fichier coupé après 2 Mo]").strip()
+    if not body:
+        return Extracted(status="empty", n_pages=1)
+    return Extracted(status="ok", pages=[(1, body)], n_pages=1)
