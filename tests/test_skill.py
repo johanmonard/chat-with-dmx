@@ -75,6 +75,7 @@ def test_skill_frontmatter_and_files():
     assert 100 < len(meta["description"]) <= 1024
     for name in ("dmx-projects", "dmx-marketing", "dmx-documentation", "dmx-offers", "dmx-engineering", "dmx-docs"):
         assert name in text, name
+        assert name in meta["description"], f"the description names {name}"
     for ref in WORLD_FILES.values():
         assert (SKILL / ref).is_file() and ref in text, ref
 
