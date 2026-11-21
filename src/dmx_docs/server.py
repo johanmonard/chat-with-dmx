@@ -112,6 +112,33 @@ Hits marked (OCR) come from scanned pages read by OCR: the text can contain reco
 check codes, numbers and names with view_page before quoting them.
 """
 
+ENGINEERING_INSTRUCTIONS = """\
+Read-only access to the engineering documents of Demaurex (robotic packaging lines): mechanical,
+electrical and software design files, schematics, drawings, parts lists, Excel workbooks and
+OneNote notebooks; mostly French, also English and German.
+Each search hit shows its group (Mechanical, Electrical, Software) and its section = the first
+folder below the group folder (e.g. "224 - Pneumatique"). Excel hits are sheets; OneNote hits are
+pages, with their title and dates. Neither can be shown with `view_page`: use `open_document`.
+
+""" + WORLD_MAP_LINE + "\n\n" + """\
+Never answer from the first search alone. Follow this loop for every question:
+
+1. REFORMULATE the question into 2-4 search queries: French and English technical terms, part and
+   module names, exact codes in "double quotes". Filter with category= (the group) and section=
+   when the discipline or the topic is known.
+2. RETRIEVE with `search` (hybrid by default; mode="keyword" for names and codes); browse with
+   `list_folder`.
+3. EVALUATE each hit: does the excerpt answer the question or only share words? Read the best
+   documents with `read_document` / `find_in_document`; look at pictures with `view_page` (PDF
+   pages).
+4. RETRY with other words or another language if coverage is thin, at most 3 rounds.
+5. SYNTHESIZE in the user's language, only from what you read, citing full path + page (sheet for
+   Excel, page title for OneNote). State clearly what was not found.
+
+Hits marked (OCR) come from scanned pages read by OCR: the text can contain recognition errors -
+check codes, numbers and names with view_page before quoting them.
+"""
+
 GENERIC_INSTRUCTIONS = """\
 Read-only access to the company's "{title}" documents (Demaurex: robotic packaging lines).
 """ + WORLD_MAP_LINE + "\n" + """\
@@ -235,6 +262,8 @@ def instructions_for(cfg: Config) -> str:
         base = DOCUMENTATION_INSTRUCTIONS
     elif cfg.profile == "offers":
         base = OFFERS_INSTRUCTIONS
+    elif cfg.profile == "engineering":
+        base = ENGINEERING_INSTRUCTIONS
     else:
         base = GENERIC_INSTRUCTIONS.format(title=cfg.world_title or cfg.world)
     return base + "\n" + PICTURES_NOTE
@@ -500,6 +529,33 @@ def build_server(cfg: Config) -> MCPServer:
         return tools.search(query, folder=folder, file_type=file_type, modified_after=modified_after,
                             limit=limit, mode=mode, category=category, expand=expand, pictures=pictures)
 
+    def engineering_search(query: str, folder: str | None = None, file_type: str | None = None,
+                           modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
+                           category: str | None = None, section: str | None = None,
+                           expand: bool | None = None, pictures: bool = False) -> str:
+        """Search the engineering documents by meaning and keywords. Returns excerpts with file path
+        and page (sheet for Excel, page for OneNote), its group and section, how each one matched
+        (keyword, semantic or both) and its meaning similarity to the query (strong >= 0.86, medium
+        0.83-0.86, weak < 0.83 = often off topic). These are hints: judge by reading.
+
+        Args:
+            query: What to look for (any language; documents are mostly French).
+                Use "double quotes" for exact phrases or names, and word* for prefix matches.
+            folder: Optional folder path to restrict the search to (includes subfolders).
+            file_type: Optional file type, e.g. 'pdf', 'docx', 'xlsx', 'pptx'.
+            modified_after: Optional date (YYYY, YYYY-MM or YYYY-MM-DD) - only files modified since then.
+            limit: Number of results (1-30, default 10). At most 3 excerpts per document.
+            mode: 'hybrid' (default), 'keyword' (exact words, codes, names) or 'semantic' (by meaning).
+            category: Optional group(s), comma-separated: Mechanical, Electrical, Software.
+            section: Optional section(s): the first folder below the group folder, e.g. "224 - Pneumatique".
+            expand: Widen the keyword part with the company thesaurus. Default: as configured.
+            pictures: True to search only the descriptions of pictures (photos, schemas, screenshots,
+                picture pages), e.g. to find a picture to show or export.
+        """
+        return tools.search(query, folder=folder, file_type=file_type, modified_after=modified_after,
+                            limit=limit, mode=mode, category=category, section=section, expand=expand,
+                            pictures=pictures)
+
     def plain_search(query: str, folder: str | None = None, file_type: str | None = None,
                      modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
                      expand: bool | None = None, pictures: bool = False) -> str:
@@ -763,6 +819,8 @@ def build_server(cfg: Config) -> MCPServer:
         mcp.tool(**kw)(offer_stats)
         mcp.tool(**kw)(offer_health)
         mcp.tool()(offer_verify)  # writes into the shared folder: not read-only
+    elif cfg.profile == "engineering":
+        mcp.tool(name="search", **kw)(engineering_search)
     else:
         mcp.tool(name="search", **kw)(plain_search)
 

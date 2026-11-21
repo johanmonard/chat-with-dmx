@@ -193,6 +193,11 @@ def live_overview(con, cfg) -> Overview:
         if cfg.profile == "documentation":
             head.append("By language: " + _counts(
                 con, "SELECT language, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC"))
+        if cfg.profile == "engineering":
+            head.append("By group: " + _counts(
+                con, "SELECT category, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC"))
+            head.append("By section: " + _counts(
+                con, "SELECT section, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC"))
         tree_title = "Folders (documents, subfolders included; depth 3):"
         tree = folder_tree([r[:2] for r in rows], cfg.roots,
                            min_docs=1 if len(rows) < SMALL_WORLD else MIN_DOCS)
