@@ -259,19 +259,23 @@ class PowerShellOneNote:
     def __init__(self, work_dir: str, timeout_s: float = CALL_TIMEOUT_S):
         self.work_dir, self.timeout_s = work_dir, timeout_s
         self._proc = None
-        self._lines: queue.Queue = queue.Queue()
+        self._lines: queue.Queue | None = None  # output of the current process only
 
-    def _pump(self, stream) -> None:
+    @staticmethod
+    def _pump(stream, lines: queue.Queue) -> None:
         for raw in stream:
-            self._lines.put(raw.decode("utf-8", "replace").strip())
-        self._lines.put(None)
+            lines.put(raw.decode("utf-8", "replace").strip())
+        lines.put(None)
 
     def _call(self, op: str, a: str, b: int | str = "") -> str:
         if self._proc is None:
             self._proc = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                           stderr=subprocess.STDOUT,
                                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            threading.Thread(target=self._pump, args=(self._proc.stdout,), daemon=True).start()
+            # A new queue per process: a killed process's last lines and end marker must not be read
+            # as the answers of the next one.
+            self._lines = queue.Queue()
+            threading.Thread(target=self._pump, args=(self._proc.stdout, self._lines), daemon=True).start()
         base = os.path.join(self.work_dir, uuid.uuid4().hex)
         out, err = base + ".out", base + ".err"
         request = json.dumps({"op": op, "a": a, "b": str(b), "out": out, "err": err}).encode("utf-8")
@@ -344,6 +348,7 @@ def read_section(path: str, tmp_root: str, app=None, load_timeout_s: float = LOA
     tmp = os.path.join(tmp_root, uuid.uuid4().hex)
     nb = None
     own = app is None
+    stuck = False
     try:
         os.makedirs(tmp)
         shutil.copy2(fs_path(path), os.path.join(tmp, os.path.basename(path)))
@@ -357,12 +362,17 @@ def read_section(path: str, tmp_root: str, app=None, load_timeout_s: float = LOA
         for n, (page, title) in enumerate(zip(pages, page_titles(pages)), 1):
             out.append((n, page_text(app.GetPageContent(page.id, "", 0), title, page.created, page.modified)))
         return Extracted(status="ok", pages=out, n_pages=len(out), title=name)
+    except TimeoutError:
+        # OneNote is stuck: a timeout of the section for run_pass (counted, OneNote dealt with there),
+        # not an error of this section. Closing the notebook would wait on the same stuck OneNote.
+        stuck = True
+        raise
     except Exception as e:  # noqa: BLE001
         if _protected(e):
             return Extracted(status="error", error="OneNote section protected by a password")
         return Extracted(status="error", error=f"{type(e).__name__}: {e}"[:500])
     finally:
-        if nb is not None:
+        if nb is not None and not stuck:
             try:
                 app.CloseNotebook(nb)
             except Exception as e:  # noqa: BLE001
@@ -381,9 +391,11 @@ def _read_in_process(path: str, tmp_root: str, limit_s: float) -> Extracted:
         while not fut.done():
             wait([fut], timeout=1)  # short steps: Ctrl+C stays responsive
             if not fut.done() and time.monotonic() > deadline:
-                raise TimeoutError(f"OneNote did not finish {path} in {limit_s:.0f} s")
+                raise TimeoutError(f"OneNote did not finish in {limit_s:.0f} s")
         try:
             return fut.result()
+        except TimeoutError:  # a OneNote call did not answer (read_section re-raises it)
+            raise
         except Exception as e:  # noqa: BLE001  (the worker process died)
             return Extracted(status="error", error=f"OneNote reading crashed: {type(e).__name__}")
     finally:
@@ -466,10 +478,10 @@ def run_pass(cfg, items: list[tuple[str, int, float, bool]], save, progress, che
             limit = section_limit_s(size)
             try:
                 result = read(path, tmp_root, limit)
-            except TimeoutError:
+            except TimeoutError as e:  # the section's limit, or one OneNote call that did not answer
                 timeouts += 1
                 save(path, size, mtime, Extracted(
-                    status="error", error=f"timeout: OneNote did not finish in {limit:.0f} s"), existed)
+                    status="error", error=f"timeout: {str(e) or f'OneNote did not finish in {limit:.0f} s'}"), existed)
                 left = len(items) - i - 1
                 _close_left_notebooks(tmp_root)  # the ended reading could not close its notebook
                 if was_running:

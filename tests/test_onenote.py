@@ -230,7 +230,7 @@ def test_real_section(tmp_path):
     src = Path(os.environ["DMX_TEST_ONE_FILE"])
     before = (src.stat().st_mtime, src.stat().st_size)
     r = onenote.read_section(str(src), str(tmp_path / "t"))
-    assert r.status in ("ok", "empty") and (src.stat().st_mtime, src.stat().st_size) == before
+    assert r.status == "ok" and r.n_pages > 0 and (src.stat().st_mtime, src.stat().st_size) == before
 
 
 def test_pass_closes_the_notebook_of_a_reading_that_timed_out(pass_env, monkeypatch):
@@ -319,9 +319,42 @@ def test_powershell_session_timeout_and_end(fake_session):
     with pytest.raises(TimeoutError):
         app.GetPageContent("p1", "", 0)
     assert app._proc is None                                                 # the stuck process is ended
+    assert json.loads(app.GetHierarchy("nb1", 4, "")) == ["nb1", "4", "é"]   # a new, healthy process answers
     with pytest.raises(RuntimeError, match="PowerShell ended"):
         app.CloseNotebook("nb1")
     app.close()
+
+
+class StuckOneNote(FakeOneNote):
+    def GetPageContent(self, page_id, xml, info):
+        raise TimeoutError("OneNote GetPageContent did not answer in 120 s")
+
+
+def test_a_stuck_call_is_a_timeout_of_the_section(tmp_path):
+    app, tmp_root = StuckOneNote(), tmp_path / "t"
+    with pytest.raises(TimeoutError):
+        onenote.read_section(str(section_file(tmp_path)), str(tmp_root), app=app, poll_s=0)
+    assert app.closed == [] and list(tmp_root.iterdir()) == []   # no close on a stuck OneNote; copy removed
+
+
+@pytest.mark.parametrize("was_running", [False, True])
+def test_pass_handles_a_stuck_call_as_a_timeout(pass_env, monkeypatch, tmp_path, was_running):
+    cfg, _, save, saved, killed = pass_env
+    closes = []
+    monkeypatch.setattr(onenote, "running", lambda: was_running)
+    monkeypatch.setattr(onenote, "_close_left_notebooks", lambda tmp_root, app=None: closes.append(tmp_root))
+    items = []
+    for i in range(8):
+        src = tmp_path / f"share{i}" / "Pompes.one"
+        src.parent.mkdir()
+        src.write_bytes(b"section bytes")
+        items.append((str(src), 13, 1.0, False))
+    run(cfg, items, save, read=lambda path, tmp_root, limit: onenote.read_section(
+        path, tmp_root, app=StuckOneNote(), poll_s=0))
+    n = 1 if was_running else onenote.MAX_TIMEOUTS_IN_ROW               # then the pass stops
+    assert [s[1:] for s in saved] == [("error", "timeout: OneNote GetPageContent did not answer in 120 s")] * n
+    assert len(closes) == n
+    assert killed == ([] if was_running else [("ONENOTE.EXE",)] * (n + 1))
 
 
 def test_a_section_the_pass_does_not_reach_stays_in_the_index(tmp_path, make_cfg, monkeypatch):   # R8
