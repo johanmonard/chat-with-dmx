@@ -355,7 +355,14 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_st
         for path, size, mtime, existed in crashed:
             progress(f"  retrying alone: {path}")
             writer.save(path, size, mtime, _extract_alone(path, options, check_stop), existed)
-        onenote.run_pass(cfg, held, writer.save, progress, check_stop)
+        try:
+            onenote.run_pass(cfg, held, writer.save, progress, check_stop)
+        except Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001  the run goes on: the sections not saved are read next time
+            log.exception("OneNote pass failed")
+            progress(f"WARNING: the OneNote pass stopped ({type(e).__name__}: {e}); the sections it did not "
+                     "save are left for the next run.")
         if ".ppt" in cfg.extensions:
             _kill_automation_office_after_run()  # the hidden Word/PowerPoint started for conversions
     except (KeyboardInterrupt, Cancelled):

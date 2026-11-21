@@ -37,6 +37,7 @@ log = logging.getLogger("dmx_docs.onenote")
 LOAD_TIMEOUT_S = 120     # OneNote loads a section in the background: wait at most this long for its pages
 POLL_S = 2
 MAX_TIMEOUTS_IN_ROW = 5  # this many sections in a row not finished: OneNote is stuck, stop the pass
+EMPTY_MAX_BYTES = 64 * 1024  # a section file without a page listed at the load limit: larger -> error
 NOT_INSTALLED = "OneNote desktop is not installed on this machine"
 SERVER_ONLY = "OneNote sections are read by the index run only"
 CALL_TIMEOUT_S = 120     # one PowerShell call to OneNote
@@ -63,14 +64,27 @@ def _local(el: ET.Element) -> str:
     return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
 
 
-def section_pages(hierarchy_xml: str, section_name: str | None = None) -> list[PageRef]:
-    root = ET.fromstring(hierarchy_xml)
+def _section(root: ET.Element, section_name: str | None) -> ET.Element | None:
+    """The section named section_name (the first one for None); the only section when none has that
+    name (a section renamed inside OneNote keeps its file name)."""
     sections = [e for e in root.iter() if _local(e) == "Section"]
-    chosen = None
     for s in sections:
         if section_name is None or s.get("name") == section_name:
-            chosen = s
-            break
+            return s
+    return sections[0] if len(sections) == 1 else None
+
+
+def _protected_section(section: ET.Element | None) -> bool:
+    """A section behind a password that is not unlocked: OneNote lists it without its pages."""
+    return section is not None and (section.get("locked") == "true" or section.get("encrypted") == "true"
+                                     and not any(_local(e) == "Page" for e in section.iter()))
+
+
+def section_pages(hierarchy_xml: str, section_name: str | None = None) -> list[PageRef]:
+    return _pages_of(_section(ET.fromstring(hierarchy_xml), section_name))
+
+
+def _pages_of(chosen: ET.Element | None) -> list[PageRef]:
     if chosen is None:
         return []
     pages = []
@@ -181,12 +195,17 @@ def installed() -> bool:
 
 
 def running() -> bool:
-    """A OneNote process exists (the user's own, or one started for automation)."""
+    """A OneNote process exists (the user's own, or one started for automation). True when it
+    cannot be told: then the pass never ends OneNote."""
     if sys.platform != "win32":
         return False
-    out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq ONENOTE.EXE", "/NH"],
-                         capture_output=True, text=True, timeout=60).stdout
-    return "onenote.exe" in out.lower()
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq ONENOTE.EXE", "/NH"],
+                             capture_output=True, text=True, timeout=60).stdout
+    except Exception as e:  # noqa: BLE001
+        log.warning("cannot tell whether OneNote is running (%s): taken as running", e)
+        return True
+    return "onenote.exe" in (out or "").lower()
 
 
 def section_limit_s(size_bytes: int) -> float:
@@ -194,13 +213,21 @@ def section_limit_s(size_bytes: int) -> float:
     return 300 + 60 * size_bytes / (50 * 1024 * 1024)
 
 
+class SectionProtected(Exception):
+    """The section is behind a password."""
+
+
 def _wait_for_pages(app, nb: str, name: str, load_timeout_s: float, poll_s: float) -> list[PageRef]:
     """Pages of the section once OneNote lists the same ones twice in a row; whatever it lists at
-    the time limit (a section still without a page is empty)."""
+    the time limit. SectionProtected as soon as OneNote lists the section as locked."""
     deadline = time.monotonic() + load_timeout_s
     last = None
     while True:
-        pages = section_pages(app.GetHierarchy(nb, _HS_PAGES, ""), name)
+        root = ET.fromstring(app.GetHierarchy(nb, _HS_PAGES, ""))
+        section = _section(root, name)
+        if _protected_section(section):
+            raise SectionProtected(name)
+        pages = _pages_of(section)
         ids = [p.id for p in pages]
         if (ids and ids == last) or time.monotonic() >= deadline:
             return pages
@@ -351,12 +378,16 @@ def read_section(path: str, tmp_root: str, app=None, load_timeout_s: float = LOA
     stuck = False
     try:
         os.makedirs(tmp)
-        shutil.copy2(fs_path(path), os.path.join(tmp, os.path.basename(path)))
+        copy = os.path.join(tmp, os.path.basename(path))
+        shutil.copy2(fs_path(path), copy)
         if own:
             app = PowerShellOneNote(tmp_root)
         nb = app.OpenHierarchy(tmp, "", "", 0)  # the copy's folder, never `path`
         pages = _wait_for_pages(app, nb, name, load_timeout_s, poll_s)
         if not pages:
+            if os.path.getsize(copy) > EMPTY_MAX_BYTES:  # too big to be empty: OneNote was too slow
+                return Extracted(status="error", title=name,
+                                 error=f"no page listed after {load_timeout_s:.0f} s")
             return Extracted(status="empty", n_pages=0, title=name)
         out = []
         for n, (page, title) in enumerate(zip(pages, page_titles(pages)), 1):
@@ -368,7 +399,7 @@ def read_section(path: str, tmp_root: str, app=None, load_timeout_s: float = LOA
         stuck = True
         raise
     except Exception as e:  # noqa: BLE001
-        if _protected(e):
+        if isinstance(e, SectionProtected) or _protected(e):
             return Extracted(status="error", error="OneNote section protected by a password")
         return Extracted(status="error", error=f"{type(e).__name__}: {e}"[:500])
     finally:
@@ -445,17 +476,13 @@ def _end_automation_onenote() -> None:
         log.warning("could not stop OneNote: %s", e)
 
 
-def run_pass(cfg, items: list[tuple[str, int, float, bool]], save, progress, check_stop, read=None) -> None:
-    """Read the sections `items` ((path, size, mtime, existed)) one at a time and save each result.
-    Sections left when the pass stops early are not saved: the next run takes them again."""
-    if not items:
+def _sweep(tmp_root: str) -> None:
+    """Remove everything in tmp_root: copies of readings that were ended, result files of sessions."""
+    try:
+        entries = list(os.scandir(tmp_root))
+    except OSError:
         return
-    tmp_root = str(cfg.world_dir / "onenote-tmp")
-    os.makedirs(tmp_root, exist_ok=True)
-    left_over = list(os.scandir(tmp_root))  # left by a run that was killed
-    if left_over and installed():
-        _close_left_notebooks(tmp_root)  # OneNote keeps their files open
-    for entry in left_over:
+    for entry in entries:
         if entry.is_dir(follow_symlinks=False):
             shutil.rmtree(entry.path, ignore_errors=True)
         else:
@@ -463,13 +490,40 @@ def run_pass(cfg, items: list[tuple[str, int, float, bool]], save, progress, che
                 os.remove(entry.path)
             except OSError:
                 pass
-    if not installed():
+
+
+def _clear_leftovers(tmp_root: str, onenote_running: bool) -> None:
+    """Remove what ended readings left in tmp_root and close their notebooks in OneNote. A running
+    OneNote may hold the files: close first. Otherwise delete first, so that the OneNote started for
+    the close cannot load those sections again (and get stuck on them again)."""
+    if onenote_running:
+        _close_left_notebooks(tmp_root)
+        _sweep(tmp_root)
+    else:
+        _sweep(tmp_root)
+        _close_left_notebooks(tmp_root)
+
+
+def run_pass(cfg, items: list[tuple[str, int, float, bool]], save, progress, check_stop, read=None) -> None:
+    """Read the sections `items` ((path, size, mtime, existed)) one at a time and save each result.
+    Sections left when the pass stops early are not saved: the next run takes them again."""
+    if not items:
+        return
+    tmp_root = str(cfg.world_dir / "onenote-tmp")
+    os.makedirs(tmp_root, exist_ok=True)
+    was_running = running()  # before anything here starts a OneNote of its own
+    has_onenote = installed()
+    if os.listdir(tmp_root):  # left by a run that was killed
+        if has_onenote:
+            _clear_leftovers(tmp_root, was_running)
+        else:
+            _sweep(tmp_root)
+    if not has_onenote:
         for path, size, mtime, existed in items:
             save(path, size, mtime, Extracted(status="skipped", error=NOT_INSTALLED), existed)
         progress(f"  OneNote: {len(items)} sections skipped ({NOT_INSTALLED})")
         return
     read = read or _read_in_process  # looked up at call time
-    was_running = running()
     timeouts = 0
     try:
         for i, (path, size, mtime, existed) in enumerate(items):
@@ -483,13 +537,14 @@ def run_pass(cfg, items: list[tuple[str, int, float, bool]], save, progress, che
                 save(path, size, mtime, Extracted(
                     status="error", error=f"timeout: {str(e) or f'OneNote did not finish in {limit:.0f} s'}"), existed)
                 left = len(items) - i - 1
-                _close_left_notebooks(tmp_root)  # the ended reading could not close its notebook
                 if was_running:
+                    _close_left_notebooks(tmp_root)  # the ended reading could not close its notebook
                     progress(f"WARNING: OneNote did not finish {path}. OneNote was already open (the user's "
                              f"own), so it is left alone; the {left} remaining sections are left for the "
                              "next run.")
                     return
-                _end_automation_onenote()
+                _end_automation_onenote()  # first: the stuck OneNote would not answer the close
+                _clear_leftovers(tmp_root, False)
                 if timeouts >= MAX_TIMEOUTS_IN_ROW:
                     progress(f"WARNING: {timeouts} OneNote sections in a row did not finish; the {left} "
                              "remaining sections are left for the next run.")
@@ -500,3 +555,4 @@ def run_pass(cfg, items: list[tuple[str, int, float, bool]], save, progress, che
     finally:
         if not was_running:
             _end_automation_onenote()
+        _sweep(tmp_root)

@@ -133,3 +133,29 @@ def test_excel_in_a_world(tmp_path, make_cfg):
     assert "Excel=1" in tools.index_status()
     with pytest.raises(ValueError, match="open_document"):
         tools.view_page(path)
+
+
+def test_raw_row_cap(monkeypatch):
+    monkeypatch.setattr(excel, "MAX_RAW_ROWS", 10)
+    rows = ["h | i"] + [""] * 20 + ["late"]
+    text, cut = excel._sheet_text("S", False, iter(rows), 5000, 10 ** 9)
+    assert text == "Feuille : S\nh | i\n[feuille coupée après 10 lignes lues]" and not cut
+    assert excel._sheet_text("S", False, iter([""] * 20 + ["late"]), 5000, 10 ** 9) == ("", False)
+
+
+def test_xls_sheets_after_the_workbook_cut_are_counted_not_loaded(monkeypatch):
+    import xlrd
+    loaded = []
+    real = xlrd.book.Book.sheet_by_index
+    def spy(self, i):
+        loaded.append(i)
+        return real(self, i)
+    monkeypatch.setattr(xlrd.book.Book, "sheet_by_index", spy)
+    monkeypatch.setattr(excel, "MAX_WORKBOOK_CHARS", 10)
+    r = extract_file(str(FIXTURES / "small.xls"))
+    assert r.n_pages == 2 and loaded == [0]
+
+
+def test_excel_units_are_sheets():
+    from dmx_docs.tools import _units
+    assert _units(".xlsx") == "sheets" and _units(".xls") == "sheets" and _units(".pdf") == "pages"

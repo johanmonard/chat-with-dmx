@@ -383,3 +383,110 @@ def test_a_section_the_pass_does_not_reach_stays_in_the_index(tmp_path, make_cfg
     not_reached = second if reached[0] == str(first) else first
     text = DocTools(cfg).read_document(str(not_reached))
     assert "Le débit d'air s'additionne" in text and "changed since it was indexed on" in text
+
+
+# ------------------------------------------------------------ final review fix wave
+
+class FakeHier(FakeOneNote):
+    """Lists the given hierarchy from the first poll on."""
+    def __init__(self, hier):
+        super().__init__(late=0)
+        self.hier = hier
+    def GetHierarchy(self, node, scope, xml):
+        self.polls += 1
+        return self.hier
+
+
+def test_a_locked_section_is_an_error_at_once(tmp_path):
+    app = FakeHier(f'<one:Notebook {NS}><one:Section name="Pompes" ID="s1" encrypted="true" locked="true"/>'
+                   '</one:Notebook>')
+    r = onenote.read_section(str(section_file(tmp_path)), str(tmp_path / "t"), app=app, poll_s=0, load_timeout_s=60)
+    assert (r.status, r.error) == ("error", "OneNote section protected by a password")
+    assert app.polls == 1 and app.closed == ["nb1"]
+
+
+def test_the_only_section_is_read_whatever_its_name(tmp_path):
+    hier = HIER.replace('name="Pompes"', 'name="Renommée"').replace('<one:Section name="Autre" ID="s2"/>', "")
+    r = onenote.read_section(str(section_file(tmp_path)), str(tmp_path / "t"), app=FakeHier(hier), poll_s=0)
+    assert (r.status, r.n_pages) == ("ok", 3)
+    assert onenote.section_pages(HIER, "Inconnue") == []         # two sections: no guess
+
+
+@pytest.mark.parametrize("size, status", [(64 * 1024, "empty"), (64 * 1024 + 1, "error")])
+def test_a_section_without_page_at_the_limit(tmp_path, size, status):     # R10
+    src = section_file(tmp_path)
+    src.write_bytes(b"x" * size)
+    r = onenote.read_section(str(src), str(tmp_path / "t"), app=FakeOneNote(late=10 ** 9), poll_s=0,
+                             load_timeout_s=0.05)
+    assert r.status == status
+    assert r.error == (None if status == "empty" else "no page listed after 0 s")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="tasklist")
+def test_running_that_cannot_tell_counts_as_running(monkeypatch):
+    def broken(*a, **k):
+        raise FileNotFoundError("tasklist")
+    monkeypatch.setattr(onenote.subprocess, "run", broken)
+    assert onenote.running() is True
+
+
+def test_was_running_is_taken_before_the_cleanup(pass_env, monkeypatch):
+    cfg, items, save, saved, killed = pass_env
+    (cfg.world_dir / "onenote-tmp" / "dead").mkdir(parents=True)
+    state = {"running": False}
+    monkeypatch.setattr(onenote, "running", lambda: state["running"])
+    monkeypatch.setattr(onenote, "_close_left_notebooks", lambda tmp_root, app=None: state.update(running=True))
+    def read(path, tmp_root, limit):
+        raise TimeoutError()
+    run(cfg, items, save, read)
+    assert len(saved) == onenote.MAX_TIMEOUTS_IN_ROW and ("ONENOTE.EXE",) in killed   # its own OneNote: ended
+
+
+def test_after_a_timeout_onenote_is_ended_before_the_close(pass_env, monkeypatch):
+    cfg, items, save, saved, killed = pass_env
+    events = []
+    tmp_root = cfg.world_dir / "onenote-tmp"
+    monkeypatch.setattr(onenote, "kill_office_automation", lambda *names: events.append("kill"))
+    monkeypatch.setattr(onenote, "_close_left_notebooks",
+                        lambda root, app=None: events.append(("close", sorted(os.listdir(root)))))
+    def read(path, root, limit):
+        os.makedirs(os.path.join(root, "copy-of-the-stuck-reading"))
+        raise TimeoutError()
+    run(cfg, items[:1], save, read)
+    assert events == ["kill", ("close", []), "kill"]          # killed, copies removed, then closed
+    assert list(tmp_root.iterdir()) == []
+
+
+def test_index_run_goes_on_when_the_onenote_pass_fails(tmp_path, make_cfg, monkeypatch):
+    from dmx_docs import indexer, store
+    from dmx_docs.indexer import run_index
+    src = section_file(tmp_path)
+    gone = src.parent / "notes.txt"
+    gone.write_text("texte à supprimer", encoding="utf-8")
+    monkeypatch.setattr(onenote, "installed", lambda: True)
+    monkeypatch.setattr(onenote, "running", lambda: True)
+    monkeypatch.setattr(onenote, "_read_in_process", lambda path, tmp_root, limit: onenote.read_section(
+        path, tmp_root, app=FakeOneNote(late=0), poll_s=0))
+    cfg = make_cfg(src.parent, extensions=[".one", ".txt"])
+    run_index(cfg, progress=lambda *a, **k: None)
+    con = store.connect(cfg.db_path)
+    first_finished = float(store.get_meta(con, "last_index_finished"))
+    con.close()
+    gone.unlink()
+    src.write_bytes(b"changed by OneNote")
+    def boom(*a, **k):
+        raise OSError("tasklist is missing")
+    monkeypatch.setattr(onenote, "run_pass", boom)
+    refreshed, real_refresh = [], indexer.facets.refresh
+    monkeypatch.setattr(indexer.facets, "refresh", lambda *a, **k: (refreshed.append(1), real_refresh(*a, **k)))
+    messages = []
+    stats = run_index(cfg, progress=lambda *a, **k: messages.append(str(a[0]) if a else ""))
+    con = store.connect(cfg.db_path)
+    try:
+        rows = {r["name"]: (r["status"], r["size"]) for r in con.execute("SELECT name, status, size FROM docs")}
+        finished = float(store.get_meta(con, "last_index_finished"))
+    finally:
+        con.close()
+    assert rows == {"Pompes.one": ("ok", len(b"section bytes"))}     # the .txt deleted, the section untouched
+    assert stats.deleted == 1 and finished > first_finished and refreshed
+    assert any("OneNote pass stopped" in m for m in messages)

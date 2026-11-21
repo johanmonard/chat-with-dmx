@@ -16,6 +16,9 @@ MAX_WORKBOOK_CHARS = 2_000_000
 # were written since the header (or its last repeat); a long header is cut to HEADER_MAX_CHARS.
 HEADER_EVERY_CHARS = 1000
 HEADER_MAX_CHARS = 300
+# Rows read per sheet, empty ones included: a sheet formatted down to its last row (1 048 576) would
+# otherwise be scanned to the end for nothing.
+MAX_RAW_ROWS = 200_000
 
 
 def cell_text(value) -> str:
@@ -46,9 +49,14 @@ def _sheet_text(name: str, hidden: bool, rows: Iterator[str], max_rows: int, bud
     """Page text of a sheet from its rows (already converted), and whether the workbook limit was reached."""
     out = [f"Feuille : {name}" + (" (masquée)" if hidden else "")]
     header = ""
-    written = since_header = size = 0
+    written = since_header = size = raw = 0
     workbook_cut = False
     for row in rows:
+        raw += 1
+        if raw > MAX_RAW_ROWS:
+            if written:
+                out.append(f"[feuille coupée après {MAX_RAW_ROWS} lignes lues]")
+            break
         if not row.strip(" |"):
             continue
         if written >= max_rows:
@@ -73,18 +81,20 @@ def _sheet_text(name: str, hidden: bool, rows: Iterator[str], max_rows: int, bud
     return clean_text("\n".join(out)), workbook_cut
 
 
-def _xlsx_sheets(path: str, max_columns: int) -> Iterator[tuple[str, bool, Iterator[str]]]:
+def _xlsx_sheets(path: str, max_columns: int) -> Iterator[tuple[int, str, bool, Iterator[str]]]:
+    """(number of sheets, name, hidden, rows) per sheet; a sheet is only loaded when asked for."""
     import openpyxl
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
+        total = len(wb.sheetnames)
         for name in wb.sheetnames:
             ws = wb[name]
             hidden = getattr(ws, "sheet_state", "visible") != "visible"
             if not hasattr(ws, "iter_rows"):  # a chart sheet: nothing to read
-                yield name, hidden, iter(())
+                yield total, name, hidden, iter(())
                 continue
             ws.reset_dimensions()  # a workbook without dimensions is read fully
-            yield name, hidden, (_row_text(r) for r in ws.iter_rows(values_only=True, max_col=max_columns))
+            yield total, name, hidden, (_row_text(r) for r in ws.iter_rows(values_only=True, max_col=max_columns))
     finally:
         wb.close()
 
@@ -105,7 +115,8 @@ def _xls_value(cell, datemode: int):
     return cell.value
 
 
-def _xls_sheets(path: str, max_columns: int) -> Iterator[tuple[str, bool, Iterator[str]]]:
+def _xls_sheets(path: str, max_columns: int) -> Iterator[tuple[int, str, bool, Iterator[str]]]:
+    """(number of sheets, name, hidden, rows) per sheet; a sheet is only loaded when asked for."""
     import xlrd
     book = xlrd.open_workbook(path, on_demand=True)
     try:
@@ -113,7 +124,7 @@ def _xls_sheets(path: str, max_columns: int) -> Iterator[tuple[str, bool, Iterat
             sh = book.sheet_by_index(i)
             rows = (_row_text(_xls_value(c, book.datemode) for c in sh.row(r)[:max_columns])
                     for r in range(sh.nrows))
-            yield sh.name, sh.visibility != 0, rows
+            yield book.nsheets, sh.name, sh.visibility != 0, rows
             book.unload_sheet(i)
     finally:
         book.release_resources()
@@ -124,14 +135,14 @@ def extract_excel(path: str, max_rows: int = 5000, max_columns: int = 200) -> Ex
     pages: list[tuple[int, str]] = []
     n_pages = 0
     used = 0
-    stopped = False
-    for n_pages, (name, hidden, rows) in enumerate(sheets(path, max_columns), start=1):
-        if stopped:
-            continue  # the sheets after the limit only count as pages
+    for n_pages, (total, name, hidden, rows) in enumerate(sheets(path, max_columns), start=1):
         text, stopped = _sheet_text(name, hidden, rows, max_rows, MAX_WORKBOOK_CHARS - used)
         used += len(text)
         if text:
             pages.append((n_pages, text))
+        if stopped:
+            n_pages = total  # the sheets after the limit only count as pages: not loaded
+            break
     if not pages:
         return Extracted(status="empty", n_pages=n_pages)
     return Extracted(status="ok", pages=pages, n_pages=n_pages)

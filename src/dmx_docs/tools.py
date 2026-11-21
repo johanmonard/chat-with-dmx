@@ -301,7 +301,7 @@ def _page_label(ext: str) -> str:
 
 
 def _units(ext: str) -> str:
-    return "slides" if ext in SLIDE_EXTS else "pages"
+    return "slides" if ext in SLIDE_EXTS else "sheets" if ext in EXCEL_EXTS else "pages"
 
 
 def _has_ocr_table(con) -> bool:

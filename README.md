@@ -266,8 +266,9 @@ U:\DMX-RAG\
 * The launchers are in `scripts\launchers` and the logic in `scripts\dmx.ps1`. The first run
   of the new script moves the old single index (`data\`) to `worlds\projects` (renames only).
 * Use UNC paths for root folders (`\\server\share\...`): drive letters can differ between machines.
-* Indexing `.doc` files needs Word or LibreOffice, `.ppt` files PowerPoint or LibreOffice, on
-  the machine that indexes.
+* Indexing `.doc` files needs Word or LibreOffice, `.ppt` files PowerPoint or LibreOffice, and
+  OneNote `.one` sections OneNote desktop (driven through Windows PowerShell), on the machine that
+  indexes. Without OneNote desktop the sections are listed as skipped.
 * If a machine crashes during a run, run the same command again on that machine: it continues
   from its local copy. From another machine, *Unlock after a crash* releases the lock (the
   unsaved work of the crashed run is then lost).
@@ -280,6 +281,7 @@ U:\DMX-RAG\
 | Marketing (`dmx-marketing`) | brochures, datasheets, presentations, competition, exhibitions, picture files | `marketing` |
 | Documentation (`dmx-documentation`) | the standard machine manual in FR/DE/EN | `documentation` |
 | Offers (`dmx-offers`) | every offer sent to clients, won or not, all revisions, with a register of priced lines | `offers` |
+| Engineering (`dmx-engineering`) | the engineering groups' own folders (Mechanical, Electrical, Software...): reference documents, calculations, OneNote notebooks; the group folders are listed in `[worlds.engineering.groups]` | `engineering` |
 
 ### The offers world (sales and management only)
 
@@ -389,6 +391,16 @@ folder, or the `DMX_DOCS_CONFIG` environment variable).
 * PowerPoint: python-pptx, one slide = one page (titles, text, tables, speaker notes); .ppt converted to .pptx first.
   PowerPoint files are indexed only when `.pptx` and/or `.ppt` are in `extensions`
   (see `[worlds.marketing]` in config.example.toml).
+* Text files (`.txt`): one file = one page.
+* Excel (`.xlsx`, `.xlsm` with openpyxl, `.xls` with xlrd): one sheet = one page ("sheet" in
+  results); each row with a value is a line of cells joined by ` | `, the header row repeated now
+  and then in long sheets; a sheet is cut after `max_sheet_rows` rows with a value (or 200,000 rows
+  read), a workbook after 2,000,000 characters.
+* OneNote (`.one`): one section file = one document, one OneNote page = one page (title, dates,
+  text, tables, names of attached files, text recognised in pictures). Sections are read by the
+  index run only, in their own pass after the other files, through OneNote desktop and always from
+  a temporary copy (OneNote writes into every file it opens). The server serves the indexed pages
+  and never opens a section; pages cannot be shown as images (open the section with `open_document`).
 * OCR: PDF pages with (almost) no text are read by Tesseract (built into PyMuPDF, French model by default) in a separate `ocr` step; the text is appended as extra chunks marked "(OCR)" in search results, without touching existing chunks or embeddings.
 * Picture descriptions (`dmx-docs describe`, part of `update`): a local vision model in
   [Ollama](https://ollama.com) describes each picture once (Markdown pictures, pictures in Word
