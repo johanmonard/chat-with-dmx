@@ -65,7 +65,12 @@ def sync_group_roots(con, cfg: Config) -> list[str]:
     added = []
     for key, folder in group_keys.items():
         if not any(store.is_under(key, k) for k in have):
-            added.append(add_root(con, folder))
+            try:
+                added.append(add_root(con, folder))
+            except ValueError as e:
+                raise GroupError(f"Group folder {folder} cannot become a root: {e}. If it contains a stored "
+                                 "root folder (a group folder that was widened), remove that inner root on "
+                                 "the configuration page.") from e
     return added
 
 

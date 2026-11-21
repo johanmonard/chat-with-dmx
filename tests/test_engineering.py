@@ -99,6 +99,23 @@ def test_a_root_in_no_group_stops_the_run(eng, tmp_path):
         run_index(cfg, progress=quiet)
 
 
+def test_a_widened_group_folder_stops_the_run_naming_the_inner_root(eng, tmp_path):
+    cfg, mech = eng
+    cfg2 = load_config(write_config(tmp_path, f"Mechanical = ['{tmp_path}']"), world="engineering")
+    with pytest.raises(sources.GroupError, match="22_Mec"):
+        run_index(cfg2, progress=quiet)
+    store.connect(cfg2.db_path).close()
+    cfg2.db_path.unlink()    # the connection was closed: the file is not locked
+
+
+def test_an_unreachable_new_group_folder_stops_the_run(eng, tmp_path):
+    cfg, mech = eng
+    cfg2 = load_config(write_config(tmp_path, f"Mechanical = ['{mech}']\nSoftware = ['{tmp_path / 'Absent'}']"),
+                       world="engineering")
+    with pytest.raises(sources.GroupError, match="Absent"):
+        run_index(cfg2, progress=quiet)
+
+
 def test_group_folder_spelling_does_not_make_a_second_root(eng, tmp_path):   # Review Focus 1
     cfg, mech = eng
     other = str(mech).upper() + "\\"
