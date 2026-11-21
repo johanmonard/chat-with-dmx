@@ -92,6 +92,9 @@ def extract_file(path: str, options: dict | None = None) -> Extracted:
             return extract_md(fs)
         if ext == ".txt":
             return extract_txt(fs)
+        if ext in (".xlsx", ".xlsm", ".xls"):
+            from . import excel  # imported here: excel.py itself imports from this module
+            return excel.extract_excel(fs, options.get("max_sheet_rows", 5000), options.get("max_sheet_columns", 200))
         if ext in PICTURE_EXTS:
             return extract_picture_file(path)
         return Extracted(status="skipped", error=f"unsupported extension {ext}")

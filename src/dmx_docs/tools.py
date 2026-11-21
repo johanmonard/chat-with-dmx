@@ -19,9 +19,12 @@ from .extract import PICTURE_EXTS, docx_picture_names, extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
 
 TYPE_LABEL = {".pdf": "PDF", ".docx": "Word", ".doc": "Word 97-2003",
-              ".pptx": "PowerPoint", ".ppt": "PowerPoint 97-2003", ".md": "Markdown", ".txt": "Text"}
+              ".pptx": "PowerPoint", ".ppt": "PowerPoint 97-2003", ".md": "Markdown", ".txt": "Text",
+              ".xlsx": "Excel", ".xlsm": "Excel", ".xls": "Excel 97-2003"}
 TYPE_LABEL.update(dict.fromkeys(PICTURE_EXTS, "Picture"))
 SLIDE_EXTS = (".pptx", ".ppt")
+EXCEL_EXTS = (".xlsx", ".xlsm", ".xls")
+EXCEL_NO_IMAGE = "Excel sheets cannot be shown as an image: open the workbook with open_document."
 
 # Query/passage cosine similarity with multilingual-e5-large, calibrated on the indexed
 # documents (short and long queries): the best hit of on-topic queries scores 0.84-0.89,
@@ -291,6 +294,8 @@ def _size(n: int | None) -> str:
 def _page_label(ext: str) -> str:
     if ext in SLIDE_EXTS:
         return "slide"
+    if ext in EXCEL_EXTS:
+        return "sheet"
     return "page" if ext in (".pdf", ".md", ".txt") or ext in PICTURE_EXTS else "page (approx.)"
 
 
@@ -644,6 +649,8 @@ class DocTools:
         if not os.path.isfile(fs):
             raise FileNotFoundError(f"File not reachable now: {path} (viewing pages needs access to the file server)")
         ext = os.path.splitext(path)[1].lower()
+        if ext in EXCEL_EXTS:
+            raise ValueError(EXCEL_NO_IMAGE)
         if ext == ".pdf":
             return _render_pdf_page(fs, path, int(page), region)
         if ext == ".docx":
@@ -678,6 +685,8 @@ class DocTools:
             raise FileNotFoundError(f"File not reachable now: {path} (needs access to the file server)")
         ext = os.path.splitext(path)[1].lower()
         stem = _safe_name(os.path.splitext(os.path.basename(path))[0], 50)
+        if ext in EXCEL_EXTS:
+            raise ValueError(EXCEL_NO_IMAGE)
         if ext == ".pdf":
             _, data, fmt = _render_pdf_page(fs, path, int(page), region, max_px=EXPORT_MAX_PX)
             default = f"{stem}_p{int(page)}" + ("_zoom" if region else "")
