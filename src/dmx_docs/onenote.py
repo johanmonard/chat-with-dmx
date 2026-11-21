@@ -54,16 +54,16 @@ def section_pages(hierarchy_xml: str, section_name: str | None = None) -> list[P
 
 def page_titles(pages: list[PageRef]) -> list[str]:
     titles: list[str] = []
-    parents: list[tuple[int, str]] = []  # (level, name) of earlier pages
+    parents: list[tuple[int, str]] = []  # (level, computed title) of earlier pages
     for p in pages:
         title = p.name
         if p.level >= 2:
-            for lvl, name in reversed(parents):
+            for lvl, full in reversed(parents):
                 if lvl < p.level:
-                    title = f"{name} > {p.name}"
+                    title = f"{full} > {p.name}"
                     break
         titles.append(title)
-        parents.append((p.level, p.name))
+        parents.append((p.level, title))
     return titles
 
 
@@ -73,37 +73,43 @@ def _plain(fragment: str) -> str:
     return html.unescape(text).replace("\xa0", " ").strip()
 
 
-def _texts(el: ET.Element) -> list[str]:
-    out: list[str] = []
-    for e in el.iter():
-        if _local(e) == "T":
-            t = _plain(e.text or "")
-            if t:
-                out.append(t)
-    return out
-
-
 def page_text(page_xml: str, title: str, created: str, modified: str) -> str:
     root = ET.fromstring(page_xml)
     lines: list[str] = []
     files: list[str] = []
     pictures: list[str] = []
 
-    def walk(el: ET.Element) -> None:
+    def table_rows(table: ET.Element) -> list[str]:
+        rows = []
+        for row in table:
+            if _local(row) != "Row":
+                continue
+            cells = []
+            for c in row:
+                if _local(c) == "Cell":
+                    parts: list[str] = []
+                    collect(c, parts, True)
+                    cells.append(" ".join(parts))
+            if any(cells):
+                rows.append(" | ".join(cells))
+        return rows
+
+    def collect(el: ET.Element, out: list[str], nested: bool) -> None:
         for child in el:
             name = _local(child)
             if name == "Title":
                 continue
             if name == "Table":
-                for row in child.iter():
-                    if _local(row) == "Row":
-                        cells = [" ".join(_texts(c)) for c in row if _local(c) == "Cell"]
-                        if any(cells):
-                            lines.append(" | ".join(cells))
+                rows = table_rows(child)
+                if rows:
+                    if nested:
+                        out.append(" / ".join(rows))
+                    else:
+                        out.extend(rows)
             elif name == "T":
                 t = _plain(child.text or "")
                 if t:
-                    lines.append(t)
+                    out.append(t)
             elif name == "OCRText":
                 t = _plain(child.text or "")
                 if t:
@@ -113,9 +119,9 @@ def page_text(page_xml: str, title: str, created: str, modified: str) -> str:
                 if n:
                     files.append(n)
             else:
-                walk(child)
+                collect(child, out, nested)
 
-    walk(root)
+    collect(root, lines, False)
     out = [title, f"Créée le {created[:10]}, modifiée le {modified[:10]}"]
     out.extend(lines)
     if files:

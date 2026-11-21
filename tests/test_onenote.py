@@ -35,3 +35,41 @@ def test_page_with_pictures_only_keeps_title_and_dates():     # Review Focus 3
     xml = f'<one:Page {NS} ID="p3" name="Vide"><one:Outline><one:OE><one:Image/></one:OE></one:Outline></one:Page>'
     assert onenote.page_text(xml, "Vide", "2023-01-01T08:00:00.000Z", "2023-01-01T08:00:00.000Z") == \
         "Vide\nCréée le 2023-01-01, modifiée le 2023-01-01"
+
+
+def _cell(inner):
+    return f"<one:Cell><one:OEChildren><one:OE>{inner}</one:OE></one:OEChildren></one:Cell>"
+
+
+def _t(x):
+    return f"<one:T><![CDATA[{x}]]></one:T>"
+
+
+def test_nested_table_text_appears_once():
+    inner = f"<one:Table><one:Row>{_cell(_t('In1'))}{_cell(_t('In2'))}</one:Row><one:Row>{_cell(_t('In3'))}</one:Row></one:Table>"
+    xml = (f'<one:Page {NS}><one:Outline><one:OE><one:Table><one:Row>{_cell(_t("Out"))}{_cell(inner)}</one:Row>'
+           '</one:Table></one:OE></one:Outline></one:Page>')
+    text = onenote.page_text(xml, "T", "2023-01-01T00:00:00Z", "2023-01-01T00:00:00Z")
+    assert text.split("\n")[2:] == ["Out | In1 | In2 / In3"]
+    for s in ("In1", "In2", "In3", "Out"):
+        assert text.count(s) == 1
+
+
+def test_picture_and_file_inside_table_cell():
+    pic = "<one:Image><one:OCRData><one:OCRText><![CDATA[Texte de capture]]></one:OCRText></one:OCRData></one:Image>"
+    f = '<one:InsertedFile preferredName="Notice.docx"/>'
+    xml = (f'<one:Page {NS}><one:Outline><one:OE><one:Table><one:Row>{_cell(pic)}{_cell(f + _t("Légende"))}</one:Row>'
+           '</one:Table></one:OE></one:Outline></one:Page>')
+    text = onenote.page_text(xml, "T", "2023-01-01T00:00:00Z", "2023-01-01T00:00:00Z")
+    assert text.endswith("Fichiers joints : Notice.docx\n[Texte des images]\nTexte de capture")
+    assert "Légende" in text
+
+
+def test_level_three_title_and_malformed_xml():
+    def ref(i, lvl):
+        return onenote.PageRef(i, i.upper(), lvl, "", "")
+    pages = [ref("a", 1), ref("b", 2), ref("c", 3), ref("d", 1)]
+    assert onenote.page_titles(pages) == ["A", "A > B", "A > B > C", "D"]
+    import pytest
+    with pytest.raises(Exception):
+        onenote.page_text("<one:Page", "T", "", "")
