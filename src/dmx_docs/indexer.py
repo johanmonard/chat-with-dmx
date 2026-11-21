@@ -16,7 +16,7 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 
-from . import extract, facets, sources, store
+from . import extract, facets, onenote, sources, store
 from .chunking import make_chunks
 from .config import Config
 from .extract import EXTRACT_VERSION, Extracted, extract_file, kill_office_automation
@@ -247,6 +247,7 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_st
 
     pending: dict = {}
     crashed: list[tuple[str, int, float, bool]] = []
+    held: list[tuple[str, int, float, bool]] = []  # OneNote sections: read in their own pass at the end
     last_progress = time.monotonic()
     started = time.monotonic()
 
@@ -333,6 +334,11 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_st
                     writer.save(path, size, mtime, Extracted(
                         status="skipped", error=f"file larger than {cfg.max_file_mb} MB"), bool(row))
                     continue
+                if path.lower().endswith(".one"):
+                    held.append((path, size, mtime, bool(row)))
+                    if row:  # kept (with its old pages) if the pass stops before reaching it
+                        writer.mark_seen(row["id"])
+                    continue
                 try:
                     fut = executor.submit(extract_file, path, options)
                 except BrokenProcessPool:
@@ -349,6 +355,7 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_st
         for path, size, mtime, existed in crashed:
             progress(f"  retrying alone: {path}")
             writer.save(path, size, mtime, _extract_alone(path, options, check_stop), existed)
+        onenote.run_pass(cfg, held, writer.save, progress, check_stop)
         if ".ppt" in cfg.extensions:
             _kill_automation_office_after_run()  # the hidden Word/PowerPoint started for conversions
     except (KeyboardInterrupt, Cancelled):

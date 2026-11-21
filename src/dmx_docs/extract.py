@@ -74,6 +74,9 @@ def extract_file(path: str, options: dict | None = None) -> Extracted:
         import time
         time.sleep(3600)
     try:
+        if ext == ".one":
+            from . import onenote  # imported here: onenote.py itself imports from this module
+            return Extracted(status="skipped", error=onenote.SERVER_ONLY)  # read by the index run's pass
         if os.path.getsize(fs) == 0:  # e.g. 0-byte placeholders created from folder templates
             return Extracted(status="empty")
         if ext == ".pdf":

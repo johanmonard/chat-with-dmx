@@ -13,18 +13,19 @@ import time
 import urllib.request
 from datetime import datetime
 
-from . import facets, knowledge, machines, offer_tools, register, sources, store, verified, worldmap
+from . import facets, knowledge, machines, offer_tools, onenote, register, sources, store, verified, worldmap
 from .config import Config
 from .extract import PICTURE_EXTS, docx_picture_names, extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
 
 TYPE_LABEL = {".pdf": "PDF", ".docx": "Word", ".doc": "Word 97-2003",
               ".pptx": "PowerPoint", ".ppt": "PowerPoint 97-2003", ".md": "Markdown", ".txt": "Text",
-              ".xlsx": "Excel", ".xlsm": "Excel", ".xls": "Excel 97-2003"}
+              ".xlsx": "Excel", ".xlsm": "Excel", ".xls": "Excel 97-2003", ".one": "OneNote"}
 TYPE_LABEL.update(dict.fromkeys(PICTURE_EXTS, "Picture"))
 SLIDE_EXTS = (".pptx", ".ppt")
 EXCEL_EXTS = (".xlsx", ".xlsm", ".xls")
 EXCEL_NO_IMAGE = "Excel sheets cannot be shown as an image: open the workbook with open_document."
+ONENOTE_NO_IMAGE = "OneNote pages cannot be shown as an image: open the section with open_document."
 
 # Query/passage cosine similarity with multilingual-e5-large, calibrated on the indexed
 # documents (short and long queries): the best hit of on-topic queries scores 0.84-0.89,
@@ -296,7 +297,7 @@ def _page_label(ext: str) -> str:
         return "slide"
     if ext in EXCEL_EXTS:
         return "sheet"
-    return "page" if ext in (".pdf", ".md", ".txt") or ext in PICTURE_EXTS else "page (approx.)"
+    return "page" if ext in (".pdf", ".md", ".txt", ".one") or ext in PICTURE_EXTS else "page (approx.)"
 
 
 def _units(ext: str) -> str:
@@ -651,6 +652,8 @@ class DocTools:
         ext = os.path.splitext(path)[1].lower()
         if ext in EXCEL_EXTS:
             raise ValueError(EXCEL_NO_IMAGE)
+        if ext == ".one":
+            raise ValueError(ONENOTE_NO_IMAGE)
         if ext == ".pdf":
             return _render_pdf_page(fs, path, int(page), region)
         if ext == ".docx":
@@ -687,6 +690,8 @@ class DocTools:
         stem = _safe_name(os.path.splitext(os.path.basename(path))[0], 50)
         if ext in EXCEL_EXTS:
             raise ValueError(EXCEL_NO_IMAGE)
+        if ext == ".one":
+            raise ValueError(ONENOTE_NO_IMAGE)
         if ext == ".pdf":
             _, data, fmt = _render_pdf_page(fs, path, int(page), region, max_px=EXPORT_MAX_PX)
             default = f"{stem}_p{int(page)}" + ("_zoom" if region else "")
@@ -1147,19 +1152,28 @@ class DocTools:
 
     # ------------------------------------------------------ document text
     def _pages(self, path: str, key: str) -> tuple[dict[int, str], int, dict]:
-        """Return ({page_no: text}, n_pages, info). Uses the index, or extracts live if needed."""
+        """Return ({page_no: text}, n_pages, info). Uses the index, or extracts live if needed.
+        A OneNote section is only ever served from the index (only the index run reads sections)."""
+        section = os.path.splitext(path)[1].lower() == ".one"
         con = self._con()
         try:
             doc = con.execute("SELECT * FROM docs WHERE path_key = ?", (key,)).fetchone()
             info = {"source": "index"}
             fresh = False
+            if doc is None and section:
+                raise ValueError(f"Not indexed yet: {path} ({onenote.SERVER_ONLY})")
             if doc is not None:
                 try:
                     st = os.stat(store.fs_path(path))
                     fresh = st.st_size == doc["size"] and abs(st.st_mtime - (doc["mtime"] or 0)) < 0.01
                 except OSError:
                     fresh = True  # file not reachable: serve the indexed copy
-                if fresh and doc["status"] in ("ok", "no_text", "empty"):
+                if section and doc["status"] not in ("ok", "no_text", "empty"):
+                    raise ValueError(f"Not read yet: {path} ({doc['error']})")
+                if section and not fresh:
+                    info["note"] = (f"changed since it was indexed on {_date(doc['indexed_at'])}: "
+                                    "these are the indexed pages")
+                if (fresh or section) and doc["status"] in ("ok", "no_text", "empty"):
                     pages: dict[int, str] = {}
                     for r in con.execute("SELECT page_no, text FROM chunks WHERE doc_id = ? "
                                          "ORDER BY page_no, seq", (doc["id"],)):
@@ -1202,6 +1216,8 @@ class DocTools:
             shown_until = p
         header = (f"{path} ({TYPE_LABEL.get(info.get('ext'), info.get('ext'))}, {last} {_units(info.get('ext', ''))}, "
                   f"modified {_date(info.get('mtime'))}; source: {info['source']})")
+        if info.get("note"):
+            header += "\n" + info["note"]
         if info.get("status") == "no_text" and info.get("ext") in PICTURE_EXTS:
             header += "\nNote: a picture file with no description yet — look at it with view_page."
         elif info.get("status") == "no_text":
@@ -1242,10 +1258,11 @@ class DocTools:
                 if len(hits) < max_hits:
                     a, b = max(0, m.start() - 250), min(len(page_text), m.end() + 250)
                     hits.append(f"[{label} {p}] …{page_text[a:b]}…")
+        note = "\n" + info["note"] if info.get("note") else ""
         if not hits:
-            return f"'{text}' not found in {path} ({n_pages} pages; search ignores case and accents)."
+            return f"'{text}' not found in {path} ({n_pages} pages; search ignores case and accents).{note}"
         more = f" (showing first {len(hits)})" if total > len(hits) else ""
-        return f"{total} occurrences of '{text}' in {path}{more}:\n\n" + "\n\n".join(hits)
+        return f"{total} occurrences of '{text}' in {path}{more}:{note}\n\n" + "\n\n".join(hits)
 
     # ------------------------------------------------------------ status
     def world_map(self) -> str:
