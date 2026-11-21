@@ -85,7 +85,8 @@ max_read_chars = 40000
 # profile: 'projects' (project folders, machine register), 'marketing' (category = first
 # folder), 'documentation' (category = chapter folder, language from _FR/_DE/_EN in the file
 # name), 'offers' (client offers: facets from the folder names, register of priced offer lines)
-# or 'none'. A world may set its own extensions, exclude and roots (first-run seed).
+# 'engineering' (category = group, section = first folder below the group folder; the groups
+# table lists the folders) or 'none'. A world may set its own extensions, exclude and roots (first-run seed).
 # [worlds.projects]
 # title = "Projects"
 # profile = "projects"
@@ -118,6 +119,20 @@ max_read_chars = 40000
 # # without it verification is off. The pull mirrors it to data_dir\offers\verified:
 # verified = '\\server\share\DMX-RAG\worlds\offers\verified'
 # verify_per_request = 15   # revisions listed under "To verify" per answer
+#
+# [worlds.engineering]
+# title = "Engineering"
+# profile = "engineering"
+# extensions = ['.pdf', '.docx', '.doc', '.pptx', '.ppt', '.msg', '.md', '.txt', '.xlsx', '.xlsm', '.xls', '.one', '.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff']
+# exclude = ['~$*', '.*', '$RECYCLE.BIN', 'System Volume Information', 'Thumbs.db', 'OneNote_RecycleBin']
+# vision = true
+#
+# # You write which folders belong to each group; a group without folders stays empty. The group
+# # folders are the roots of this world (no roots line here).
+# [worlds.engineering.groups]
+# Mechanical = ['\\server\share\Mecanique']
+# Electrical = []
+# Software = []
 
 # OCR of scanned PDF pages (`dmx-docs ocr`, part of launcher 7). Uses the Tesseract engine built
 # into PyMuPDF; only the language files are needed (tessdata_best from

@@ -18,6 +18,7 @@ Each connector is one **world**, a separate index of documents with its own audi
 | `dmx-marketing` | Marketing | brochures, datasheets, sales and training presentations, competition analyses, exhibitions, publications, picture files (photos, graphics) | `references/marketing.md` |
 | `dmx-documentation` | Documentation | the STANDARD machine manual (Paloma, Presto, Hector, Delfi, Astor, Nestor, conveyors, vision, HMI), chapters 0000-7000, in French, German and English | `references/documentation.md` |
 | `dmx-offers` | Offers (sales and management only) | every offer sent to clients, won or not, all revisions, from the 1999 archive: offer documents, specifications, mails, layouts, and a register of priced lines for price trends, client histories and counts | `references/offers.md` |
+| `dmx-engineering` | Engineering | working knowledge of the engineering groups (Mechanical filled; Electrical and Software empty today): methods, calculation tools in Excel, templates, reference documents, handed-over OneNote notebooks | `references/engineering.md` |
 
 - **Look at the tools you actually have.** Their names start with the connector, e.g.
   `dmx-marketing` → its `search`. A connector that is not enabled has no tools: never pretend to
@@ -45,6 +46,7 @@ Each connector is one **world**, a separate index of documents with its own audi
 | what we say about a product: features, performance claims, datasheet values, references, sales decks, trainings, competitors, exhibitions | Marketing |
 | how the standard machine works, safety, operation, HMI screens, maintenance intervals and procedures, spare parts of the standard design | Documentation |
 | price trends, price history of a machine, history of the offers to a client, offers lost or not won, counts of offers per year/country/client | Offers (register tools `offer_lines`, `list_offers`, `offer_stats` first, then `offer_card` and the documents), if enabled |
+| engineering methods, calculation sheets (Excel), templates, handed-over OneNote notebooks, mechanical reference documents | Engineering (`category="Mechanical"`), if enabled |
 | a project's own, customised manual | Projects (`8_Documentation` of that project), then Documentation for the standard part |
 | a photo, schema or screenshot to show or to put on a slide | Marketing first (picture files, brochures, decks), then Documentation, then Projects |
 | "promised vs delivered vs standard", a comparison across sources | every relevant world, one after the other |

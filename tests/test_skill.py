@@ -10,7 +10,8 @@ import pytest
 
 SKILL = Path(__file__).resolve().parents[1] / "skills" / "dmx-research"
 WORLD_FILES = {"projects": "references/projects.md", "marketing": "references/marketing.md",
-               "documentation": "references/documentation.md", "offers": "references/offers.md"}
+               "documentation": "references/documentation.md", "offers": "references/offers.md",
+               "engineering": "references/engineering.md"}
 
 
 @pytest.fixture(scope="module")
@@ -72,7 +73,7 @@ def test_skill_frontmatter_and_files():
     meta = frontmatter(text)
     assert meta["name"] == "dmx-research"
     assert 100 < len(meta["description"]) <= 1024
-    for name in ("dmx-projects", "dmx-marketing", "dmx-documentation", "dmx-offers", "dmx-docs"):
+    for name in ("dmx-projects", "dmx-marketing", "dmx-documentation", "dmx-offers", "dmx-engineering", "dmx-docs"):
         assert name in text, name
     for ref in WORLD_FILES.values():
         assert (SKILL / ref).is_file() and ref in text, ref
