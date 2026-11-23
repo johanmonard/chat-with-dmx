@@ -16,7 +16,7 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 
-from . import disciplines, extract, facets, labelling, onenote, sources, store
+from . import disciplines, extract, facets, labelling, onenote, sources, store, suggestions
 from .chunking import make_chunks
 from .config import Config
 from .extract import EXTRACT_VERSION, Extracted, extract_file, kill_office_automation
@@ -405,5 +405,11 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_st
             log.exception("labelling failed")
             progress(f"WARNING: the discipline labels were not updated ({type(e).__name__}: {e})")
     report(force=True)
+    if rules is not None:  # the reminder of the keyword suggestions waiting for review is the last progress line
+        try:
+            suggestions.refresh(con, cfg, rules, progress)
+        except Exception as e:
+            log.exception("keyword suggestions failed")
+            progress(f"WARNING: the keyword suggestions were not updated ({type(e).__name__}: {e})")
     con.close()
     return stats

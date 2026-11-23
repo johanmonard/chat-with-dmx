@@ -1283,6 +1283,7 @@ class DocTools:
             chunks = con.execute("SELECT count(*), sum(embedded) FROM chunks").fetchone()
             last = store.get_meta(con, "last_index_finished")
             model = store.get_meta(con, "embedding_model")
+            waiting = store.get_meta(con, "suggestions_waiting")
             ocr = (con.execute("""SELECT sum(status = 'text'), sum(status = 'empty'),
                                   sum(status IN ('error', 'timeout')) FROM ocr_pages""").fetchone()
                    if _has_ocr_table(con) else None)
@@ -1306,6 +1307,9 @@ class DocTools:
                  "Roots: " + (", ".join(self.cfg.roots) or "none"),
                  "Excluded folders: " + (", ".join(self.cfg.excluded_dirs) or "none"),
                  f"Indexed file types: {', '.join(self.cfg.extensions)} (other types, e.g. Excel, are not searchable yet)"]
+        if self.cfg.profile == "engineering":  # proposals waiting for the user (suggestions.py)
+            lines.insert(lines.index(next(l for l in lines if l.startswith("Roots:"))) + 1,
+                         f"Keyword suggestions waiting: {waiting or 0}")
         lines.insert(lines.index(next(l for l in lines if l.startswith("Chunks:"))) + 1,
                      f"OCR: {ocr[0] or 0} pages with text, {ocr[1] or 0} without usable text (photos, drawings), "
                      f"{ocr[2] or 0} failed or timed out" if ocr and any(ocr) else "OCR: not run yet")

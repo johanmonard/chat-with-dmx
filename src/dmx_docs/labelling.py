@@ -40,6 +40,15 @@ def _commit_many(con, sql: str, rows: list) -> None:
     con.execute("COMMIT") if autocommit else con.commit()
 
 
+def text_of(con, doc_id: int, path: str, key: str, root_keys: list) -> tuple[str, str]:
+    """(path below its root, text of the first chunks): what is scored for a document."""
+    root = facets.root_of(key, root_keys)
+    rel = os.path.relpath(path, root) if root else os.path.basename(path)
+    body = "\n".join(r[0] for r in con.execute(
+        "SELECT text FROM chunks WHERE doc_id = ? ORDER BY page_no, seq LIMIT ?", (doc_id, BODY_CHUNKS)))
+    return rel, body
+
+
 def refresh(con, cfg: Config, rules: Rules, progress=print) -> dict[str, int]:
     """Label the documents that need it, copy the labels into doc_facets.category, write the report.
     Returns the number of documents per label."""
@@ -55,10 +64,7 @@ def refresh(con, cfg: Config, rules: Rules, progress=print) -> dict[str, int]:
     now = time.time()
     rows = []
     for doc_id, path, key, title in todo:
-        root = facets.root_of(key, root_keys)
-        rel = os.path.relpath(path, root) if root else os.path.basename(path)
-        body = "\n".join(r[0] for r in con.execute(
-            "SELECT text FROM chunks WHERE doc_id = ? ORDER BY page_no, seq LIMIT ?", (doc_id, BODY_CHUNKS)))
+        rel, body = text_of(con, doc_id, path, key, root_keys)
         d = classify(rules, path, rel, title, body)
         rows.append((doc_id, d.label, d.source, json.dumps(d.scores), json.dumps(d.top_terms), now))
     _commit_many(con, "INSERT OR REPLACE INTO doc_discipline(doc_id, discipline, source, scores, top_terms, "
