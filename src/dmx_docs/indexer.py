@@ -16,7 +16,7 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 
-from . import extract, facets, onenote, sources, store
+from . import disciplines, extract, facets, labelling, onenote, sources, store
 from .chunking import make_chunks
 from .config import Config
 from .extract import EXTRACT_VERSION, Extracted, extract_file, kill_office_automation
@@ -222,6 +222,13 @@ class _Writer:
 def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_stop=None) -> Stats:
     con = store.connect(cfg.db_path)
     sources.refresh(cfg, con)
+    rules = None
+    if cfg.profile == "engineering":  # a broken disciplines.toml stops the run before anything is extracted
+        try:
+            rules = disciplines.load_rules(cfg.disciplines_path)
+        except disciplines.RulesError:
+            con.close()  # Windows keeps the database file locked otherwise
+            raise
     con.isolation_level = None  # explicit transactions
     run_id = int(store.get_meta(con, "last_run", "0")) + 1
     store.set_meta(con, "last_run", run_id)
@@ -391,6 +398,12 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_st
     writer.commit()
     con.execute("COMMIT")
     facets.refresh(con, cfg.roots, cfg.profile)
+    if rules is not None:  # engineering: the discipline of every document, from the text already indexed
+        try:
+            labelling.refresh(con, cfg, rules, progress)
+        except Exception as e:  # the run is done: a failing label step must not lose it
+            log.exception("labelling failed")
+            progress(f"WARNING: the discipline labels were not updated ({type(e).__name__}: {e})")
     report(force=True)
     con.close()
     return stats

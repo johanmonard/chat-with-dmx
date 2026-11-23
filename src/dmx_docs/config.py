@@ -64,6 +64,7 @@ class Config:
     world: str | None = None
     world_title: str | None = None
     profile: str = "projects"
+    disciplines_path: str | None = None  # engineering world: the discipline rules (disciplines.toml), see disciplines.py
     # OCR of PDF pages without text (ocr.py). The language files live in tessdata_dir.
     ocr_enabled: bool = True
     ocr_languages: str = "fra"
@@ -227,6 +228,9 @@ def load_config(path: str | os.PathLike, world: str | None = None) -> Config:
     # The knowledge cards (project_card, catalog): knowledge\ next to config.toml, or [worlds.<name>] knowledge.
     kp = Path(os.path.expandvars(str(w.get("knowledge") or "knowledge")))
     kwargs["knowledge_path"] = str(kp if kp.is_absolute() else (path.parent / kp))
+    if name and kwargs["profile"] == "engineering":  # the discipline rules: disciplines.toml next to config.toml
+        dp = Path(os.path.expandvars(str(w.get("disciplines") or "disciplines.toml")))
+        kwargs["disciplines_path"] = str(dp if dp.is_absolute() else (path.parent / dp))
     if name:  # the machine register belongs to a world: data_dir\<world>\register.csv
         register = w.get("register", "register.csv" if kwargs["profile"] == "projects" else None)
         if register:
