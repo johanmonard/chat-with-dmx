@@ -118,6 +118,21 @@ def test_bad_rules_raise_rules_error(tmp_path, text):                   # Review
         make_rules(tmp_path, text)
 
 
+def test_the_example_rules_file_loads_and_classifies():
+    from pathlib import Path
+
+    rules = load_rules(str(Path(__file__).parent.parent / "disciplines.example.toml"))
+    assert rules.folders == []                                      # the folder rules are the user's to write
+    assert all(len(rules.words[d]["strong"]) >= 30 for d in disciplines.DISCIPLINES)
+    samples = {
+        "Mechanical": "Réglage du préhenseur à ventouses et du vérin pneumatique",
+        "Electrical": "Schéma électrique de l'armoire: variateur, câblage, relais de sécurité",
+        "Software": "Version du firmware TwinCAT et paramètres de la recette Gemini",
+    }
+    for label, text in samples.items():
+        assert classify(rules, "c:/x/a.pdf", "a.pdf", None, text).label == label, text
+
+
 def test_fingerprint_changes_with_the_file(tmp_path):
     a = make_rules(tmp_path)
     b = make_rules(tmp_path, RULES + "\n# changed\n")

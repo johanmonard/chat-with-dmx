@@ -116,15 +116,17 @@ ENGINEERING_INSTRUCTIONS = """\
 Read-only access to the engineering documents of Demaurex (robotic packaging lines): mechanical,
 electrical and software design files, schematics, drawings, parts lists, Excel workbooks and
 OneNote notebooks; mostly French, also English and German.
-Each search hit shows its group (Mechanical, Electrical, Software) and its section = the first
-folder below the group folder (e.g. "224 - Pneumatique"). Excel hits are sheets; OneNote hits are
-pages, with their title and dates. Neither can be shown with `view_page`: use `open_document`.
+Each search hit shows its discipline (Mechanical, Electrical, Software, Mixed or Unknown) and its
+section = the first folder below the root (e.g. "224 - Pneumatique"). The discipline is decided
+automatically when the documents are indexed: it is a hint, not a fact, so search again without
+the filter when results are thin. Excel hits are sheets; OneNote hits are pages, with their title
+and dates. Neither can be shown with `view_page`: use `open_document`.
 
 """ + WORLD_MAP_LINE + "\n\n" + """\
 Never answer from the first search alone. Follow this loop for every question:
 
 1. REFORMULATE the question into 2-4 search queries: French and English technical terms, part and
-   module names, exact codes in "double quotes". Filter with category= (the group) and section=
+   module names, exact codes in "double quotes". Filter with category= (the discipline) and section=
    when the discipline or the topic is known.
 2. RETRIEVE with `search` (hybrid by default; mode="keyword" for names and codes); browse with
    `list_folder`.
@@ -534,7 +536,7 @@ def build_server(cfg: Config) -> MCPServer:
                            category: str | None = None, section: str | None = None,
                            expand: bool | None = None, pictures: bool = False) -> str:
         """Search the engineering documents by meaning and keywords. Returns excerpts with file path
-        and page (sheet for Excel, page for OneNote), its group and section, how each one matched
+        and page (sheet for Excel, page for OneNote), its discipline and section, how each one matched
         (keyword, semantic or both) and its meaning similarity to the query (strong >= 0.86, medium
         0.83-0.86, weak < 0.83 = often off topic). These are hints: judge by reading.
 
@@ -546,8 +548,9 @@ def build_server(cfg: Config) -> MCPServer:
             modified_after: Optional date (YYYY, YYYY-MM or YYYY-MM-DD) - only files modified since then.
             limit: Number of results (1-30, default 10). At most 3 excerpts per document.
             mode: 'hybrid' (default), 'keyword' (exact words, codes, names) or 'semantic' (by meaning).
-            category: Optional group(s), comma-separated: Mechanical, Electrical, Software.
-            section: Optional section(s): the first folder below the group folder, e.g. "224 - Pneumatique".
+            category: Optional discipline(s), comma-separated: Mechanical, Electrical, Software, Mixed,
+                Unknown. Decided automatically at indexing: a hint, not a fact.
+            section: Optional section(s): the first folder below the root, e.g. "224 - Pneumatique".
             expand: Widen the keyword part with the company thesaurus. Default: as configured.
             pictures: True to search only the descriptions of pictures (photos, schemas, screenshots,
                 picture pages), e.g. to find a picture to show or export.

@@ -1,0 +1,83 @@
+# disciplines.toml - how documents of the Engineering world get their discipline
+# (Mechanical, Electrical, Software, Mixed, Unknown) when they are indexed.
+#
+# This is a FIRST DRAFT of the word lists, written from general knowledge of robotic packaging lines.
+# Review it: remove what is wrong, add what is missing (keyword-suggestions.csv proposes words after
+# every index run; nothing is ever added to this file by the program).
+#
+# Copy it to the shared folder as disciplines.toml (next to config.toml). Editing it relabels every
+# document on the next index run, without reading any file again.
+#
+# Order of decision for a document:
+#   1. a [[folder]] rule below, the first one that matches (written by you);
+#   2. the keyword score of the path, file name, title and the first text of the document;
+#   3. Unknown when the score is too low; Mixed when two disciplines are both clearly present.
+# Words are matched as whole words, ignoring case and accents. "strong" words count 3, "weak" words 1;
+# the path, file name and title count three times the text.
+
+# ---------------------------------------------------------------- folder rules (yours)
+# The pattern is matched against the full path, written with / and in lower case; * is a wildcard.
+# The discipline is Mechanical, Electrical, Software, Mixed or Unknown.
+#
+# [[folder]]
+# pattern = "*/doc_tech/soft/*"
+# discipline = "Software"
+
+# ---------------------------------------------------------------- word lists
+[words.Mechanical]
+strong = [
+  "préhenseur", "préhenseurs", "ventouse", "ventouses", "vérin", "vérins", "pneumatique", "pneumatiques",
+  "venturi", "éjecteur", "pompe à vide", "tôlerie", "tôle", "usinage", "usiné", "fraisage", "soudure",
+  "convoyeur", "convoyeurs", "chaîne à taquets", "courroie", "réducteur", "motoréducteur", "accouplement",
+  "glissière", "guidage", "bâti", "châssis", "carter", "tolérance", "tolérancement", "cotation", "ajustement",
+  "solidworks", "pdm", "nomenclature", "plan de détail", "plan d'ensemble", "gripper", "grippers",
+  "suction cup", "pneumatic", "conveyor", "sheet metal", "machining", "gearbox", "tolerance", "mécanique",
+  "mechanical",
+]
+weak = [
+  "vis", "écrou", "rondelle", "montage", "assemblage", "fixation", "support", "plaque", "pièce", "pièces",
+  "roulement", "rail", "axe", "bague", "joint", "étanchéité", "hygiénique", "inox", "aluminium", "acier",
+  "assembly", "bolt", "screw", "hygienic", "stainless",
+]
+
+[words.Electrical]
+strong = [
+  "schéma électrique", "schéma de câblage", "câblage", "armoire électrique", "armoire", "variateur", "servo",
+  "servomoteur", "eplan", "bornier", "borne", "bornes", "disjoncteur", "contacteur", "relais de sécurité",
+  "alimentation", "24v", "400v", "tension", "intensité", "câble", "câbles", "connecteur", "connecteurs",
+  "capteur", "capteurs", "détecteur", "codeur", "encodeur", "fin de course", "arrêt d'urgence", "fusible",
+  "mise à la terre", "puissance", "wiring", "wiring diagram", "electrical schematic", "cabinet",
+  "servo drive", "circuit breaker", "sensor", "terminal block", "contactor", "emergency stop", "power supply",
+  "électrique", "electrical",
+]
+weak = [
+  "relais", "courant", "prise", "voyant", "bouton", "led", "armoires", "safety", "moteur", "motor",
+  "voltage", "automate", "variateurs", "gaine", "goulotte", "repérage", "entrée", "sortie",
+]
+
+[words.Software]
+strong = [
+  "twincat", "gemini", "firmware", "recette", "recettes", "code source", "programme automate", "api", "git",
+  "github", "compilation", "compiler", "débogage", "debug", "logiciel", "logicielle", "ihm", "hmi", "opc",
+  "opc ua", "modbus", "ethercat", "sercos", "profinet", "base de données", "script", "python", "delphi",
+  "javascript", "typescript", "json", "framework", "nuget", "sdk", "jira", "release", "mise à jour",
+  "paramétrage", "software", "source code", "database", "programming", "programmation",
+]
+weak = [
+  "version", "versions", "paramètre", "paramètres", "configuration", "fichier de configuration", "log",
+  "logs", "update", "install", "installation", "licence", "utilisateur", "interface", "écran", "menu", "bug",
+  "test", "tests", "serveur", "vision", "simulation",
+]
+
+# ---------------------------------------------------------------- thresholds
+[scoring]
+min_score = 6        # below this total the document is Unknown
+top_share = 0.70     # the leading discipline wins when it has at least this share of the total score
+mixed_share = 0.30   # otherwise a second discipline with at least this share makes the document Mixed
+
+# ---------------------------------------------------------------- keyword suggestions
+[suggestions]
+min_docs = 5         # a word must appear in at least this many reference documents of a discipline
+min_sections = 2     # ... in at least this many different folders
+min_lift = 3.0       # ... and be at least this many times more frequent there than in the other disciplines
+max_rows = 200       # at most this many suggestions per discipline in keyword-suggestions.csv

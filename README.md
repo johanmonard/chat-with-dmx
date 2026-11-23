@@ -281,7 +281,7 @@ U:\DMX-RAG\
 | Marketing (`dmx-marketing`) | brochures, datasheets, presentations, competition, exhibitions, picture files | `marketing` |
 | Documentation (`dmx-documentation`) | the standard machine manual in FR/DE/EN | `documentation` |
 | Offers (`dmx-offers`) | every offer sent to clients, won or not, all revisions, with a register of priced lines | `offers` |
-| Engineering (`dmx-engineering`) | the engineering groups' own folders (Mechanical, Electrical, Software...): reference documents, calculations, OneNote notebooks; the group folders are listed in `[worlds.engineering.groups]` | `engineering` |
+| Engineering (`dmx-engineering`) | the engineering groups' own folders: reference documents, calculations, OneNote notebooks; each document gets a discipline (Mechanical, Electrical, Software, Mixed, Unknown) at indexing from the folder rules and word lists of `disciplines.toml` (start from `disciplines.example.toml`); the run writes `engineering-classification.csv` and `keyword-suggestions.csv` for you to review | `engineering` |
 
 ### The offers world (sales and management only)
 

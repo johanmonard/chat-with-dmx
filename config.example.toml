@@ -85,8 +85,8 @@ max_read_chars = 40000
 # profile: 'projects' (project folders, machine register), 'marketing' (category = first
 # folder), 'documentation' (category = chapter folder, language from _FR/_DE/_EN in the file
 # name), 'offers' (client offers: facets from the folder names, register of priced offer lines)
-# 'engineering' (category = group, section = first folder below the group folder; the groups
-# table lists the folders) or 'none'. A world may set its own extensions, exclude and roots (first-run seed).
+# 'engineering' (category = discipline decided from disciplines.toml, section = first folder below the
+# root) or 'none'. A world may set its own extensions, exclude and roots (first-run seed).
 # [worlds.projects]
 # title = "Projects"
 # profile = "projects"
@@ -126,13 +126,12 @@ max_read_chars = 40000
 # extensions = ['.pdf', '.docx', '.doc', '.pptx', '.ppt', '.msg', '.md', '.txt', '.xlsx', '.xlsm', '.xls', '.one', '.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff']
 # exclude = ['~$*', '.*', '$RECYCLE.BIN', 'System Volume Information', 'Thumbs.db', 'OneNote_RecycleBin']
 # vision = true
-#
-# # You write which folders belong to each group; a group without folders stays empty. The group
-# # folders are the roots of this world (no roots line here).
-# [worlds.engineering.groups]
-# Mechanical = ['\\server\share\Mecanique']
-# Electrical = []
-# Software = []
+# roots = ['\\server\share\Mecanique']
+# # The discipline of each document (Mechanical, Electrical, Software, Mixed, Unknown) is decided at
+# # indexing from the folder rules and word lists of disciplines.toml (default: next to config.toml;
+# # start from disciplines.example.toml). The index run writes engineering-classification.csv and
+# # keyword-suggestions.csv for review.
+# disciplines = 'disciplines.toml'
 
 # OCR of scanned PDF pages (`dmx-docs ocr`, part of launcher 7). Uses the Tesseract engine built
 # into PyMuPDF; only the language files are needed (tessdata_best from

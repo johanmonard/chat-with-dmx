@@ -12,6 +12,7 @@ Shared folder layout (this script lives in <shared>\app\scripts):
   <shared>\config.toml        settings used by every machine (data_dir = 'C:\dmx-rag\data'),
                               with one [worlds.<name>] table per world
   <shared>\thesaurus.toml     search vocabulary shared by every world
+  <shared>\disciplines.toml   folder rules and word lists of the engineering world (reports engineering-classification.csv and keyword-suggestions.csv go back next to the index)
   <shared>\maps\<world>.md    world maps (what each world holds, where, what it lacks), copied by pull
   <shared>\knowledge\         knowledge cards (projects\<PROJECT>.md, vocabulary.md, README.md), mirrored by pull
   <shared>\worlds\<world>\    index.sqlite3 (master), index.prev.sqlite3 (previous), LOCK,
@@ -429,6 +430,10 @@ function Copy-MasterToLocal {
     }
     else { Remove-Item $localVerified -Recurse -Force -ErrorAction SilentlyContinue }
     Remove-Item (Join-Path $LocalWorld 'review.csv') -Force -ErrorAction SilentlyContinue   # only a review written by this run goes back
+    # Engineering world: the two reports of a run (classification, keyword suggestions) likewise
+    foreach ($report in 'engineering-classification.csv', 'keyword-suggestions.csv') {
+        Remove-Item (Join-Path $LocalWorld $report) -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Save-LocalToMaster {
@@ -452,6 +457,10 @@ con.close()
     Move-Item $tmp $Master -Force
     $review = Join-Path $LocalWorld 'review.csv'   # offers world: the list to check, written by 'offers --review'
     if (Test-Path $review) { Copy-Item $review (Join-Path $SharedWorld 'review.csv') -Force }
+    foreach ($report in 'engineering-classification.csv', 'keyword-suggestions.csv') {   # engineering world: to review
+        $file = Join-Path $LocalWorld $report
+        if (Test-Path $file) { Copy-Item $file (Join-Path $SharedWorld $report) -Force }
+    }
     Copy-Item $SharedConfig $LocalConfig -Force
     return $true
 }
@@ -547,6 +556,8 @@ try {
             Copy-Item $SharedConfig $LocalConfig -Force
             $th = Join-Path $Shared 'thesaurus.toml'
             if (Test-Path $th) { Copy-Item $th (Join-Path $Local 'thesaurus.toml') -Force }  # search synonyms
+            $dr = Join-Path $Shared 'disciplines.toml'
+            if (Test-Path $dr) { Copy-Item $dr (Join-Path $Local 'disciplines.toml') -Force }  # engineering world: rules for a local index run
             $maps = Join-Path $Shared 'maps'
             if (Test-Path $maps) {  # world maps, read by the world_map tool next to the local config
                 New-Item -ItemType Directory -Force (Join-Path $Local 'maps') | Out-Null

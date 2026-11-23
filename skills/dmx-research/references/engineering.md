@@ -9,18 +9,21 @@ essentials for searching:
   templates, reference documents, and notebooks handed over by engineers. Mostly French, also
   English and German. It is not a project world: no client project folders here (Projects), no
   standard machine manual (Documentation).
-- It has three **groups**: Mechanical, Electrical, Software. **Only Mechanical is filled today**;
-  Electrical and Software are empty until their folders are added. Do not conclude "the
-  documentation does not exist" from an empty group: say that the group is not indexed yet.
+- Each document has a **discipline**: Mechanical, Electrical, Software, Mixed (several clearly
+  present) or Unknown (nothing points either way). It is decided **automatically** at indexing,
+  from folder rules and word lists: a hint, **not a fact**. Today the indexed folder is the
+  mechanical one, so most documents are Mechanical or Unknown. Do not conclude "the documentation
+  does not exist" from an empty filter: search again without it, and say what was not indexed.
 - Besides PDF, Word, PowerPoint, mails, Markdown and picture files (described by the vision
   model), the world reads **Excel workbooks** and **OneNote notebooks**.
-- Every hit shows a line `group <G> · section <S>`: the group, and the section = the first folder
-  below the group folder, e.g. "224 - Pneumatique". A document directly in the group folder has no
+- Every hit shows a line `discipline <D> · section <S>`: the discipline, and the section = the
+  first folder below the root, e.g. "224 - Pneumatique". A document directly in the root has no
   section.
 
 ## Filters
 
-- `category="Mechanical"` filters by group (`category="Mechanical,Electrical"` for several).
+- `category="Mechanical"` filters by discipline (`category="Mechanical,Mixed"` for several). Use it
+  as a hint to narrow a wide question, and repeat the search without it when results are thin.
 - `section="224 - Pneumatique"` filters by section; give the folder name as it is written, number
   included. The sections are listed by `world_map` and `list_folder`.
 - `file_type="xlsx"` / `"one"` / `"pdf"` to restrict to one kind of file; `modified_after=2022`
@@ -97,5 +100,5 @@ Question: « Comment dimensionne-t-on un vérin pneumatique ? Existe-t-il un fic
    its title and dates, or a PDF. Read the best with `read_document` around the matching page.
 3. If the answer is a calculation sheet, say that formulas are not indexed and point to the file;
    offer `open_document` to open it.
-4. Answer with the file path and the sheet (or page title); say what was not found, and that
-   Electrical and Software are not indexed yet if the question touched them.
+4. Answer with the file path and the sheet (or page title); say what was not found, and that the
+   discipline label is automatic if you relied on it.
