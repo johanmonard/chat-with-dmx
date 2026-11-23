@@ -125,6 +125,15 @@ classification report) proposes words for the lists:
   chosen words into `strong` or `weak`; the next run relabels and the suggestions shrink
   accordingly.
 * The thresholds are settings under `[suggestions]` in `disciplines.toml`.
+* **The user is reminded after every run.** When the report has rows, the last lines of the run
+  output (`dmx-docs index` and so the launcher window on the VM) say, in plain words:
+  `Keyword suggestions: <N> waiting for your review (<M> new since the last run) in
+  <path of keyword-suggestions.csv>. Nothing is added to disciplines.toml until you approve it.`
+  "New" = rows whose (discipline, word) were not in the previous run's report, remembered in
+  `meta`. When there are no rows, one line says `Keyword suggestions: none.` The same count is
+  shown in `index_status` of the world (`Keyword suggestions waiting: <N>`), so it is also seen
+  from Claude. The reminder is repeated every run until the report is empty, whether or not new
+  rows appeared.
 
 Not done: embedding-based labelling from solid examples (kept as a possible later step if the
 word lists plateau).
