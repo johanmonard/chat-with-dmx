@@ -42,10 +42,10 @@ def facet_rows(cfg):
 def test_sections_come_from_the_first_folder_below_the_root(eng):
     cfg, mech = eng
     assert cfg.roots == [str(mech)]
-    assert facet_rows(cfg) == {
-        "Pompes.pdf": (None, "224 - Pneumatique", "folder"),
-        "Ancien.pdf": (None, "229 - Archives", "folder"),
-        "Racine.pdf": (None, None, "folder")}
+    assert facet_rows(cfg) == {   # no disciplines.toml in this world: every document is Unknown
+        "Pompes.pdf": ("Unknown", "224 - Pneumatique", "folder"),
+        "Ancien.pdf": ("Unknown", "229 - Archives", "folder"),
+        "Racine.pdf": ("Unknown", None, "folder")}
 
 
 def test_search_filters_by_section_and_shows_the_discipline_line(eng):
