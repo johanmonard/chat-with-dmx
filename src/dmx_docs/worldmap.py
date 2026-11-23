@@ -194,7 +194,7 @@ def live_overview(con, cfg) -> Overview:
             head.append("By language: " + _counts(
                 con, "SELECT language, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC"))
         if cfg.profile == "engineering":
-            head.append("By group: " + _counts(
+            head.append("By discipline: " + _counts(
                 con, "SELECT category, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC"))
             head.append("By section: " + _counts(
                 con, "SELECT section, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC"))

@@ -359,7 +359,7 @@ class DocTools:
         con = store.connect(self.cfg.db_path, create=False)
         # Root/excluded folders may have changed on the configuration page.
         sources.refresh(self.cfg, con)
-        facets.refresh(con, self.cfg.roots, self.cfg.profile, self.cfg.groups)  # no-op when every document has its facets
+        facets.refresh(con, self.cfg.roots, self.cfg.profile)  # no-op when every document has its facets
         if self.cfg.profile == "projects":  # the machine register belongs to the project documentation
             register.refresh(con, self.cfg.register_path)  # no-op when neither the file nor the documents changed
         return con
@@ -476,7 +476,7 @@ class DocTools:
 
     def _facets(self, con, doc_ids: set[int]) -> dict[int, str]:
         """One line per document: project / collection / section / type (projects), category
-        (marketing), group and section (engineering), category and language (documentation), client / offer / type / country (offers)."""
+        (marketing), discipline and section (engineering), category and language (documentation), client / offer / type / country (offers)."""
         if not doc_ids or self.cfg.profile == "none":
             return {}
         ids = list(doc_ids)
@@ -486,7 +486,7 @@ class DocTools:
             out = {}
             for r in con.execute(f"SELECT * FROM doc_facets WHERE doc_id IN ({','.join('?' * len(ids))})", ids):
                 if self.cfg.profile == "engineering":
-                    out[r["doc_id"]] = f"group {r['category'] or 'unknown'} · section {r['section'] or '(none)'}"
+                    out[r["doc_id"]] = f"discipline {r['category'] or 'Unknown'} · section {r['section'] or '(none)'}"
                     continue
                 line = f"category {r['category'] or 'unknown'}"
                 if self.cfg.profile == "documentation":

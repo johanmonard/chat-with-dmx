@@ -116,7 +116,6 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "index":
         from .indexer import run_index
-        from .sources import GroupError
         _setup_logging(cfg, "index")
         print(f"Indexing {', '.join(cfg.roots)} -> {cfg.db_path} ({cfg.workers} workers)")
         started = time.monotonic()
@@ -125,9 +124,6 @@ def main(argv: list[str] | None = None) -> None:
         except KeyboardInterrupt:
             print("Stopped. Run `dmx-docs index` again to continue.")
             sys.exit(130)
-        except GroupError as e:
-            print(f"Not indexed: {e}")
-            sys.exit(2)
         print(f"Done in {(time.monotonic() - started) / 60:.1f} min: {stats.summary()}")
         print(f"Details (errors, skipped files): {cfg.logs_dir}")
         if cfg.embeddings_enabled:

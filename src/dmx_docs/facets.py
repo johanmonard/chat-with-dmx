@@ -307,48 +307,29 @@ def compute_offers(path: str, root: str) -> dict:
     return out
 
 
-def groups_fingerprint(groups: dict[str, list[str]]) -> str:
-    """12 hex characters naming a groups table: when it changes, the facets are recomputed."""
-    import hashlib
-
-    from . import store
-
-    pairs = sorted((g, store.path_key(f)) for g, folders in groups.items() for f in folders)
-    return hashlib.sha1(repr(pairs).encode("utf-8")).hexdigest()[:12]
-
-
-def compute_engineering(path: str, root: str, groups: dict[str, list[str]]) -> dict:
-    """Engineering world: the category is the group whose folder holds the document (only the
-    configuration names a group), the section the first folder below the group folder. A document in
-    no group folder has no facets."""
-    from . import store
-
-    key = store.path_key(path)
-    for group, folders in groups.items():
-        for folder in folders:
-            fk = store.path_key(folder)
-            if store.is_under(key, fk):
-                parts = [p for p in os.path.relpath(path, folder).replace("/", "\\").split("\\")
-                         if p and p != "."]
-                section = parts[0] if len(parts) > 1 else None  # the first folder below the group folder
-                return {"category": group, "section": section, "facet_source": "config"}
-    return {}
+def compute_engineering(path: str, root: str) -> dict:
+    """Engineering world: the section is the first folder below the root (None for a file directly in
+    it). The category (the discipline) is decided later from the text, see labelling.py. A document under
+    no configured root has no facets: the whole path would make the server name one."""
+    if not root:
+        return {}
+    parts = [p for p in os.path.relpath(path, root).replace("/", "\\").split("\\") if p and p != "."]
+    return {"section": parts[0] if len(parts) > 1 else None, "facet_source": "folder"}
 
 
 RULES = {"projects": compute, "marketing": compute_marketing, "documentation": compute_documentation,
-         "offers": compute_offers}
+         "offers": compute_offers, "engineering": compute_engineering}
 # offers 2: the archive client by its position under the country folder; 3: the offer's own file wherever it lies;
 # 4: a version after a dash in the file name ('B-250306-V2.doc'); 5: PRJ-YYYY-NNNNN project numbers;
 # 6: archive offers numbered by a date in the folder name ('<date>@<client>').
-PROFILE_VERSIONS = {"marketing": MARKETING_FACETS_VERSION, "documentation": 1, "offers": 6}
+# engineering 2: the section only; the discipline (category) is written by labelling.py.
+PROFILE_VERSIONS = {"marketing": MARKETING_FACETS_VERSION, "documentation": 1, "offers": 6, "engineering": 2}
 
 
-def _version(profile: str, groups: dict | None = None) -> str:
+def _version(profile: str) -> str:
     # Projects keeps the plain number stored before worlds existed: nothing is recomputed.
     if profile == "projects":
         return str(FACETS_VERSION)
-    if profile == "engineering":  # the groups table is part of the rules
-        return f"engineering:1:{groups_fingerprint(groups or {})}"
     return f"{profile}:{PROFILE_VERSIONS.get(profile, 1)}"
 
 
@@ -380,10 +361,9 @@ _ADDED_COLUMNS = ("subproject", "category", "language", "client", "site", "count
                   "revision", "machine")
 
 
-def refresh(con, roots: list[str], profile: str = "projects", groups: dict | None = None) -> int:
+def refresh(con, roots: list[str], profile: str = "projects") -> int:
     """Compute facets for documents that have none (or were computed by older rules or another
-    profile, or another groups table). Cheap when everything is up to date. Returns the number of
-    documents updated."""
+    profile). Cheap when everything is up to date. Returns the number of documents updated."""
     from . import store
 
     con.executescript(TABLE)
@@ -391,7 +371,7 @@ def refresh(con, roots: list[str], profile: str = "projects", groups: dict | Non
     for column in _ADDED_COLUMNS:  # tables from before sub-projects, worlds, documentation and offers
         if column not in cols:
             con.execute(f"ALTER TABLE doc_facets ADD COLUMN {column} TEXT")
-    version = _version(profile, groups)
+    version = _version(profile)
     if store.get_meta(con, "facets_version") != version:
         con.execute("DELETE FROM doc_facets")
         store.set_meta(con, "facets_version", version)
@@ -399,11 +379,7 @@ def refresh(con, roots: list[str], profile: str = "projects", groups: dict | Non
     todo = con.execute("""SELECT d.id, d.path, d.path_key FROM docs d
                           LEFT JOIN doc_facets f ON f.doc_id = d.id WHERE f.doc_id IS NULL""").fetchall()
     root_keys = [(store.path_key(r), r) for r in roots]
-    if profile == "engineering":
-        def rule(path, root):
-            return compute_engineering(path, root, groups or {})
-    else:
-        rule = RULES.get(profile, lambda path, root: {})
+    rule = RULES.get(profile, lambda path, root: {})
     rows = []
     for doc_id, path, key in todo:
         f = rule(path, root_of(key, root_keys) or "")

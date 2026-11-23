@@ -222,13 +222,6 @@ class _Writer:
 def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_stop=None) -> Stats:
     con = store.connect(cfg.db_path)
     sources.refresh(cfg, con)
-    if cfg.profile == "engineering":  # every group folder is a root; a root in no group stops the run
-        try:
-            sources.sync_group_roots(con, cfg)
-        except sources.GroupError:
-            con.close()  # Windows keeps the database file locked otherwise
-            raise
-        sources.refresh(cfg, con)
     con.isolation_level = None  # explicit transactions
     run_id = int(store.get_meta(con, "last_run", "0")) + 1
     store.set_meta(con, "last_run", run_id)
@@ -397,7 +390,7 @@ def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_st
     store.set_meta(con, "last_index_finished", time.time())
     writer.commit()
     con.execute("COMMIT")
-    facets.refresh(con, cfg.roots, cfg.profile, cfg.groups)
+    facets.refresh(con, cfg.roots, cfg.profile)
     report(force=True)
     con.close()
     return stats

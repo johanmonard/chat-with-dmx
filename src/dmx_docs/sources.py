@@ -46,34 +46,6 @@ def refresh(cfg: Config, con=None) -> Config:
     return cfg
 
 
-class GroupError(ValueError):
-    """A stored root of an engineering world that no group of the configuration covers."""
-
-
-def sync_group_roots(con, cfg: Config) -> list[str]:
-    """Engineering world: every group folder of the configuration becomes a root. Returns the folders
-    added. Never removes a root: a stored root that is neither a group folder nor inside one raises
-    GroupError naming it, so that nothing is indexed outside the groups."""
-    group_keys = {store.path_key(f): f for folders in cfg.groups.values() for f in folders}
-    stored = [(r["path"], r["path_key"]) for r in con.execute("SELECT path, path_key FROM roots ORDER BY path")]
-    stray = [path for path, key in stored if not any(store.is_under(key, gk) for gk in group_keys)]
-    if stray:
-        raise GroupError("Root folders that are in no group of the configuration: " + "; ".join(stray)
-                         + ". Add each one to a group in [worlds." + str(cfg.world) + ".groups] "
-                         "or remove it on the configuration page.")
-    have = [key for _, key in stored]
-    added = []
-    for key, folder in group_keys.items():
-        if not any(store.is_under(key, k) for k in have):
-            try:
-                added.append(add_root(con, folder))
-            except ValueError as e:
-                raise GroupError(f"Group folder {folder} cannot become a root: {e}. If it contains a stored "
-                                 "root folder (a group folder that was widened), remove that inner root on "
-                                 "the configuration page.") from e
-    return added
-
-
 def _migrate_drive_letters(con) -> None:
     """Roots saved as 'N:\\...' become UNC paths (on a machine where that drive is mapped).
     A root that lies inside another root becomes a ticked folder of that root."""

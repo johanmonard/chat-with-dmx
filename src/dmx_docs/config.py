@@ -64,8 +64,6 @@ class Config:
     world: str | None = None
     world_title: str | None = None
     profile: str = "projects"
-    # Engineering world: group name -> its folders, from [worlds.<name>.groups] (the only source of a group).
-    groups: dict[str, list[str]] = field(default_factory=dict)
     # OCR of PDF pages without text (ocr.py). The language files live in tessdata_dir.
     ocr_enabled: bool = True
     ocr_languages: str = "fra"
@@ -157,27 +155,6 @@ class Config:
         }
 
 
-def _read_groups(name: str, table: dict) -> dict[str, list[str]]:
-    """[worlds.<name>.groups]: group -> folders, cleaned; a folder may be in one group once, and no
-    group folder may lie inside another."""
-    from .sources import clean_path
-    from .store import is_under, path_key
-
-    groups = {str(g): [clean_path(str(f)) for f in folders] for g, folders in table.items()}
-    seen: list[tuple[str, str, str]] = []  # (group, folder, key)
-    for group, folders in groups.items():
-        for folder in folders:
-            key = path_key(folder)
-            for _, other, other_key in seen:
-                if key == other_key:
-                    raise ValueError(f"World '{name}': {folder} is in more than one group")
-                if is_under(key, other_key) or is_under(other_key, key):
-                    raise ValueError(f"World '{name}': group folders may not contain one another: "
-                                     f"{folder} and {other}")
-            seen.append((group, folder, key))
-    return groups
-
-
 def load_config(path: str | os.PathLike, world: str | None = None) -> Config:
     """Read config.toml. When it has [worlds.<name>] tables, one world is used: `world`, else
     $DMX_DOCS_WORLD, else 'projects'. A world table may set title, profile, extensions, exclude,
@@ -204,12 +181,8 @@ def load_config(path: str | os.PathLike, world: str | None = None) -> Config:
         if key in w:
             idx[key] = w[key]
 
-    groups: dict[str, list[str]] = {}
-    if name and w.get("profile") == "engineering":
-        if "roots" in w:
-            raise ValueError(f"World '{name}': write the folders in [worlds.{name}.groups], not in roots")
-        groups = _read_groups(name, w.get("groups") or {})
-        idx["roots"] = [folder for folders in groups.values() for folder in folders]
+    if name and w.get("profile") == "engineering" and "groups" in w:
+        raise ValueError(f"World '{name}': groups are no longer used; write the folders in roots")
 
     roots = idx.get("roots") or []
     data_dir = Path(idx.get("data_dir", "data"))
@@ -221,8 +194,7 @@ def load_config(path: str | os.PathLike, world: str | None = None) -> Config:
         profile = w.get("profile", "none")
         if profile not in PROFILES:
             raise ValueError(f"World '{name}': unknown profile '{profile}' (use {', '.join(PROFILES)})")
-        kwargs.update(world=name, world_title=w.get("title") or name.capitalize(), profile=profile,
-                      groups=groups)
+        kwargs.update(world=name, world_title=w.get("title") or name.capitalize(), profile=profile)
     for key in ("extensions", "exclude", "max_file_mb", "max_pdf_pages", "max_sheet_rows", "max_sheet_columns",
                 "workers",
                 "doc_converter", "libreoffice_path"):
