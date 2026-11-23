@@ -19,7 +19,8 @@ or `Unknown` (nothing points either way).
    (b) **keyword scoring** of the folder names, file name, title and the start of the text;
    (c) otherwise `Unknown`. No model pass in this version.
 3. The user can check the result before trusting it: a report file lists every document with its
-   label, scores, top terms and which rule decided.
+   label, scores, top terms and which rule decided; a second file proposes new keywords found in
+   the confidently labelled documents (proposals only, see 3b).
 4. Editing the rules or the word lists recomputes the labels on the next index run, without
    re-extracting any document.
 
@@ -28,6 +29,8 @@ or `Unknown` (nothing points either way).
 * A model (gemma4) pass for undecided documents: added later only if the spot-check of the
   keyword result disappoints.
 * Several labels per document, or a score exposed to Claude (Mixed covers it).
+* Words added to the lists automatically (a word learned from labels that the words produced
+  would reinforce early mistakes, and a label must stay explainable by a fixed list).
 * Changing any other world.
 * Folder groups: removed.
 
@@ -97,6 +100,35 @@ The report `engineering-classification.csv` (next to the index, copied to the sh
 the push like `review.csv` of the offers world) has one row per document: path, section,
 discipline, source (rule / words), the three scores, top terms.
 
+### 3b. Keyword suggestions (proposals only, never applied automatically)
+
+At the end of `disciplines.refresh`, a second report `keyword-suggestions.csv` (same place as the
+classification report) proposes words for the lists:
+
+* Reference set per discipline: documents decided by a **folder rule**, plus documents decided
+  by words whose top share is `>= 0.85` and whose score is at least `3 * min_score`.
+  Documents labelled `Mixed` or `Unknown` are never part of the reference.
+* Candidates: single words and two-word phrases from the same text that is scored (path, name,
+  title, first chunks), lowercased, accents removed, without numbers-only tokens, tokens under
+  4 characters, French and English stop words (a small built-in list), and words already in any
+  list of `disciplines.toml`.
+* A candidate is kept for a discipline when it appears in at least `min_docs` (default 5)
+  reference documents of that discipline, in at least `min_sections` (default 2) different
+  sections or folders, and its share of occurrences in that discipline's reference documents is at
+  least `min_lift` (default 3) times its share in the other disciplines' reference documents
+  (smoothed so a word absent elsewhere does not divide by zero). Words that are mostly capitalised
+  names inside the file (project and client names) are dropped when they appear in a single
+  folder.
+* One row per candidate: discipline, word, documents in the discipline, documents elsewhere,
+  lift, three example documents. Sorted by discipline then lift. At most 200 rows per discipline.
+* Nothing is written to `disciplines.toml`. The user (or Claude on the user's word) moves the
+  chosen words into `strong` or `weak`; the next run relabels and the suggestions shrink
+  accordingly.
+* The thresholds are settings under `[suggestions]` in `disciplines.toml`.
+
+Not done: embedding-based labelling from solid examples (kept as a possible later step if the
+word lists plateau).
+
 ### 4. Tools and text
 
 `ENGINEERING_INSTRUCTIONS`, the `engineering_search` docstring, the skill page
@@ -121,7 +153,8 @@ that the label is automatic and approximate (a hit's label is a hint, not a fact
 
 Index the Mechanical folder, read `engineering-classification.csv` with the user: a sample of
 about 40 documents spread over sections, count of Unknown and Mixed, and the word lists adjusted
-until the user is satisfied. Only then the world is used.
+(with the help of `keyword-suggestions.csv`) until the user is satisfied. Only then the world is
+used.
 
 ## Left to the builder
 
