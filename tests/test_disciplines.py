@@ -112,6 +112,14 @@ def test_missing_file_gives_empty_rules():                              # Review
     '[[folder]]\npattern = "*/a/*"\ndiscipline = "Chemistry"\n',
     '[words.Chemistry]\nstrong = ["acide"]\n',
     "[scoring]\nmixed_share = 1.5\n",
+    "[folder]\npattern = 'x'\n",                     # a table instead of [[folder]]
+    'words = "x"\n',
+    '[words]\nMechanical = ["a"]\n',                 # the discipline table is [words.Mechanical]
+    "scoring = 5\n",
+    "[scoring]\nmin_score = 0\n",
+    "[suggestions]\nmax_rows = -1\n",
+    "[suggestions]\nmin_docs = 0\n",
+    "[suggestions]\nmin_lift = 0\n",
 ])
 def test_bad_rules_raise_rules_error(tmp_path, text):                   # Review Focus 1
     with pytest.raises(RulesError, match="disciplines.toml"):
@@ -131,6 +139,11 @@ def test_the_example_rules_file_loads_and_classifies():
     }
     for label, text in samples.items():
         assert classify(rules, "c:/x/a.pdf", "a.pdf", None, text).label == label, text
+
+
+def test_a_document_without_any_score_is_unknown_even_with_min_score_zero():
+    rules = disciplines.Rules(min_score=0)          # not loadable from a file, but never a division by zero
+    assert classify(rules, "c:/x/a.pdf", "a.pdf", None, "rien").label == "Unknown"
 
 
 def test_fingerprint_changes_with_the_file(tmp_path):

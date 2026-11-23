@@ -459,7 +459,8 @@ con.close()
     if (Test-Path $review) { Copy-Item $review (Join-Path $SharedWorld 'review.csv') -Force }
     foreach ($report in 'engineering-classification.csv', 'keyword-suggestions.csv') {   # engineering world: to review
         $file = Join-Path $LocalWorld $report
-        if (Test-Path $file) { Copy-Item $file (Join-Path $SharedWorld $report) -Force }
+        try { if (Test-Path $file) { Copy-Item $file (Join-Path $SharedWorld $report) -Force } }   # a report open in Excel must not stop the push
+        catch { Say "Warning: $report could not be copied to the shared folder ($($_.Exception.Message)); close it and run the push again." }
     }
     Copy-Item $SharedConfig $LocalConfig -Force
     return $true

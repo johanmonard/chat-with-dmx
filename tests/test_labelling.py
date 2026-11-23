@@ -117,6 +117,48 @@ def test_the_cli_reports_bad_rules_in_one_line(tmp_path, capsys):
     assert "Not indexed:" in capsys.readouterr().out
 
 
+def add_chunk(cfg, name, text):
+    """What OCR or the picture descriptions do: new chunks for a document, without extracting it again."""
+    con = store.connect(cfg.db_path)
+    doc_id = con.execute("SELECT id FROM docs WHERE name = ?", (name,)).fetchone()[0]
+    seq = con.execute("SELECT coalesce(max(seq), -1) + 1 FROM chunks WHERE doc_id = ?", (doc_id,)).fetchone()[0]
+    con.execute("INSERT INTO chunks(doc_id, page_no, seq, text) VALUES (?, 1, ?, ?)", (doc_id, seq, text))
+    con.commit()
+    con.close()
+
+
+def test_text_added_after_extraction_is_scored(tmp_path):                  # final review, Important 1
+    from dmx_docs import labelling
+    from dmx_docs.disciplines import load_rules
+    cfg, _, _ = make_world(tmp_path)
+    run_index(cfg, progress=quiet)
+    assert labels(cfg)["vide.pdf"] == "Unknown"
+    con = store.connect(cfg.db_path)
+    stamp = con.execute("SELECT labelled_at FROM doc_discipline d JOIN docs x ON x.id = d.doc_id "
+                        "WHERE x.name = 'armoire.pdf'").fetchone()[0]
+    con.close()
+    add_chunk(cfg, "vide.pdf", "pneumatique prehenseur")
+    con = store.connect(cfg.db_path)
+    labelling.refresh(con, cfg, load_rules(cfg.disciplines_path), quiet)
+    con.close()
+    assert labels(cfg)["vide.pdf"] == "Mechanical"
+    con = store.connect(cfg.db_path)
+    assert con.execute("SELECT labelled_at FROM doc_discipline d JOIN docs x ON x.id = d.doc_id "
+                       "WHERE x.name = 'armoire.pdf'").fetchone()[0] == stamp      # the others are not rescored
+    con.close()
+
+
+def test_ocr_and_describe_end_by_relabelling_an_engineering_world(tmp_path, monkeypatch):
+    from dmx_docs import indexer
+    cfg, _, _ = make_world(tmp_path)
+    run_index(cfg, progress=quiet)
+    add_chunk(cfg, "vide.pdf", "pneumatique prehenseur")
+    lines: list[str] = []
+    indexer.refresh_disciplines(cfg, lines.append)
+    assert labels(cfg)["vide.pdf"] == "Mechanical"
+    assert any(line.startswith("Keyword suggestions:") for line in lines)
+
+
 def test_classification_report(tmp_path):
     cfg, _, rules_file = make_world(tmp_path)
     rules_file.write_text(RULES + '\n[[folder]]\npattern = "*/misc/*"\ndiscipline = "Software"\n', encoding="utf-8")

@@ -77,14 +77,23 @@ def load_rules(path: str | None) -> Rules:
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
         raise RulesError(f"{path}: {e}") from e
     rules = Rules(fingerprint=hashlib.sha1(data).hexdigest()[:12])
-    for entry in raw.get("folder", []):
+    folder_rules = raw.get("folder", [])
+    if not isinstance(folder_rules, list) or not all(isinstance(e, dict) for e in folder_rules):
+        raise RulesError(f"{path}: folder rules are written [[folder]] (double brackets), one per rule")
+    word_tables = raw.get("words") or {}
+    if not isinstance(word_tables, dict) or not all(isinstance(t, dict) for t in word_tables.values()):
+        raise RulesError(f"{path}: word lists are written [words.Mechanical], [words.Electrical], [words.Software]")
+    for table in ("scoring", "suggestions"):
+        if not isinstance(raw.get(table) or {}, dict):
+            raise RulesError(f"{path}: [{table}] must be a table of settings")
+    for entry in folder_rules:
         pattern, label = entry.get("pattern"), entry.get("discipline")
         if not isinstance(pattern, str) or not pattern.strip():
             raise RulesError(f"{path}: a [[folder]] rule needs a pattern")
         if label not in LABELS:
             raise RulesError(f"{path}: unknown discipline {label!r} in a folder rule (use {', '.join(LABELS)})")
         rules.folders.append((pattern.replace("\\", "/").lower(), label))
-    for name, table in (raw.get("words") or {}).items():
+    for name, table in word_tables.items():
         if name not in DISCIPLINES:
             raise RulesError(f"{path}: [words.{name}]: the disciplines are {', '.join(DISCIPLINES)}")
         rules.words[name] = {kind: _words(table, f"{path}: [words.{name}]", kind) for kind in ("strong", "weak")}
@@ -101,6 +110,13 @@ def load_rules(path: str | None) -> Rules:
     for key in ("mixed_share", "top_share"):
         if not 0 < getattr(rules, key) < 1:
             raise RulesError(f"{path}: [scoring] {key} must be between 0 and 1")
+    if rules.min_score < 1:
+        raise RulesError(f"{path}: [scoring] min_score must be at least 1")
+    for key in ("min_docs", "min_sections", "max_rows"):
+        if rules.suggestions[key] < 1:
+            raise RulesError(f"{path}: [suggestions] {key} must be at least 1")
+    if rules.suggestions["min_lift"] <= 0:
+        raise RulesError(f"{path}: [suggestions] min_lift must be greater than 0")
     return rules
 
 
@@ -132,7 +148,7 @@ def classify(rules: Rules, full_path: str, rel_path: str, title: str | None, bod
         if fnmatch.fnmatchcase(lowered, pattern):
             return Decision(label, "rule", scores, top_terms)
     total = sum(scores.values())
-    if total < rules.min_score:
+    if total < max(rules.min_score, 1):          # also guards the division below
         return Decision("Unknown", "none", scores, top_terms)
     ranked = sorted(DISCIPLINES, key=lambda d: (-scores[d], DISCIPLINES.index(d)))
     top, second = ranked[0], ranked[1]

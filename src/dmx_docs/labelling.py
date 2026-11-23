@@ -25,9 +25,13 @@ CREATE TABLE IF NOT EXISTS doc_discipline (
     source       TEXT NOT NULL,
     scores       TEXT NOT NULL,
     top_terms    TEXT NOT NULL,
-    labelled_at  REAL NOT NULL
+    labelled_at  REAL NOT NULL,
+    signature    TEXT NOT NULL DEFAULT ''
 );
 """
+# What a document was scored on: its number of chunks and the last chunk id. OCR and picture descriptions
+# add chunks without extracting the document again, so a change of the signature relabels it.
+SIGNATURE = "(SELECT count(*) || ':' || coalesce(max(id), 0) FROM chunks WHERE doc_id = d.id)"
 BODY_CHUNKS = 3
 REPORT_NAME = "engineering-classification.csv"
 
@@ -53,22 +57,25 @@ def refresh(con, cfg: Config, rules: Rules, progress=print) -> dict[str, int]:
     """Label the documents that need it, copy the labels into doc_facets.category, write the report.
     Returns the number of documents per label."""
     con.executescript(TABLE)
+    if "signature" not in {r[1] for r in con.execute("PRAGMA table_info(doc_discipline)")}:
+        con.execute("ALTER TABLE doc_discipline ADD COLUMN signature TEXT NOT NULL DEFAULT ''")
     if rules.fingerprint == "none":
         progress("WARNING: disciplines.toml not found: every document is Unknown")
     everything = store.get_meta(con, "disciplines_fingerprint") != rules.fingerprint
     con.execute("DELETE FROM doc_discipline WHERE doc_id NOT IN (SELECT id FROM docs)")
-    where = "" if everything else "WHERE x.doc_id IS NULL OR x.labelled_at < d.indexed_at"
-    todo = con.execute(f"""SELECT d.id, d.path, d.path_key, d.title FROM docs d
+    where = "" if everything else ("WHERE x.doc_id IS NULL OR x.labelled_at < d.indexed_at "
+                                   "OR x.signature != sig")
+    todo = con.execute(f"""SELECT d.id, d.path, d.path_key, d.title, {SIGNATURE} AS sig FROM docs d
                            LEFT JOIN doc_discipline x ON x.doc_id = d.id {where}""").fetchall()
     root_keys = [(store.path_key(r), r) for r in cfg.roots]
     now = time.time()
     rows = []
-    for doc_id, path, key, title in todo:
+    for doc_id, path, key, title, sig in todo:
         rel, body = text_of(con, doc_id, path, key, root_keys)
         d = classify(rules, path, rel, title, body)
-        rows.append((doc_id, d.label, d.source, json.dumps(d.scores), json.dumps(d.top_terms), now))
+        rows.append((doc_id, d.label, d.source, json.dumps(d.scores), json.dumps(d.top_terms), now, sig))
     _commit_many(con, "INSERT OR REPLACE INTO doc_discipline(doc_id, discipline, source, scores, top_terms, "
-                      "labelled_at) VALUES (?,?,?,?,?,?)", rows)
+                      "labelled_at, signature) VALUES (?,?,?,?,?,?,?)", rows)
     con.execute("UPDATE doc_facets SET category = (SELECT discipline FROM doc_discipline "
                 "WHERE doc_discipline.doc_id = doc_facets.doc_id)")
     if con.in_transaction:

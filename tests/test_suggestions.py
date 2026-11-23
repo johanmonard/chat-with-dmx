@@ -107,6 +107,36 @@ def test_mixed_unknown_and_weak_documents_are_not_reference(tmp_path):
     assert ("Mechanical", "sertissage") in words(cfg)                    # decided by a folder rule
 
 
+def test_suggestions_work_when_only_one_discipline_is_indexed(tmp_path):    # final review, Important 2
+    root = tmp_path / "Eng"
+    for f in ("f1", "f2", "f3"):
+        for i in range(2):
+            add(root, f"mm/{f}", f"d{i}.pdf", "pneumatique avec sertissage")             # Mechanical, by rule
+    for f in ("f1", "f2", "f3"):
+        for i in range(3):
+            add(root, f"other/{f}", f"d{i}.pdf", "compte rendu de reunion")             # no discipline: Unknown
+    config = tmp_path / "config.toml"
+    config.write_text("[index]\ndata_dir = 'data'\n[worlds.engineering]\ntitle = \"Engineering\"\n"
+                      f"profile = \"engineering\"\nextensions = ['.pdf']\nroots = ['{root}']\n", encoding="utf-8")
+    (tmp_path / "disciplines.toml").write_text(RULES, encoding="utf-8")
+    cfg = load_config(config, world="engineering")
+    run_index(cfg, progress=lambda *a: None)
+    row = next(r for r in rows_of(cfg) if r[1] == "sertissage")
+    assert row[0] == "Mechanical" and row[2] == "6" and row[3] == "0"
+    assert not any(r[1] in ("compte", "reunion") for r in rows_of(cfg))        # frequent elsewhere only: not Mechanical
+
+
+def test_the_reminder_does_not_name_a_report_that_could_not_be_written(tmp_path, monkeypatch):
+    from dmx_docs import suggestions
+    cfg, _, _ = make_world(tmp_path)
+    monkeypatch.setattr(suggestions, "write_report", lambda rows, path: (_ for _ in ()).throw(OSError("locked")))
+    lines: list[str] = []
+    run_index(cfg, progress=lines.append)
+    reminder = next(line for line in lines if line.startswith("Keyword suggestions:"))
+    assert "waiting for your review" in reminder and "keyword-suggestions.csv" not in reminder
+    assert "report not written" in reminder
+
+
 def test_csv_row_cap(tmp_path):
     cfg, _, _ = make_world(tmp_path, rules=RULES + "\n[suggestions]\nmax_rows = 1\n")
     run_index(cfg, progress=lambda *a: None)

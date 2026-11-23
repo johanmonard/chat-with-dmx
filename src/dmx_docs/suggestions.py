@@ -68,10 +68,22 @@ def candidates(con, cfg: Config, rules: Rules) -> list[Suggestion]:
     listed_words = _listed(rules)
     listed_tokens = {t for w in listed_words for t in w.split()}
     root_keys = [(store.path_key(r), r) for r in cfg.roots]
-    reference: dict[str, list] = {d: [] for d in DISCIPLINES}      # discipline -> [(path, folder, candidates)]
+    # One pass over every document: the background is ALL documents of the world (Unknown, Mixed and
+    # the ones decided by weak evidence included), the reference are the confidently labelled ones.
+    n_total = 0
+    sizes = {d: 0 for d in DISCIPLINES}
+    df_all: dict[str, int] = {}                                     # candidate -> documents of the world
+    df: dict[str, dict[str, int]] = {}                              # candidate -> discipline -> reference documents
+    folders: dict[tuple[str, str], set[str]] = {}
+    examples: dict[tuple[str, str], list[str]] = {}
     for doc_id, path, key, title, discipline, source, scores in con.execute(
             """SELECT d.id, d.path, d.path_key, d.title, x.discipline, x.source, x.scores
-               FROM docs d JOIN doc_discipline x ON x.doc_id = d.id""").fetchall():
+               FROM docs d LEFT JOIN doc_discipline x ON x.doc_id = d.id""").fetchall():
+        rel, body = labelling.text_of(con, doc_id, path, key, root_keys)
+        cands = _candidates_of(normalize(f"{rel} {title or ''} {body}").split(), listed_words, listed_tokens)
+        n_total += 1
+        for c in cands:
+            df_all[c] = df_all.get(c, 0) + 1
         if discipline not in DISCIPLINES:
             continue
         if source != "rule":
@@ -80,22 +92,15 @@ def candidates(con, cfg: Config, rules: Rules) -> list[Suggestion]:
             if (source != "words" or total < REFERENCE_SCORE_FACTOR * rules.min_score
                     or s.get(discipline, 0) / total < REFERENCE_SHARE):
                 continue
-        rel, body = labelling.text_of(con, doc_id, path, key, root_keys)
-        tokens = normalize(f"{rel} {title or ''} {body}").split()
-        reference[discipline].append((path, os.path.dirname(key), _candidates_of(tokens, listed_words, listed_tokens)))
-    sizes = {d: len(docs) for d, docs in reference.items()}
-    df: dict[str, dict[str, int]] = {}                              # candidate -> discipline -> documents
-    folders: dict[tuple[str, str], set[str]] = {}
-    examples: dict[tuple[str, str], list[str]] = {}
-    for discipline, docs in reference.items():
-        for path, folder, cands in docs:
-            for c in cands:
-                per = df.setdefault(c, {})
-                per[discipline] = per.get(discipline, 0) + 1
-                folders.setdefault((discipline, c), set()).add(folder)
-                ex = examples.setdefault((discipline, c), [])
-                if len(ex) < 3:
-                    ex.append(path)
+        sizes[discipline] += 1
+        folder = os.path.dirname(key)
+        for c in cands:
+            per = df.setdefault(c, {})
+            per[discipline] = per.get(discipline, 0) + 1
+            folders.setdefault((discipline, c), set()).add(folder)
+            ex = examples.setdefault((discipline, c), [])
+            if len(ex) < 3:
+                ex.append(path)
     found: dict[str, list[Suggestion]] = {d: [] for d in DISCIPLINES}
     for c, per in df.items():
         best = max(DISCIPLINES, key=lambda d: (per.get(d, 0) / sizes[d]) if sizes[d] else -1)
@@ -103,8 +108,8 @@ def candidates(con, cfg: Config, rules: Rules) -> list[Suggestion]:
         if not n_in:
             continue
         df_in = per.get(best, 0)
-        df_out = sum(v for d, v in per.items() if d != best)
-        n_out = sum(sizes[d] for d in DISCIPLINES if d != best)
+        df_out = df_all[c] - df_in
+        n_out = n_total - n_in
         lift = (df_in / n_in) / ((df_out + 1) / (n_out + 1))
         if (df_in >= settings["min_docs"] and len(folders[(best, c)]) >= settings["min_sections"]
                 and lift >= settings["min_lift"]):
@@ -130,18 +135,20 @@ def refresh(con, cfg: Config, rules: Rules, progress=print) -> list[Suggestion]:
     """Write keyword-suggestions.csv and remind the user, after every run, of what waits for review."""
     rows = candidates(con, cfg, rules)
     path = cfg.world_dir / REPORT_NAME
+    where = f"in {path}"
     try:
         write_report(rows, path)
     except OSError as e:
         progress(f"{REPORT_NAME} not written: {e}")
+        where = "(report not written, see the line above)"
     keys = [f"{s.discipline}|{s.word}" for s in rows]
     previous = set(json.loads(store.get_meta(con, "suggestions_prev", "[]")))
     store.set_meta(con, "suggestions_prev", json.dumps(keys))
     store.set_meta(con, "suggestions_waiting", len(rows))
     if rows:
         new = sum(1 for k in keys if k not in previous)
-        progress(f"Keyword suggestions: {len(rows)} waiting for your review ({new} new since the last run) in "
-                 f"{path}. Nothing is added to disciplines.toml until you approve it.")
+        progress(f"Keyword suggestions: {len(rows)} waiting for your review ({new} new since the last run) "
+                 f"{where}. Nothing is added to disciplines.toml until you approve it.")
     else:
         progress("Keyword suggestions: none.")
     return rows

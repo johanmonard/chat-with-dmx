@@ -21,6 +21,19 @@ def _setup_logging(cfg, name: str) -> None:
     root.addHandler(handler)
 
 
+def _relabel_engineering(cfg) -> None:
+    """OCR and picture descriptions add text to documents: the engineering disciplines follow."""
+    if cfg.profile != "engineering":
+        return
+    from .disciplines import RulesError
+    from .indexer import refresh_disciplines
+    try:
+        refresh_disciplines(cfg)
+    except RulesError as e:
+        print(f"Disciplines not updated: {e}")
+        sys.exit(2)
+
+
 def main(argv: list[str] | None = None) -> None:
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -148,6 +161,7 @@ def main(argv: list[str] | None = None) -> None:
         except KeyboardInterrupt:
             print("Stopped. Run `dmx-docs ocr` again to continue.")
             sys.exit(130)
+        _relabel_engineering(cfg)
     elif args.command == "describe":
         if args.compare:
             from .describe import run_compare
@@ -161,6 +175,7 @@ def main(argv: list[str] | None = None) -> None:
         except KeyboardInterrupt:
             print("Stopped. Run `dmx-docs describe` again to continue.")
             sys.exit(130)
+        _relabel_engineering(cfg)
     elif args.command == "offers":
         if cfg.profile != "offers":
             print("Not an offers world: nothing to do.")

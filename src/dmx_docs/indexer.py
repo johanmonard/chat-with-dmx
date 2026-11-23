@@ -219,6 +219,21 @@ class _Writer:
         self.tick()
 
 
+def refresh_disciplines(cfg: Config, progress=print) -> dict[str, int]:
+    """Engineering world: label the documents again and refresh the keyword suggestions. Run after
+    `ocr` and `describe`, which add text to documents without extracting them again (a document is
+    relabelled when the chunks it was scored on changed). Raises RulesError for a broken disciplines.toml."""
+    rules = disciplines.load_rules(cfg.disciplines_path)
+    con = store.connect(cfg.db_path)
+    try:
+        con.isolation_level = None
+        counts = labelling.refresh(con, cfg, rules, progress)
+        suggestions.refresh(con, cfg, rules, progress)
+        return counts
+    finally:
+        con.close()
+
+
 def run_index(cfg: Config, retry_errors: bool = False, progress=print, should_stop=None) -> Stats:
     con = store.connect(cfg.db_path)
     sources.refresh(cfg, con)
