@@ -152,12 +152,12 @@ def test_index_stores_offer_facets_and_recomputes_on_profile_change(tmp_path, ma
     run_index(cfg, progress=quiet)
     con = store.connect(cfg.db_path)
     query = "SELECT client, offer, revision, doc_type, category, machine FROM doc_facets"
-    assert store.get_meta(con, "facets_version") == "offers:4"
+    assert store.get_meta(con, "facets_version") == f"offers:{facets.PROFILE_VERSIONS['offers']}"
     assert [tuple(r) for r in con.execute(query)] == [("ACME Foods", "3002113", "02", "offer", "client", None)]
     # Another profile's rules, then the offers rules again: the rows are recomputed.
     store.set_meta(con, "facets_version", "marketing:1")
     assert facets.refresh(con, cfg.roots, "offers") == 1
-    assert store.get_meta(con, "facets_version") == "offers:4"
+    assert store.get_meta(con, "facets_version") == f"offers:{facets.PROFILE_VERSIONS['offers']}"
     row = tuple(con.execute("SELECT client, offer FROM doc_facets").fetchone())
     assert row == ("ACME Foods", "3002113")
     assert facets.refresh(con, cfg.roots, "offers") == 0
