@@ -276,9 +276,11 @@ def country_clause(value: str, alias: str = "rm") -> tuple[str, list[str]]:
     return f"{alias}.country COLLATE NOCASE IN ({','.join('?' * len(values))})", values
 
 
-def summary(con, project: str) -> str:
-    """'ACME FOODS (France), 3 machines 2023' - one line for lists and search hits."""
-    n, y0, y1 = con.execute("SELECT count(*), min(year), max(year) FROM register_machines WHERE project = ?",
+def summary(con, project: str, own_year: bool = False) -> str:
+    """'ACME FOODS (France), 3 machines 2023' - one line for lists and search hits. own_year: the
+    register's own years, not those taken from the project's documents where they disagree."""
+    year = "coalesce(reg_year, year)" if own_year else "year"
+    n, y0, y1 = con.execute(f"SELECT count(*), min({year}), max({year}) FROM register_machines WHERE project = ?",
                             (project,)).fetchone()
     if not n:
         return ""

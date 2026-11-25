@@ -377,6 +377,49 @@ class DocTools:
         cond = self._readable_sql(con)
         return f" AND doc_id IN (SELECT d.id FROM docs d WHERE {cond})" if cond else ""
 
+    @property
+    def _restricted(self) -> bool:
+        """Does the caller read less than the whole world (access = "acl" and not an admin)?"""
+        return self.access.folder_predicate() is not None
+
+    def _project_reader(self, con):
+        """Function project name -> can the caller read at least one indexed document of that project
+        or sub-project? The machine register and the card citations that are not documents
+        ([register], [user, date]) are shown on that condition. Always True for those who read everything."""
+        if not self._restricted:
+            return lambda name: True
+        readable = self._readable_facets(con)
+        seen: dict[str, bool] = {}
+
+        def can_read(name: str | None) -> bool:
+            if not name:
+                return False  # no indexed document at all: none the caller can read
+            k = name.lower()
+            if k not in seen:  # checked again one by one, as in list_projects' safety net
+                seen[k] = any(self.allows(pk) for (pk,) in con.execute(
+                    "SELECT d.path_key FROM doc_facets f JOIN docs d ON d.id = f.doc_id WHERE (f.project = ? "
+                    f"COLLATE NOCASE OR f.subproject = ? COLLATE NOCASE){readable}", (name, name)))
+            return seen[k]
+        return can_read
+
+    def _card_viewer(self, con, project_ok=None):
+        """Function card -> (body, sourced lines left out, whole) as the caller may see it: a cited
+        document by its own rights, any other citation by those on the card's project."""
+        if not self._restricted:
+            return lambda card: (card.body, 0, True)
+        project_ok = project_ok or self._project_reader(con)
+
+        def view(card):
+            def can_read(source: str) -> bool:
+                if "\\" not in source:
+                    return project_ok(card.project)
+                try:
+                    return self.allows(store.path_key(sources.clean_path(source)))
+                except ValueError:
+                    return False
+            return knowledge.visible_card(card, can_read)
+        return view
+
     def _is_file(self, path: str, key: str) -> bool:
         """Does the file exist for this caller? A document the caller may not read does not, so
         every tool answers for it exactly as for a missing file (and never reads it live)."""
@@ -796,7 +839,8 @@ class DocTools:
                 cond, args = machines.filter_sql(con, values, "f.project", readable=self._readable_sql(con))
                 where += " AND " + cond
                 params += args
-            reg_cond, reg_params = self._register_filter(client, country, year_from, year_to)
+            restricted = self._restricted
+            reg_cond, reg_params = self._register_filter(client, country, year_from, year_to, own_year=restricted)
             if reg_cond:
                 where += f" AND f.project IN (SELECT rm.project FROM register_machines rm WHERE {reg_cond})"
                 params += reg_params
@@ -821,9 +865,12 @@ class DocTools:
                 rows = [r for r in rows if (r["project"], r["collection"]) in seen]
             readable = self._readable_sql(con)  # machine evidence counted among the caller's documents
             machine_text = {r["project"]: machines.describe(con, r["project"], readable=readable) for r in rows}
-            client_text = {r["project"]: register.summary(con, r["project"]) for r in rows}
+            # The register's years where the documents disagree come from every document, hidden ones too.
+            client_text = {r["project"]: register.summary(con, r["project"], own_year=restricted) for r in rows}
             unindexed = []
-            if reg_cond or (machine and not collection):  # delivered machines whose documents are not indexed
+            # Delivered machines whose documents are not indexed: a restricted caller reads no document
+            # of theirs, so the register is not shown for them.
+            if (reg_cond or (machine and not collection)) and not restricted:
                 cond, args = reg_cond or "1", list(reg_params)
                 if machine:
                     values = [v.strip() for v in machine.split(",") if v.strip()]
@@ -866,8 +913,10 @@ class DocTools:
         return "\n".join(lines)
 
     @staticmethod
-    def _register_filter(client, country, year_from, year_to) -> tuple[str, list]:
+    def _register_filter(client, country, year_from, year_to, own_year: bool = False) -> tuple[str, list]:
+        """own_year: filter on the register's own years, not those taken from the project's documents."""
         conds, params = [], []
+        year = "coalesce(rm.reg_year, rm.year)" if own_year else "rm.year"
         if client:
             c, p = register.client_clause(client)
             conds.append(c)
@@ -877,10 +926,10 @@ class DocTools:
             conds.append(c)
             params += p
         if year_from:
-            conds.append("rm.year >= ?")
+            conds.append(f"{year} >= ?")
             params.append(int(year_from))
         if year_to:
-            conds.append("rm.year <= ?")
+            conds.append(f"{year} <= ?")
             params.append(int(year_to))
         return " AND ".join(conds), params
 
@@ -897,11 +946,21 @@ class DocTools:
                 "SELECT * FROM register_machines WHERE project = ? ORDER BY order_no, serial" if name else
                 "SELECT * FROM register_machines WHERE name = ? COLLATE NOCASE ORDER BY order_no, serial",
                 (name or project,)).fetchall()
+            # The register is shown for a project the caller reads at least one document of.
+            restricted, project_ok = self._restricted, self._project_reader(con)
+            reg = [r for r in reg if project_ok(r["project"])]
             if not name and not reg:
-                like = con.execute(f"""SELECT DISTINCT project FROM doc_facets WHERE project LIKE ?{readable} UNION
-                                      SELECT DISTINCT name FROM register_machines WHERE name LIKE ? LIMIT 10""",
-                                   (f"%{project}%", f"%{project}%")).fetchall()
-                written = self._written_card(project)  # a card may outlive its project's documents
+                if restricted:
+                    names = {r[0] for r in con.execute(
+                        f"SELECT DISTINCT project FROM doc_facets WHERE project LIKE ?{readable}", (f"%{project}%",))}
+                    names |= {n for n, p in con.execute("SELECT DISTINCT name, project FROM register_machines "
+                                                        "WHERE name LIKE ?", (f"%{project}%",)) if project_ok(p)}
+                    like = [(n,) for n in sorted(names)[:10]]
+                else:
+                    like = con.execute(f"""SELECT DISTINCT project FROM doc_facets WHERE project LIKE ?{readable} UNION
+                                          SELECT DISTINCT name FROM register_machines WHERE name LIKE ? LIMIT 10""",
+                                       (f"%{project}%", f"%{project}%")).fetchall()
+                written = self._written_card(con, project)  # a card may outlive its project's documents
                 return (f"No project '{project}' in the index or the machine register."
                         + (f" Similar names: {', '.join(r[0] for r in like)}" if like else "")
                         + ("" if written == "No written card yet." else "\n\n" + written))
@@ -939,8 +998,11 @@ class DocTools:
                              "documents, the documents are more reliable - see ⚠):")
                 for r in reg:
                     bits = [r["serial"] or r["order_no"] or "no serial", r["model"] or "model ?"]
-                    if r["year"]:
-                        bits.append(str(r["year"]))
+                    # What the documents say instead (doc_note, the year from their dates) was read
+                    # from every document of the project: only for those who read them all.
+                    year = (r["reg_year"] or r["year"]) if restricted else r["year"]
+                    if year:
+                        bits.append(str(year))
                     if r["robots"]:
                         bits.append(f"{r['robots']} robots")
                     if r["controller"]:
@@ -955,13 +1017,11 @@ class DocTools:
                         bits.append(r["status"])
                     if r["notes"]:
                         bits.append(r["notes"])
-                    note = r["doc_note"]
-                    if note and readable:  # its document counts were made over every document
-                        note = re.sub(r" \(\d+ docs\)", "", note)
+                    note = None if restricted else r["doc_note"]
                     lines.append("- " + " · ".join(bits) + (f"\n    ⚠ {note}" if note else ""))
             if name:
-                moved = con.execute("SELECT serial, order_no, model, project FROM register_machines "
-                                    "WHERE reg_project = ?", (name,)).fetchall()
+                moved = [m for m in con.execute("SELECT serial, order_no, model, project FROM register_machines "
+                                                "WHERE reg_project = ?", (name,)) if project_ok(m["project"])]
                 if moved:
                     lines.append("\nFiled under this project in the register, but their numbers are in another "
                                  "project's documents (counted there): " + "; ".join(
@@ -994,29 +1054,40 @@ class DocTools:
             clients = sorted({r["client"] for r in reg if r["client"]})
             groups = sorted({r["grp"] for r in reg if r["grp"]})
             if clients:
-                others = con.execute(
-                    f"""SELECT coalesce(project, name) p, group_concat(DISTINCT model), min(year), max(project IS NOT NULL)
-                        FROM register_machines WHERE (client IN ({','.join('?' * len(clients))})
+                year = "coalesce(reg_year, year)" if restricted else "year"
+                others = [o for o in con.execute(
+                    f"""SELECT coalesce(project, name) p, group_concat(DISTINCT model), min({year}),
+                               max(project IS NOT NULL), max(project) FROM register_machines
+                        WHERE (client IN ({','.join('?' * len(clients))})
                         OR grp IN ({','.join('?' * len(groups)) or "''"}))
-                        AND coalesce(project, name) != ? GROUP BY 1 ORDER BY 3 DESC LIMIT 25""",
-                    clients + groups + [name or reg[0]["name"]]).fetchall()
+                        AND coalesce(project, name) != ? GROUP BY 1 ORDER BY 3 DESC""",
+                    clients + groups + [name or reg[0]["name"]]) if project_ok(o[4])][:25]
                 if others:
                     lines.append("\nOther projects for the same client or group: " + "; ".join(
                         f"{p} ({m or 'model ?'}, {y or '?'}{'' if idx else ', not indexed'})"
-                        for p, m, y, idx in others))
+                        for p, m, y, idx, _ in others))
+            lines.append("\n" + self._written_card(con, project, name))
         finally:
             con.close()
-        lines.append("\n" + self._written_card(project, name))
         lines.append("\n(client, machines delivered and years come from the company's machine register, a "
                      "hand-made list: when it disagrees with the documents, trust the documents; the rest "
                      "comes from the indexed documents)")
         return "\n".join(lines)
 
-    def _written_card(self, asked: str, parent: str | None = None) -> str:
-        """The knowledge card of the asked project, else (labelled) the card of its parent project."""
-        def show(card) -> str:
-            return (f"Written card {card.file} ({card.status}, {card.written}, built from {card.read} "
-                    f"documents):\n{card.body}")
+    NOT_AVAILABLE = "Card not available with your rights."
+
+    def _written_card(self, con, asked: str, parent: str | None = None) -> str:
+        """The knowledge card of the asked project, else (labelled) the card of its parent project,
+        as the caller may see it: the header line only when every source of the card is readable."""
+        project_ok = self._project_reader(con)
+        view = self._card_viewer(con, project_ok)
+
+        def show(card, label: str = "") -> str:
+            body, _hidden, whole = view(card)
+            if whole:
+                return (f"{label}Written card {card.file} ({card.status}, {card.written}, built from {card.read} "
+                        f"documents):\n{body}")
+            return f"{label}Written card {card.file}:\n{body}" if body else self.NOT_AVAILABLE
 
         card = self.knowledge.card(asked)
         if card:
@@ -1024,12 +1095,22 @@ class DocTools:
         for file, reason in self.knowledge.errors().items():
             stem = knowledge.stem_of(file)
             if register.fold(asked) in (register.fold(stem), register.fold(stem.split("__")[-1])):
-                return f"card {file} unreadable: {reason}"
+                return self._unreadable_card(file, reason, project_ok)
         if parent and register.fold(parent) != register.fold(asked):
             card = self.knowledge.card(parent)
             if card:
-                return f"No written card for {asked}; written card of the parent project {parent}:\n" + show(card)
+                return show(card, f"No written card for {asked}; written card of the parent project {parent}:\n")
         return "No written card yet."
+
+    def _unreadable_card(self, file: str, reason: str, project_ok) -> str:
+        """A card file that cannot be parsed: nobody can tell where its text comes from, so its
+        reason (which may quote it) is for those who read everything; its name for those who read
+        its project; for the others it is not available."""
+        if not self._restricted:
+            return f"card {file} unreadable: {reason}"
+        if project_ok(knowledge.stem_of(file).split("__")[-1]):
+            return f"card {file} unreadable."
+        return self.NOT_AVAILABLE
 
     def _project_names(self, con) -> set[str]:
         """Indexed project and sub-project names."""
@@ -1059,50 +1140,82 @@ class DocTools:
             got = [int(y) for y in re.findall(r"\d{4}", " ".join(card.values("years")))]
             return (min(got), max(got)) if got else None
 
-        def keep(card) -> bool:
-            for kind, key, query in (("forms", "infeed", infeed), ("forms", "outfeed", outfeed),
-                                     ("end_effectors", "end_effectors", end_effector)):
-                if query and not entry_match(kind, card.values(key), query):
-                    return False
-            for key, query in (("machines", machine), ("client", client), ("country", country)):
-                if query and not any(fold(query) in fold(v) for v in card.values(key)):
-                    return False
-            if status and fold(status) != fold(card.status):  # "reviewed" is inside "unreviewed"
-                return False
-            if text and fold(text) not in fold(" ".join(" ".join(card.values(f)) for f in card.fields)
-                                              + " " + card.body):
-                return False
-            if year_from or year_to:
-                span = years(card)
-                if not span or (year_from and span[1] < year_from) or (year_to and span[0] > year_to):
-                    return False
-            return True
-
-        def show(values: list[str]) -> str:
-            return ", ".join(values) or "?"
-
-        cards = k.cards()
-        lines = [" · ".join((c.project, show(c.values("client")), show(c.values("years")),
-                             show(c.values("machines")),
-                             f"{show(c.values('infeed'))} -> {show(c.values('outfeed'))}",
-                             show(c.values("end_effectors")), show(c.values("speed")), c.status))
-                 for c in cards if keep(c)]
-        out = lines[:max(1, int(limit))] or ["No card matches these filters."]
-        if len(lines) > len(out):
-            out.append(f"... {len(lines) - len(out)} more (raise limit=)")
-        out += [f"card {file} unreadable: {reason}" for file, reason in k.errors().items()]
         con = self._con()
         try:
-            total = con.execute("SELECT count(DISTINCT project) FROM doc_facets").fetchone()[0]
+            project_ok = self._project_reader(con)
+            view = self._card_viewer(con, project_ok)
+            cards = k.cards()
+            # Each card as the caller may see it: (visible body without the closing note, whole).
+            seen = {}
+            for c in cards:
+                body, hidden, whole = view(c)
+                seen[c.file] = (body.rsplit("\n\n", 1)[0] if hidden else body, whole)
+
+            def visible(card) -> bool:
+                body, whole = seen[card.file]
+                return whole or bool(body)
+
+            def values(card, key: str) -> list[str]:
+                """The header values the caller may see: all of them for a whole card, else those
+                backed by its visible lines (by the rule of knowledge check)."""
+                body, whole = seen[card.file]
+                if whole:
+                    return card.values(key)
+                folded = fold(body)
+                return [v for v in card.values(key) if knowledge.backs(vocab, key, v, folded)]
+
+            def keep(card) -> bool:
+                if not visible(card):
+                    return False
+                body, whole = seen[card.file]
+                for kind, key, query in (("forms", "infeed", infeed), ("forms", "outfeed", outfeed),
+                                         ("end_effectors", "end_effectors", end_effector)):
+                    if query and not entry_match(kind, values(card, key), query):
+                        return False
+                for key, query in (("machines", machine), ("client", client), ("country", country)):
+                    if query and not any(fold(query) in fold(v) for v in values(card, key)):
+                        return False
+                if status and (not whole or fold(status) != fold(card.status)):  # "reviewed" is inside "unreviewed"
+                    return False
+                if text and fold(text) not in fold(" ".join(" ".join(card.values(f)) for f in card.fields)
+                                                  + " " + card.body if whole else body):
+                    return False
+                if year_from or year_to:
+                    span = years(card) if whole else None
+                    if not span or (year_from and span[1] < year_from) or (year_to and span[0] > year_to):
+                        return False
+                return True
+
+            def show(values: list[str]) -> str:
+                return ", ".join(values) or "?"
+
+            lines = [" · ".join((c.project, show(values(c, "client")), show(values(c, "years")),
+                                 show(values(c, "machines")),
+                                 f"{show(values(c, 'infeed'))} -> {show(values(c, 'outfeed'))}",
+                                 show(values(c, "end_effectors")), show(values(c, "speed")),
+                                 c.status if seen[c.file][1] else "not all shown with your rights"))
+                     for c in cards if keep(c)]
+            out = lines[:max(1, int(limit))] or ["No card matches these filters."]
+            if len(lines) > len(out):
+                out.append(f"... {len(lines) - len(out)} more (raise limit=)")
+            unreadable = (self._unreadable_card(file, reason, project_ok) for file, reason in k.errors().items())
+            out += [u for u in unreadable if u != self.NOT_AVAILABLE]
+            # Coverage among the projects the caller can see, by the cards the caller can see.
+            readable = self._readable_facets(con)
+            projects = {p for (p,) in con.execute(
+                f"SELECT DISTINCT project FROM doc_facets WHERE project IS NOT NULL{readable}") if project_ok(p)}
             covered = set()  # indexed projects with a card of their own or of one of their sub-projects
             for c in cards:
-                hit = con.execute("SELECT project FROM doc_facets WHERE project = ? COLLATE NOCASE "
-                                  "OR subproject = ? COLLATE NOCASE LIMIT 1", (c.project, c.project)).fetchone()
-                if hit:
+                if not visible(c):
+                    continue
+                hit = con.execute("SELECT project FROM doc_facets WHERE (project = ? COLLATE NOCASE "
+                                  f"OR subproject = ? COLLATE NOCASE){readable} LIMIT 1",
+                                  (c.project, c.project)).fetchone()
+                if hit and hit[0] in projects:
                     covered.add(hit[0])
         finally:
             con.close()
-        out.append(f"Cards exist for {len(covered)} of {total} projects: for a complete answer, "
+        out.append(f"Cards exist for {len(covered)} of {len(projects)} projects: for a complete answer, "
                    "also use search / list_projects.")
         return "\n".join(out)
 

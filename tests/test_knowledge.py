@@ -435,6 +435,80 @@ def test_cli_check_fails_without_cards(indexed_config_file, indexed, capsys):
     assert e.value.code == 1 and "no cards" in capsys.readouterr().out
 
 
+# --- per-person access: a card shows only the lines whose sources the caller can read -----------
+
+OFFRE = r"N:\RMA\THOR\0_Vente\Offre THOR.pdf"
+PLAN = r"N:\RMA\THOR\3_Mecanique\Plan THOR.pdf"
+MIXED = CARD + f"""
+## A. Client and machines
+- Price 100000 CHF [{OFFRE} p.1]
+
+## B. The line
+- End effector: suction cups [{PLAN} p.2]
+- Infeed: chocolate bars in flowpack [{OFFRE} p.1] [{PLAN} pp. 1, 3]
+
+## D. Key documents
+- Offer: {OFFRE}
+"""
+
+
+def test_visible_card_keeps_lines_whose_sources_are_all_readable():
+    card = parse_card(MIXED, "THOR.md")
+    asked = []
+
+    def mec_only(source):
+        asked.append(source)
+        return "3_Mecanique" in source
+
+    body, hidden, whole = knowledge.visible_card(card, mec_only)
+    assert set(asked) == {OFFRE, PLAN}  # page suffixes stripped
+    assert (hidden, whole) == (2, False)
+    assert "- End effector: suction cups" in body
+    assert "100000" not in body and "flowpack" not in body
+    assert "## Summary" not in body and "Line for ACME Foods." not in body  # unsourced: only for whole cards
+    assert "Key documents" not in body and "Offre" not in body
+    assert "## A." not in body  # a section left without lines goes too
+    assert body.rstrip().endswith("2 lines not shown with your rights.")
+
+
+def test_visible_card_whole_when_every_source_is_readable():
+    card = parse_card(MIXED, "THOR.md")
+    body, hidden, whole = knowledge.visible_card(card, lambda source: True)
+    assert (body, hidden, whole) == (card.body, 0, True)
+
+
+def test_visible_card_counts_bare_document_paths_as_sources():
+    """Section D lists documents without brackets: a hidden one there makes the card not whole."""
+    card = parse_card(CARD + f"\n## B. The line\n- End effector: suction cups [{PLAN} p.2]\n\n"
+                             f"## D. Key documents\n- Offer: {OFFRE}\n- Plan: {PLAN} - [[machine/Paloma 4R]]\n",
+                      "THOR.md")
+    asked = []
+
+    def mec_only(source):
+        asked.append(source)
+        return "3_Mecanique" in source
+
+    body, hidden, whole = knowledge.visible_card(card, mec_only)
+    assert OFFRE in asked and PLAN in asked and not whole and hidden == 0
+    assert "Offre" not in body and "- End effector: suction cups" in body
+    body, hidden, whole = knowledge.visible_card(card, lambda source: True)
+    assert whole and body == card.body
+    line = f"- Offer v3 {OFFRE} [{PLAN} p.1]"   # a bare path in a sourced line counts too
+    card = parse_card(CARD + f"\n## C. History\n{line}\n- Plan [{PLAN} p.1]\n", "THOR.md")
+    body, hidden, whole = knowledge.visible_card(card, mec_only)
+    assert "Offre" not in body and "- Plan" in body and hidden == 1
+
+
+def test_visible_card_judges_register_and_user_sources_with_the_caller():
+    card = parse_card(CARD + "\n## A. Client\n- Client ACME Foods [register]\n"
+                             "- Speed 120 [user, 2026-11-20]\n", "THOR.md")
+    body, hidden, whole = knowledge.visible_card(card, lambda source: False)
+    assert (body, hidden, whole) == ("", 2, False)  # nothing left: the caller says "not available"
+    body, hidden, whole = knowledge.visible_card(card, lambda source: source == "register")
+    assert "Client ACME Foods" in body and "Speed 120" not in body and (hidden, whole) == (1, False)
+    assert body.rstrip().endswith("1 lines not shown with your rights.")
+
+
 def test_project_card_names_an_unreadable_card(indexed):
     (Path(indexed.knowledge_path) / "projects" / "THOR.md").write_text("---\ntype: project\n", encoding="utf-8")
     out = DocTools(indexed).project_card("THOR")

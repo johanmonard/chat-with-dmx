@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -246,6 +247,70 @@ def _sourced_lines(body: str):
             yield line
 
 
+BARE_PATH = re.compile(r"(?:\b[A-Za-z]:\\|\\\\)[^\[\]\n]+")   # N:\X\a.pdf or \\server\share\a.pdf, to a bracket
+
+
+def source_path(source: str) -> str:
+    """'N:\\X\\a.pdf p.2' -> 'N:\\X\\a.pdf': a cited source without its page, pages or slides."""
+    return re.sub(r"\s+(pp?\.|slides?)\s*\d[\d\s,.\-–p]*$", "", source.strip())  # p.2, p.2-3, pp. 1, 3
+
+
+def backs(vocab: Vocabulary, key: str, value: str, folded_body: str) -> bool:
+    """Does the (folded) body back this header value, by the rule of `check`? A word-list field
+    (infeed, outfeed, end_effectors) needs one of its value's synonyms; any other its own text."""
+    for kind, k in WORD_LIST_FIELDS:
+        if k == key:
+            canonical = vocab.canonical(kind, form_of(value))
+            return bool(canonical) and any(word in folded_body for word, v in vocab.kinds.get(kind, {}).items()
+                                           if v == canonical)
+    return bool(fold(value)) and fold(value) in folded_body
+
+
+def visible_card(card: Card, can_read_source: Callable[[str], bool]) -> tuple[str, int, bool]:
+    """The card as one caller may see it: (body to show, sourced lines left out, whole).
+
+    Each source is judged by can_read_source: a document path (with a backslash) without its page
+    suffix, any other source ('register', 'user, 2026-...') as written. A document path written
+    outside brackets (the key documents of section D) is a source too. whole: every source of the
+    card is readable, and the body is then unchanged. Otherwise only the '- ' lines of sections
+    A, B and C whose sources are all readable are kept; the other sections (Summary, key documents...)
+    and unsourced text go, since nothing says where they come from; a section left without lines
+    goes too, and the text ends with 'k lines not shown with your rights.'. Nothing left: ''.
+    """
+    def sources_readable(line: str) -> bool:
+        cited = [source_path(s) if "\\" in s else s.strip() for s in SOURCE.findall(line)]
+        bare = [source_path(p.rstrip(" -")) for p in BARE_PATH.findall(SOURCE.sub("", line))]
+        return all(can_read_source(s) for s in cited + bare)
+
+    def readable(line: str) -> bool:  # a line is shown on its citations: one without any is not
+        return bool(SOURCE.search(line)) and sources_readable(line)
+
+    lines = card.body.split("\n")
+    if all(sources_readable(line) for line in lines):
+        return card.body, 0, True
+    kept: list[str] = []
+    section: list[str] = []   # the heading of the current sourced section, until its first kept line
+    hidden = 0
+    sourced = False
+    for line in lines:
+        if line.startswith("## "):
+            sourced = line.startswith(SOURCED_SECTIONS)
+            section = [line] if sourced else []
+        elif sourced and line.startswith("- "):
+            if readable(line):
+                if kept and section:
+                    kept.append("")
+                kept += section + [line]
+                section = []
+            else:
+                hidden += 1
+    if not kept:
+        return "", hidden, False
+    if hidden:
+        kept += ["", f"{hidden} lines not shown with your rights."]
+    return "\n".join(kept), hidden, False
+
+
 def check(k: Knowledge, con) -> list[Issue]:
     """Every rule of knowledge\\README.md that a program can verify, per card."""
     from . import sources, store
@@ -286,7 +351,7 @@ def check(k: Knowledge, con) -> list[Issue]:
                     err(f"header {key} '{word}' does not appear in the body")
         for line in card.body.split("\n"):
             for src in SOURCE.findall(line):
-                path = re.sub(r"\s+(pp?\.|slides?)\s*\d[\d\s,.\-–p]*$", "", src.strip())  # p.2, p.2-3, pp. 1, 3
+                path = source_path(src)
                 if "\\" in path and not con.execute("SELECT 1 FROM docs WHERE path_key = ?",
                                                     (store.path_key(sources.clean_path(path)),)).fetchone():
                     err(f"cited file not in the index: {path}")
