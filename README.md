@@ -240,7 +240,7 @@ U:\DMX-RAG\
   3 - Index new and changed files.cmd
   4 - Compute embeddings.cmd           from a cmd prompt you can add e.g. --max-minutes 300
   5 - Update Claude Desktop copy.cmd   local copy for Claude Desktop + the configuration to paste
-  7 - Update a world (index + embeddings).cmd   unattended: index, OCR of scanned pages, offers (register), picture descriptions, embeddings
+  7 - Update a world (index + embeddings).cmd   unattended: index, OCR of scanned pages, offers (register), picture descriptions, embeddings, then permissions (worlds with access = "acl")
   8 - Refresh permissions.cmd          unattended: access.sqlite3 of every world with access = "acl" (reading rules of the indexed folders)
   Unlock after a crash.cmd
   config.toml      settings for all machines (data_dir = 'C:\dmx-rag\data') + [worlds.<name>]
@@ -260,8 +260,12 @@ U:\DMX-RAG\
   writes `access.sqlite3` to `worlds\<name>\` then to the local world folder, without a lock, and
   a change report to `worlds\<name>\acl-survey`; `update` ends with it and `pull` copies the shared file down.
   It needs a local copy of the world and runs under an account that can read the folders' permissions.
-  On the VM, a daily run at 05:00 under the VM account, whether logged on or not (asks for its password):
-  `schtasks /Create /TN "DMX permissions" /SC DAILY /ST 05:00 /RU <DOMAIN\account> /RP * /TR "\"U:\DMX-RAG\8 - Refresh permissions.cmd\""`
+  On the VM, a daily run at 05:00 under the VM account, whether logged on or not (asks for its password).
+  Such a task has no mapped drives: give the shared folder by its UNC path (`U:` mapped to `\\server\share`):
+  `schtasks /Create /TN "DMX permissions" /SC DAILY /ST 05:00 /RU <DOMAIN\account> /RP * /TR "\"\\server\share\DMX-RAG\8 - Refresh permissions.cmd\""`
+  The report says which file served as the previous rules, how many folders were kept from them
+  because this machine's index does not hold them, and how many folders allow nobody once local and
+  built-in accounts are dropped (all of them: run under a domain account or set `[access] domain_sid`).
 * One machine at a time works on a world; two machines can work on two different worlds.
 * Local copies are in `C:\dmx-rag\data\<world>`. Claude Desktop gets one server per world:
   `dmx-<world>` (`dmx-projects`, `dmx-marketing`, `dmx-documentation`, `dmx-offers`; launcher 5 prints the
@@ -294,7 +298,7 @@ U:\DMX-RAG\
 
 By default everyone who reaches a world reads every document of it. A world with `access = "acl"`
 (`[worlds.<name>]` in `config.toml`) shows each person only the documents whose folder they can read on the
-file server. Administrators listed in `[access] admins` (`DOMAIN\admin.account` or a group) see everything;
+file server. Administrators listed in `[access] admins` (`DOMAIN\admin.account` or `DOMAIN\group`; a name without its domain is ignored, with a warning) see everything;
 `domain_sid` is only needed when the refresh runs under a non-domain account (see `config.example.toml`).
 
 * **Filling.** `dmx-docs --world projects permissions` reads the folder rules of the indexed folders into

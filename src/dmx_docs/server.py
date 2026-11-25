@@ -274,6 +274,11 @@ def instructions_for(cfg: Config) -> str:
 
 def build_server(cfg: Config, caller: Caller | None = None) -> MCPServer:
     tools = DocTools(cfg, caller)
+    if cfg.access == "acl":  # to stderr through logging: stdout carries the MCP protocol
+        who = tools.access.caller
+        logging.getLogger("dmx_docs.server").info(
+            "World %s: access per person, caller %s, admin %s", cfg.world or "?", who.label or "?",
+            "yes" if who.admin else "no")
     mcp = MCPServer(cfg.server_name, instructions=instructions_for(cfg))
     kw = {"annotations": READ_ONLY} if READ_ONLY is not None else {}
 

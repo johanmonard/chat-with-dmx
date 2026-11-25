@@ -138,7 +138,7 @@ max_read_chars = 40000
 # disciplines = 'disciplines.toml'
 
 # Per-person access (worlds with access = "acl"). admins: accounts that see every document of those
-# worlds, as DOMAIN\account (or a group). domain_sid: the AD domain's SID prefix (default: taken from
+# worlds, as DOMAIN\account or DOMAIN\group (a name without its domain is ignored). domain_sid: the AD domain's SID prefix (default: taken from
 # the account that runs the refresh); only needed when that account is not a domain account.
 # [access]
 # admins = ['EXAMPLEDOM\admin-account']

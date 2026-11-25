@@ -237,7 +237,9 @@ class VectorIndex:
         if n == 0:
             return []
         if mask is not None and len(mask) != n:
-            return []  # index replaced under the mask: show nothing rather than the wrong rows
+            # index replaced under the mask: show nothing rather than the wrong rows
+            log.warning("semantic search skipped: access mask has %d rows, vector index %d", len(mask), n)
+            return []
         q = qvec.astype(np.float32)
         scores = np.empty(n, dtype=np.float32)
         for start in range(0, n, BLOCK_ROWS):

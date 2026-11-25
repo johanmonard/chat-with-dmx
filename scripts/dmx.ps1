@@ -575,7 +575,11 @@ try {
             if (Test-Path $access) {
                 $accessNew = Join-Path $LocalWorld 'access.sqlite3.new'
                 Copy-Item $access $accessNew -Force
-                Move-Item $accessNew (Join-Path $LocalWorld 'access.sqlite3') -Force
+                # A running server may hold the live file open for a moment: retry, like the Python writer.
+                for ($try = 1; ; $try++) {
+                    try { Move-Item $accessNew (Join-Path $LocalWorld 'access.sqlite3') -Force -ErrorAction Stop; break }
+                    catch { if ($try -ge 5) { throw }; Start-Sleep -Milliseconds 500 }
+                }
             }
             Copy-Item $SharedConfig $LocalConfig -Force
             $th = Join-Path $Shared 'thesaurus.toml'
