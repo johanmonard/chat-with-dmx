@@ -841,3 +841,130 @@ def test_world_world_search_is_unchanged(acl_world):
     assert out.count("Offre") >= 2 and "Plan" not in out.split("Offre")[0]
     for h in expected:
         assert h.path in out
+
+
+def _count_predicate_calls(monkeypatch) -> list[int]:
+    """calls[0]: how many times the folder predicate is asked (once per document per scan)."""
+    calls = [0]
+    real = Access.folder_predicate
+
+    def counting(self):
+        pred = real(self)
+        if pred is None:
+            return None
+
+        class Counted:
+            token = getattr(pred, "token", None)
+
+            def __call__(self, folder_key):
+                calls[0] += 1
+                return pred(folder_key)
+        return Counted()
+    monkeypatch.setattr(Access, "folder_predicate", counting)
+    return calls
+
+
+def _many_projects(cfg, n: int) -> int:
+    """n more projects P000.. with one mechanical document each (rows only, no files); MEC reads
+    them. Returns the number of documents of the world."""
+    from dmx_docs import store
+    root = Path(cfg.roots[0])
+    folder_rules = {key(cfg, p, sub): rule for p in PROJECTS for sub, rule in (("0_Vente", 1), ("3_Mecanique", 2))}
+    con = store.connect(cfg.db_path, create=False)
+    for i in range(n):
+        d = root / f"P{i:03d}" / "3_Mecanique"
+        path = str(d / f"Plan P{i:03d}.pdf")
+        con.execute("INSERT INTO docs(path, path_key, folder_key, name, ext, status) VALUES (?,?,?,?,?,?)",
+                    (path, path_key(path), path_key(str(d)), f"Plan P{i:03d}.pdf", ".pdf", "ok"))
+        folder_rules[path_key(str(d))] = 2
+    con.commit()
+    total = con.execute("SELECT count(*) FROM docs").fetchone()[0]
+    con.close()
+    AccessStore.write(cfg.access_path, rules={"sales": 1, "mec": 2}, folder_rules=folder_rules,
+                      rule_sets={1: (frozenset({SALES}), frozenset()), 2: (frozenset({MEC}), frozenset())},
+                      errors={}, names={}, version="v2")
+    return total
+
+
+def test_project_reader_scans_the_readable_documents_once(acl_world, monkeypatch):
+    cfg, tools_for = acl_world
+    docs = _many_projects(cfg, 300)
+    calls = _count_predicate_calls(monkeypatch)
+    mec = tools_for(MEC)
+    con = mec._con()
+    try:
+        can_read = mec._project_reader(con)
+        names = [f"P{i:03d}" for i in range(300)] + list(PROJECTS)
+        assert all(can_read(n) for n in names) and can_read("p007") and can_read("thor")
+        assert not can_read("NOPE") and not can_read(None) and not can_read("")
+        assert calls[0] == docs  # one scan, whatever the number of projects asked
+        assert mec._project_reader(con)("P123") and calls[0] == docs  # the same connection: no new scan
+    finally:
+        con.close()
+    sales = tools_for(SALES)
+    con = sales._con()
+    try:
+        can_read = sales._project_reader(con)
+        assert can_read("THOR") and can_read("ORION") and not can_read("P000")
+    finally:
+        con.close()
+
+
+def test_catalog_and_project_card_do_not_scan_once_per_project(acl_world, tmp_path, monkeypatch):
+    cfg, tools_for = acl_world
+    _thor_card(cfg, tmp_path)
+    docs = _many_projects(cfg, 300)
+    calls = _count_predicate_calls(monkeypatch)
+    mec = tools_for(MEC)
+    assert "Cards exist for 1 of 302 projects" in mec.catalog()
+    assert calls[0] <= 2 * docs, calls[0]  # was one scan per readable project
+    calls[0] = 0
+    assert "1 indexed documents" in mec.project_card("THOR")
+    assert calls[0] <= 2 * docs, calls[0]  # was one scan per statement
+    assert "Cards exist for 1 of 2 projects" in tools_for(SALES).catalog()
+
+
+def test_index_status_counts_are_taken_on_the_callers_documents(acl_world):
+    cfg, tools_for = acl_world
+    from dmx_docs import store
+    con = store.connect(cfg.db_path, create=False)
+    offre = con.execute("SELECT id FROM docs WHERE name = 'Offre THOR.pdf'").fetchone()[0]
+    con.execute("INSERT INTO ocr_pages(doc_id, page_no, status, ocr_version) VALUES (?, 1, 'text', 1)", (offre,))
+    con.execute("INSERT INTO picture_uses(doc_id, page_no, image_no, status, type) VALUES (?, 1, 1, 'described', "
+                "'photo')", (offre,))
+    con.execute("INSERT INTO picture_docs(doc_id, model, version) VALUES (?, 'vision-x', 1)", (offre,))
+    chunks = dict(con.execute("SELECT d.name LIKE 'Offre%', count(*) FROM chunks c JOIN docs d ON d.id = c.doc_id "
+                              "GROUP BY 1").fetchall())
+    con.commit()
+    con.close()
+    mec = tools_for(MEC).index_status()
+    assert "You can read 2 of 4 documents of this world." in mec
+    assert "Indexed documents: 2" in mec and "By status: ok=2" in mec and "Readable by type: PDF=2" in mec
+    assert f"Chunks: {chunks[0]}," in mec
+    assert "OCR: not run yet" in mec and "Pictures: not described yet" in mec and "vision-x" not in mec
+    sales = tools_for(SALES).index_status()
+    assert "You can read 2 of 4 documents of this world." in sales and f"Chunks: {chunks[1]}," in sales
+    assert "OCR: 1 pages with text" in sales and "Pictures: 1 described (photo 1)" in sales and "vision-x" in sales
+    nobody = tools_for(OTHER).index_status()
+    assert "You can read 0 of 4 documents of this world." in nobody
+    assert "Indexed documents: 0" in nobody and "Chunks: 0," in nobody
+    for full in (tools_for(OTHER, admin=True).index_status(),
+                 DocTools(dataclasses.replace(cfg, access="world"), Caller(frozenset(), False)).index_status()):
+        assert "Indexed documents: 4" in full and "By status: ok=4" in full
+        assert f"Chunks: {chunks[0] + chunks[1]}," in full and "OCR: 1 pages with text" in full
+    assert "You can read 4 of 4 documents of this world." in tools_for(OTHER, admin=True).index_status()
+
+
+def test_server_logs_the_caller_of_an_acl_world_to_stderr(acl_world, caplog, capsys):
+    from dmx_docs.server import build_server
+    cfg, _ = acl_world
+    with caplog.at_level("INFO", logger="dmx_docs.server"):
+        build_server(cfg, Caller(frozenset({MEC}) | KEEP_ALWAYS, False, "EXAMPLEDOM\\some.user"))
+        build_server(cfg, Caller(frozenset(), True, "EXAMPLEDOM\\admin.account"))
+    assert "caller EXAMPLEDOM\\some.user, admin no" in caplog.text
+    assert "caller EXAMPLEDOM\\admin.account, admin yes" in caplog.text
+    assert capsys.readouterr().out == ""  # stdout carries the MCP protocol
+    caplog.clear()
+    with caplog.at_level("INFO", logger="dmx_docs.server"):
+        build_server(dataclasses.replace(cfg, access="world"), Caller(frozenset(), False, "x"))
+    assert "caller" not in caplog.text

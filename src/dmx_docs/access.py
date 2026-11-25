@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -20,8 +21,11 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import quote
 
 import numpy as np
+
+log = logging.getLogger("dmx_docs.access")
 
 # Everyone and Authenticated Users: every caller carries them, rules naming them are kept.
 KEEP_ALWAYS = {"S-1-1-0", "S-1-5-11"}
@@ -57,6 +61,27 @@ def usable_sids(sids: Iterable[str], domain_prefix: str) -> frozenset[str]:
 
 def may_read(caller_sids: frozenset[str], allow: frozenset[str], deny: frozenset[str]) -> bool:
     return bool(caller_sids & allow) and not (caller_sids & deny)
+
+
+def readonly_uri(path) -> str:
+    """SQLite URI opening `path` read-only, for a drive path (D:\\x\\a.sqlite3 -> file:D:/x/a.sqlite3)
+    as for a UNC path (\\\\server\\share\\a.sqlite3 -> file:////server/share/a.sqlite3, which plain
+    'file:' + path refuses as an invalid authority). '?', '#' and '%' in names are escaped."""
+    encoded = quote(os.fspath(path).replace("\\", "/"), safe="/:")
+    return f"file:{'//' if encoded.startswith('//') else ''}{encoded}?mode=ro"
+
+
+class FolderPredicate:
+    """Function folder key -> may the caller read it, built from one snapshot of the rules; `token`
+    names that snapshot (equal tokens: the same decision for every folder)."""
+    __slots__ = ("_contains", "token")
+
+    def __init__(self, folders: frozenset[str], token: str):
+        self._contains = folders.__contains__
+        self.token = token
+
+    def __call__(self, folder_key) -> bool:
+        return self._contains(folder_key)
 
 
 def readable_clause(con, predicate, column: str = "d.folder_key") -> str | None:
@@ -112,7 +137,7 @@ class AccessStore:
         os.replace(tmp, path)
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(f"file:{self.path.as_posix()}?mode=ro", uri=True)
+        return sqlite3.connect(readonly_uri(self.path), uri=True)
 
     def read_version(self) -> str | None:
         """The file's acl_version; None when the file is missing or unreadable."""
@@ -143,6 +168,27 @@ def _current_user_domain_prefix(win32security, token) -> tuple[str, str]:
     return text, text.rpartition("-")[0]
 
 
+def admin_names(admins: Iterable[str]) -> frozenset[str]:
+    """The [access] admins entries that name one account: DOMAIN\\name, folded to lower case. A bare
+    name could be a local account of any machine: it is ignored, with a warning."""
+    wanted = set()
+    for entry in admins:
+        entry = entry.strip()
+        if not entry:
+            continue
+        domain, sep, name = entry.partition("\\")
+        if not sep or not domain.strip() or not name.strip():
+            log.warning("[access] admins: '%s' ignored, write it as DOMAIN\\name", entry)
+            continue
+        wanted.add(entry.lower())
+    return frozenset(wanted)
+
+
+def is_admin_account(wanted: frozenset[str], domain: str, name: str) -> bool:
+    """Is the account domain\\name one of the admins (admin_names)? Matched on DOMAIN\\name only."""
+    return bool(domain) and f"{domain}\\{name}".lower() in wanted
+
+
 @dataclass(frozen=True)
 class Caller:
     sids: frozenset[str]
@@ -162,7 +208,7 @@ class Caller:
         for sid, attrs in win32security.GetTokenInformation(token, win32security.TokenGroups):
             if not attrs & win32security.SE_GROUP_USE_FOR_DENY_ONLY:
                 raw.add(win32security.ConvertSidToStringSid(sid))
-        wanted = {a.strip().lower() for a in admins if a.strip()}
+        wanted = admin_names(admins)
         admin = False
         if wanted:
             for sid in raw:
@@ -171,7 +217,7 @@ class Caller:
                         None, win32security.ConvertStringSidToSid(sid))
                 except Exception:
                     continue
-                if name.lower() in wanted or f"{domain}\\{name}".lower() in wanted:
+                if is_admin_account(wanted, domain, name):
                     admin = True
                     break
         try:
@@ -269,23 +315,27 @@ class Access:
         snap = self._snapshot()
         return snap.data.version if snap else ""
 
-    def folder_predicate(self):
-        """Function folder_key -> bool for SQL (None: no restriction). Built from one snapshot."""
+    def folder_predicate(self) -> FolderPredicate | None:
+        """Function folder_key -> bool for SQL (None: no restriction). Built from one snapshot,
+        which its token names."""
         if self.caller.admin:
             return None
         snap = self._snapshot()
         if snap is None:
-            return lambda folder_key: False
+            return FolderPredicate(frozenset(), "none")
         key = ("folders", snap.data.version, snap.allowed)
         with self._mask_lock:
-            folders = self._masks.get(key)
-        if folders is None:
+            pred = self._masks.get(key)
+        if pred is None:
             folders = frozenset(fk for fk, rid in snap.data.folder_rule.items() if rid in snap.allowed)
+            token = hashlib.sha1(json.dumps([snap.data.version, sorted(snap.allowed), sorted(folders)])
+                                 .encode("utf-8")).hexdigest()
+            pred = FolderPredicate(folders, token)
             with self._mask_lock:
-                self._masks[key] = folders
+                self._masks[key] = pred
                 while len(self._masks) > 8:
                     del self._masks[next(iter(self._masks))]
-        return folders.__contains__
+        return pred
 
     def row_mask(self, index, con) -> np.ndarray | None:
         """Boolean mask over the vector index rows this caller may read (None: no restriction).

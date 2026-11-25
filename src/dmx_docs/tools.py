@@ -36,6 +36,14 @@ SIM_STRONG = 0.86
 SIM_MEDIUM = 0.83
 
 
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _nocase(text: str) -> str:
+    """`text` folded as SQLite's COLLATE NOCASE compares it (ASCII letters only)."""
+    return text.translate(_ASCII_LOWER)
+
+
 def _strength(sim: float) -> str:
     return "strong" if sim >= SIM_STRONG else "medium" if sim >= SIM_MEDIUM else "weak"
 
@@ -371,11 +379,33 @@ class DocTools:
         None when the caller reads everything (world access, admins)."""
         return readable_clause(con, self.access.folder_predicate(), column)
 
+    def _readable_ids(self, con) -> str | None:
+        """Name of a TEMP table holding the ids of the documents the caller may read (None when the
+        caller reads everything). Filled from one scan of docs, once per connection and snapshot of
+        the rules: a subquery in each statement would ask the predicate again for every document,
+        each time the statement runs."""
+        pred = self.access.folder_predicate()
+        if pred is None:
+            return None
+        token = getattr(pred, "token", None)
+        con.execute("CREATE TEMP TABLE IF NOT EXISTS readable_docs(id INTEGER PRIMARY KEY)")
+        con.execute("CREATE TEMP TABLE IF NOT EXISTS readable_docs_token(token TEXT)")
+        row = con.execute("SELECT token FROM temp.readable_docs_token").fetchone()
+        if token is None or row is None or row[0] != token:
+            con.execute("DELETE FROM temp.readable_docs")
+            con.execute("DELETE FROM temp.readable_docs_token")
+            cond = readable_clause(con, pred, "folder_key")
+            con.execute(f"INSERT INTO temp.readable_docs(id) SELECT id FROM docs WHERE {cond}")
+            if token is not None:
+                con.execute("INSERT INTO temp.readable_docs_token(token) VALUES (?)", (token,))
+            con.commit()  # ends the read transaction on the index the fill opened
+        return "temp.readable_docs"
+
     def _readable_facets(self, con) -> str:
-        """' AND doc_id IN (...)' keeping the doc_facets rows of readable documents; '' when the
-        caller reads everything (the query is then unchanged)."""
-        cond = self._readable_sql(con)
-        return f" AND doc_id IN (SELECT d.id FROM docs d WHERE {cond})" if cond else ""
+        """' AND doc_id IN <readable ids>' keeping the doc_facets rows of readable documents; '' when
+        the caller reads everything (the query is then unchanged)."""
+        table = self._readable_ids(con)
+        return f" AND doc_id IN {table}" if table else ""
 
     @property
     def _restricted(self) -> bool:
@@ -385,21 +415,22 @@ class DocTools:
     def _project_reader(self, con):
         """Function project name -> can the caller read at least one indexed document of that project
         or sub-project? The machine register and the card citations that are not documents
-        ([register], [user, date]) are shown on that condition. Always True for those who read everything."""
+        ([register], [user, date]) are shown on that condition. Always True for those who read everything.
+        Every name is collected with one query over the caller's readable documents."""
         if not self._restricted:
             return lambda name: True
-        readable = self._readable_facets(con)
-        seen: dict[str, bool] = {}
+        table = self._readable_ids(con)
+        readable: set[str] = set()  # names folded as SQLite's NOCASE folds them (ASCII letters only)
+        for project, subproject, pk in con.execute(
+                "SELECT f.project, f.subproject, d.path_key FROM doc_facets f JOIN docs d ON d.id = f.doc_id "
+                f"WHERE f.doc_id IN {table} AND (f.project IS NOT NULL OR f.subproject IS NOT NULL)"):
+            names = [_nocase(n) for n in (project, subproject) if n and _nocase(n) not in readable]
+            if names and self.allows(pk):  # checked again one by one, as in list_projects' safety net
+                readable.update(names)
 
         def can_read(name: str | None) -> bool:
-            if not name:
-                return False  # no indexed document at all: none the caller can read
-            k = name.lower()
-            if k not in seen:  # checked again one by one, as in list_projects' safety net
-                seen[k] = any(self.allows(pk) for (pk,) in con.execute(
-                    "SELECT d.path_key FROM doc_facets f JOIN docs d ON d.id = f.doc_id WHERE (f.project = ? "
-                    f"COLLATE NOCASE OR f.subproject = ? COLLATE NOCASE){readable}", (name, name)))
-            return seen[k]
+            # no name: no indexed document at all, none the caller can read
+            return bool(name) and _nocase(name) in readable
         return can_read
 
     def _card_viewer(self, con, project_ok=None):
@@ -1494,26 +1525,33 @@ class DocTools:
         con = self._con()
         try:
             readable = None  # documents this caller can read, for worlds with per-person access
+            ids = None       # for a restricted caller: every count below is taken on these documents
             if self.cfg.access == "acl":
-                cond = self._readable_sql(con, "folder_key")
-                readable = con.execute(f"SELECT count(*) FROM docs WHERE {cond}" if cond else
-                                       "SELECT count(*) FROM docs").fetchone()[0]
-            by_status = con.execute("SELECT status, count(*) n FROM docs GROUP BY status").fetchall()
-            by_ext = con.execute("SELECT ext, count(*) n FROM docs WHERE status='ok' GROUP BY ext").fetchall()
-            chunks = con.execute("SELECT count(*), sum(embedded) FROM chunks").fetchone()
+                ids = self._readable_ids(con)
+                world_total = con.execute("SELECT count(*) FROM docs").fetchone()[0]
+                readable = con.execute(f"SELECT count(*) FROM {ids}").fetchone()[0] if ids else world_total
+
+            def mine(column: str, joined: str = " WHERE ") -> str:
+                return f"{joined}{column} IN {ids}" if ids else ""
+            by_status = con.execute(f"SELECT status, count(*) n FROM docs{mine('id')} GROUP BY status").fetchall()
+            by_ext = con.execute(f"SELECT ext, count(*) n FROM docs WHERE status='ok'{mine('id', ' AND ')} "
+                                 "GROUP BY ext").fetchall()
+            chunks = con.execute(f"SELECT count(*), sum(embedded) FROM chunks{mine('doc_id')}").fetchone()
             last = store.get_meta(con, "last_index_finished")
             model = store.get_meta(con, "embedding_model")
             waiting = store.get_meta(con, "suggestions_waiting")
-            ocr = (con.execute("""SELECT sum(status = 'text'), sum(status = 'empty'),
-                                  sum(status IN ('error', 'timeout')) FROM ocr_pages""").fetchone()
+            ocr = (con.execute(f"""SELECT sum(status = 'text'), sum(status = 'empty'),
+                                   sum(status IN ('error', 'timeout')) FROM ocr_pages{mine('doc_id')}""").fetchone()
                    if _has_ocr_table(con) else None)
             pictures = None
             if store.has_table(con, "picture_uses"):
                 pictures = {
-                    "status": dict(con.execute("SELECT status, count(*) FROM picture_uses GROUP BY status").fetchall()),
-                    "types": con.execute("""SELECT type, count(*) n FROM picture_uses WHERE status = 'described'
-                                            GROUP BY type ORDER BY n DESC""").fetchall(),
-                    "models": [r[0] for r in con.execute("SELECT DISTINCT model FROM picture_docs ORDER BY model")]}
+                    "status": dict(con.execute(f"SELECT status, count(*) FROM picture_uses{mine('doc_id')} "
+                                               "GROUP BY status").fetchall()),
+                    "types": con.execute(f"""SELECT type, count(*) n FROM picture_uses WHERE status = 'described'
+                                             {mine('doc_id', ' AND ')} GROUP BY type ORDER BY n DESC""").fetchall(),
+                    "models": [r[0] for r in con.execute(
+                        f"SELECT DISTINCT model FROM picture_docs{mine('doc_id')} ORDER BY model")]}
         finally:
             con.close()
         total = sum(r["n"] for r in by_status)
@@ -1527,8 +1565,8 @@ class DocTools:
                  "Roots: " + (", ".join(self.cfg.roots) or "none"),
                  "Excluded folders: " + (", ".join(self.cfg.excluded_dirs) or "none"),
                  f"Indexed file types: {', '.join(self.cfg.extensions)} (other types, e.g. Excel, are not searchable yet)"]
-        if readable is not None:  # world totals are the only place hidden documents show up
-            access = [f"You can read {readable} of {total} documents of this world."]
+        if readable is not None:  # the world's total is the only place hidden documents show up
+            access = [f"You can read {readable} of {world_total} documents of this world."]
             if not self.access.loaded:
                 access.append("Access rules not loaded yet: only admins can read this world.")
             at = lines.index(f"Indexed documents: {total}") + 1
