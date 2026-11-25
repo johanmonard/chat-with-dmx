@@ -241,6 +241,7 @@ U:\DMX-RAG\
   4 - Compute embeddings.cmd           from a cmd prompt you can add e.g. --max-minutes 300
   5 - Update Claude Desktop copy.cmd   local copy for Claude Desktop + the configuration to paste
   7 - Update a world (index + embeddings).cmd   unattended: index, OCR of scanned pages, offers (register), picture descriptions, embeddings
+  8 - Refresh permissions.cmd          unattended: access.sqlite3 of every world with access = "acl" (reading rules of the indexed folders)
   Unlock after a crash.cmd
   config.toml      settings for all machines (data_dir = 'C:\dmx-rag\data') + [worlds.<name>]
   thesaurus.toml   search vocabulary shared by every world
@@ -255,6 +256,12 @@ U:\DMX-RAG\
 
 * Every launcher asks for the world (Enter = projects); from a cmd prompt give it as first
   argument, e.g. `"7 - Update a world (index + embeddings).cmd" marketing`.
+* Worlds with `access = "acl"`: `dmx.ps1 permissions -World <name>` (launcher 8 does every such world)
+  writes `access.sqlite3` to `worlds\<name>\` then to the local world folder, without a lock, and
+  a change report to `worlds\<name>\acl-survey`; `update` ends with it and `pull` copies the shared file down.
+  It needs a local copy of the world and runs under an account that can read the folders' permissions.
+  On the VM, a daily run at 05:00 under the VM account, whether logged on or not (asks for its password):
+  `schtasks /Create /TN "DMX permissions" /SC DAILY /ST 05:00 /RU <DOMAIN\account> /RP * /TR "\"U:\DMX-RAG\8 - Refresh permissions.cmd\""`
 * One machine at a time works on a world; two machines can work on two different worlds.
 * Local copies are in `C:\dmx-rag\data\<world>`. Claude Desktop gets one server per world:
   `dmx-<world>` (`dmx-projects`, `dmx-marketing`, `dmx-documentation`, `dmx-offers`; launcher 5 prints the

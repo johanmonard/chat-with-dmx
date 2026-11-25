@@ -104,3 +104,19 @@ def test_map_path_without_worlds(tmp_path, monkeypatch):
     p = tmp_path / "config.toml"
     p.write_text("[index]\ndata_dir = 'data'\n", encoding="utf-8")
     assert load_config(p).map_path == str(tmp_path / "maps" / "default.md")
+
+
+def test_access_mode_and_admins_are_read_from_the_config(tmp_path, monkeypatch):
+    monkeypatch.delenv("DMX_DOCS_WORLD", raising=False)
+    text = WORLDS.replace("DATA", (tmp_path / "data").as_posix())
+    p = tmp_path / "config.toml"
+    p.write_text("[access]\nadmins = ['DOM\\admin1']\ndomain_sid = 'S-1-5-21-1'\n\n"
+                 + text.replace('profile = "projects"', 'profile = "projects"\naccess = "acl"'), encoding="utf-8")
+    cfg = load_config(p)
+    assert cfg.access == "acl" and cfg.access_admins == ["DOM\\admin1"] and cfg.access_domain_sid == "S-1-5-21-1"
+    assert cfg.access_path == tmp_path / "data" / "projects" / "access.sqlite3"
+    marketing = load_config(p, world="marketing")
+    assert marketing.access == "world"
+    p.write_text(text.replace('profile = "projects"', 'profile = "projects"\naccess = "maybe"'), encoding="utf-8")
+    with pytest.raises(ValueError, match="access"):
+        load_config(p)

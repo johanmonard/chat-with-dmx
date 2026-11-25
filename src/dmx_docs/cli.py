@@ -1,4 +1,4 @@
-"""Command line: dmx-docs web | index | ocr | describe | embed | offers | verify-seed | status | search | read | serve | acl-survey."""
+"""Command line: dmx-docs web | index | ocr | describe | embed | offers | verify-seed | status | search | read | serve | acl-survey | permissions."""
 
 from __future__ import annotations
 
@@ -108,6 +108,12 @@ def main(argv: list[str] | None = None) -> None:
                                           "(one report per world, changes nothing)")
     p.add_argument("--out", default=None, help="report folder (default: <world folder>/acl-survey)")
     p.add_argument("--files", action="store_true", help="also check every document for permissions of its own (slower)")
+    p.add_argument("--workers", type=int, default=16)
+    p = sub.add_parser("permissions", help="refresh access.sqlite3: the reading rule of every indexed folder "
+                                           "(worlds with access = \"acl\"; changes no index)")
+    p.add_argument("--out", action="append", default=None, metavar="PATH",
+                   help="access.sqlite3 to write, master first (repeatable; default: the local world folder)")
+    p.add_argument("--report-dir", default=None, help="folder for the change report (default: <world folder>/acl-survey)")
     p.add_argument("--workers", type=int, default=16)
 
     args = parser.parse_args(argv)
@@ -220,7 +226,20 @@ def main(argv: list[str] | None = None) -> None:
         for f in write_reports(s, out):
             print(f"Written: {f}")
         print(f"{s.docs:,} documents, {len(s.rule_acl)} reading rules, {len(s.errors)} not readable.")
-    elif args.command == "status":
+    elif args.command == "permissions":
+        if cfg.access != "acl":
+            print(f"World '{cfg.world}' has access = \"world\": nothing to refresh.")
+            sys.exit(2)
+        from .permissions import refresh_permissions, write_change_report
+        outs = [Path(o) for o in (args.out or [cfg.access_path])]
+        print(f"Reading the permissions of the folders indexed in {cfg.db_path} (read-only) ...")
+        r = refresh_permissions(cfg, outs, workers=args.workers)
+        report = write_change_report(r, args.report_dir or cfg.world_dir / "acl-survey")
+        print(f"{r.folders:,} folders, {r.rules} rules, {len(r.changed)} changed "
+              f"({r.docs_affected:,} documents), {len(r.unreadable)} not readable; version {r.version}.")
+        print(f"Report: {report}")
+        for o in outs:
+            print(f"Written: {o}")
         from .tools import DocTools
         print(DocTools(cfg).index_status())
     elif args.command == "map":

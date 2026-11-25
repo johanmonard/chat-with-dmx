@@ -42,12 +42,16 @@ first argument; otherwise the script asks (Enter = projects).
   search "..."   test a search on the local copy
   acl-survey [--files]  read-only: which accounts and groups can read the folders of the local copy's documents;
                  report in <shared>\worlds\<world>\acl-survey (run it under the account that will serve the world)
+  permissions    worlds with access = "acl": read the reading rule of every indexed folder of the local copy and write
+                 access.sqlite3 to <shared>\worlds\<world> then to the local world folder (no lock; report in
+                 <shared>\worlds\<world>\acl-survey). update ends with it; pull copies the shared file down.
+                 Run it under the account that may read the folders' permissions (the VM's daily task, launcher 8)
   unlock -Force  remove a stale lock left by a machine that crashed (also one of the old layout)
   migrate        one-time move from the single-index layout (every command but unlock does it first)
 #>
 param(
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet('setup', 'web', 'index', 'embed', 'ocr', 'describe', 'offers', 'update', 'pull', 'status', 'map', 'search', 'acl-survey', 'unlock', 'migrate')]
+    [ValidateSet('setup', 'web', 'index', 'embed', 'ocr', 'describe', 'offers', 'update', 'pull', 'status', 'map', 'search', 'acl-survey', 'permissions', 'unlock', 'migrate')]
     [string]$Command,
     [string]$World,
     [switch]$Force,
@@ -190,6 +194,13 @@ function Get-WorldProfile([string]$name) {
     $text = Get-Content $SharedConfig -Raw
     $table = [regex]::Match($text, '(?ms)^\s*\[worlds\.' + [regex]::Escape($name) + '\](.*?)(?=^\s*\[|\z)')
     if ($table.Success -and $table.Groups[1].Value -match '(?m)^\s*profile\s*=\s*[''"]([^''"]+)[''"]') { $Matches[1] } else { '' }
+}
+
+function Get-WorldAccess([string]$name) {
+    # The access mode of a world ('world' or 'acl'), from its [worlds.<name>] table of the shared config.
+    $text = Get-Content $SharedConfig -Raw
+    $table = [regex]::Match($text, '(?ms)^\s*\[worlds\.' + [regex]::Escape($name) + '\](.*?)(?=^\s*\[|\z)')
+    if ($table.Success -and $table.Groups[1].Value -match '(?m)^\s*access\s*=\s*[''"]([^''"]+)[''"]') { $Matches[1] } else { 'world' }
 }
 
 function Resolve-World {
@@ -535,7 +546,7 @@ try {
     # unlock must work even while the layout cannot be moved (a lock of the old layout is why).
     if ($Command -ne 'unlock') { Move-LegacyLayout }
     # Before any lock or copy: a world the user may not read stops here, the other worlds are not affected.
-    if ($Command -in 'web', 'index', 'embed', 'ocr', 'describe', 'offers', 'update', 'pull' -and -not (Test-WorldAccess)) {
+    if ($Command -in 'web', 'index', 'embed', 'ocr', 'describe', 'offers', 'update', 'pull', 'permissions' -and -not (Test-WorldAccess)) {
         Stop-NoAccess
     }
     switch ($Command) {
@@ -547,7 +558,11 @@ try {
         'ocr' { Invoke-Locked 'ocr' @(, (@('ocr') + $Rest)) }
         'describe' { Invoke-Locked 'describe' @(, (@('describe') + $Rest)) }
         'offers' { Invoke-Locked 'offers' @(, (@('offers') + $Rest)) }
-        'update' { Invoke-Locked 'update' @(@('index'), @('ocr'), @('offers'), @('describe'), @('embed')) }   # offers does nothing in the other worlds
+        'update' {
+            $steps = @(@('index'), @('ocr'), @('offers'), @('describe'), @('embed'))   # offers does nothing in the other worlds
+            if ((Get-WorldAccess $World) -eq 'acl') { $steps += , @('permissions', '--out', (Join-Path $SharedWorld 'access.sqlite3'), '--out', (Join-Path $LocalWorld 'access.sqlite3'), '--report-dir', (Join-Path $SharedWorld 'acl-survey')) }
+            Invoke-Locked 'update' $steps
+        }
         'pull' {
             Assert-Env
             Sync-Models
@@ -556,6 +571,12 @@ try {
             if ($held) { Say "Note: $($held.Split('|')[0]) is working on '$World' right now; you get the last saved version." }
             if (-not (Test-Path $Master)) { throw "World '$World' has no index in the shared folder yet (index it first: launcher 3 or 7), or you have no access to it (ask for the AD group that can read it)." }
             Copy-MasterToLocal
+            $access = Join-Path $SharedWorld 'access.sqlite3'   # per-person access (worlds with access = "acl"): never copied over in place
+            if (Test-Path $access) {
+                $accessNew = Join-Path $LocalWorld 'access.sqlite3.new'
+                Copy-Item $access $accessNew -Force
+                Move-Item $accessNew (Join-Path $LocalWorld 'access.sqlite3') -Force
+            }
             Copy-Item $SharedConfig $LocalConfig -Force
             $th = Join-Path $Shared 'thesaurus.toml'
             if (Test-Path $th) { Copy-Item $th (Join-Path $Local 'thesaurus.toml') -Force }  # search synonyms
@@ -596,6 +617,15 @@ try {
             if (-not (Test-Path $LocalDb)) { throw "No local copy of '$World' on this machine: run 'pull' (or an index run) first." }
             $out = Join-Path $SharedWorld 'acl-survey'
             Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $WorldArgs + @('acl-survey', '--out', $out) + $Rest) -AllowFail
+        }
+        'permissions' {
+            Assert-Env
+            if ((Get-WorldAccess $World) -ne 'acl') { Say "World '$World' has access = `"world`": nothing to refresh."; $script:ExitCode = 2; break }
+            if (-not (Test-Path $LocalDb)) { throw "No local copy of '$World' on this machine: run 'pull' (or an index run) first." }
+            New-Item -ItemType Directory -Force $SharedWorld | Out-Null
+            $outs = @('--out', (Join-Path $SharedWorld 'access.sqlite3'), '--out', (Join-Path $LocalWorld 'access.sqlite3'))
+            Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $WorldArgs + @('permissions') + $outs + @('--report-dir', (Join-Path $SharedWorld 'acl-survey')) + $Rest) -AllowFail
+            if ($LASTEXITCODE -ne 0) { $script:ExitCode = $LASTEXITCODE }
         }
         'unlock' {
             $held = Get-LockInfo

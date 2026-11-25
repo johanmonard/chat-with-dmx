@@ -78,6 +78,11 @@ class Config:
     vision_min_side: int = 150                   # smaller pictures (icons, bullets) are not described
     vision_pdf_picture_share: float = 0.15       # a PDF page with text is described when pictures cover this share
     vision_parallel_requests: int = 1
+    # Per-person access (access.py): "world" = every caller reads everything, "acl" = each caller sees
+    # the documents whose folder's file-server reading rule lets them read.
+    access: str = "world"
+    access_admins: list[str] = field(default_factory=list)   # accounts that see every document
+    access_domain_sid: str | None = None                      # AD domain SID prefix (else the running account's)
 
     def __post_init__(self) -> None:
         self.extensions = [e.lower() if e.startswith(".") else "." + e.lower() for e in self.extensions]
@@ -116,6 +121,10 @@ class Config:
     @property
     def db_path(self) -> Path:
         return self.world_dir / "index.sqlite3"
+
+    @property
+    def access_path(self) -> Path:
+        return self.world_dir / "access.sqlite3"
 
     @property
     def models_dir(self) -> Path:
@@ -270,4 +279,13 @@ def load_config(path: str | os.PathLike, world: str | None = None) -> Config:
             kwargs[attr] = vis[key]
     if name and "vision" in w:  # a world can switch picture descriptions off
         kwargs["vision_enabled"] = bool(w["vision"])
+    acc = raw.get("access", {})
+    if acc.get("admins"):
+        kwargs["access_admins"] = [str(a) for a in acc["admins"]]
+    if acc.get("domain_sid"):
+        kwargs["access_domain_sid"] = str(acc["domain_sid"])
+    if name and "access" in w:
+        if w["access"] not in ("world", "acl"):
+            raise ValueError(f"World '{name}': unknown access '{w['access']}' (use \"world\" or \"acl\")")
+        kwargs["access"] = w["access"]
     return Config(**kwargs)

@@ -87,10 +87,14 @@ max_read_chars = 40000
 # name), 'offers' (client offers: facets from the folder names, register of priced offer lines)
 # 'engineering' (category = discipline decided from disciplines.toml, section = first folder below the
 # root) or 'none'. A world may set its own extensions, exclude and roots (first-run seed).
+# access: "world" (default: everyone who reaches the world reads every document) or "acl" (each caller
+# sees only the documents whose folder's file-server reading rule lets them read; the rules are read
+# by `dmx.ps1 permissions` / launcher 8 into access.sqlite3, see [access] below).
 # [worlds.projects]
 # title = "Projects"
 # profile = "projects"
 # vision = false   # picture descriptions off for this world
+# access = "acl"
 #
 # [worlds.marketing]
 # title = "Marketing"
@@ -132,6 +136,13 @@ max_read_chars = 40000
 # # start from disciplines.example.toml). The index run writes engineering-classification.csv and
 # # keyword-suggestions.csv for review.
 # disciplines = 'disciplines.toml'
+
+# Per-person access (worlds with access = "acl"). admins: accounts that see every document of those
+# worlds, as DOMAIN\account (or a group). domain_sid: the AD domain's SID prefix (default: taken from
+# the account that runs the refresh); only needed when that account is not a domain account.
+# [access]
+# admins = ['EXAMPLEDOM\admin-account']
+# domain_sid = 'S-1-5-21-1111111111-2222222222-3333333333'
 
 # OCR of scanned PDF pages (`dmx-docs ocr`, part of launcher 7). Uses the Tesseract engine built
 # into PyMuPDF; only the language files are needed (tessdata_best from
