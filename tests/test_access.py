@@ -107,15 +107,15 @@ def test_reload_with_renumbered_rule_ids_keeps_one_consistent_snapshot(tmp_path)
     now = [1000.0]
     _write(p, "v1", 1)                      # acme -> rule 1 (A), thor -> rule 2 (B)
     acc = Access(AccessStore(p), Caller(frozenset({A})), clock=lambda: now[0])
-    assert acc.can_read("d:\p\acme\a.pdf") and acc.allowed_rules() == frozenset({1})
+    assert acc.can_read("d:\\p\\acme\\a.pdf") and acc.allowed_rules() == frozenset({1})
     snap1 = acc._snapshot()
     AccessStore.write(                      # ids renumbered: A's rule is now 2
-        p, rules={}, folder_rules={"d:\p\acme": 2, "d:\p\thor": 1},
+        p, rules={}, folder_rules={"d:\\p\\acme": 2, "d:\\p\\thor": 1},
         rule_sets={1: (frozenset({B}), frozenset()), 2: (frozenset({A}), frozenset())},
         errors={}, names={}, version="v2")
     now[0] += 61
     snap2 = acc._snapshot()
     assert snap2 is not snap1 and snap2.data.version == "v2"
     assert snap2.allowed == frozenset({2}) == acc.allowed_rules()
-    assert acc.can_read("d:\p\acme\a.pdf") and not acc.can_read("d:\p\thor\a.pdf")
+    assert acc.can_read("d:\\p\\acme\\a.pdf") and not acc.can_read("d:\\p\\thor\\a.pdf")
     assert acc._snapshot() is snap2         # no reload inside the 60 s window
