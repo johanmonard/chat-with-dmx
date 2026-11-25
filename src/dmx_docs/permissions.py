@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -18,7 +19,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import aclsurvey
-from .access import AccessData, AccessStore, usable_sids
+from .access import AccessData, AccessStore, readonly_uri, usable_sids
+
+log = logging.getLogger("dmx_docs.permissions")
 
 WRITE_ATTEMPTS = 5
 WRITE_DELAY_SECONDS = 0.5
@@ -32,6 +35,10 @@ class RefreshResult:
     unreadable: list[tuple[str, str]] = field(default_factory=list)                  # folder, message
     docs_affected: int = 0
     version: str = ""
+    previous_from: str = ""   # the file the previous rules were read from ("" when there were none)
+    kept_missing: int = 0     # folders of the previous rules missing from this machine's index, kept as they were
+    read: int = 0             # folders whose rule was read in this run
+    allow_nobody: int = 0     # of those, folders whose rule allows nobody once local/builtin SIDs are dropped
 
 
 def domain_prefix(cfg) -> str:
@@ -51,21 +58,24 @@ def _index_folders(db_path: Path) -> tuple[dict[str, str], dict[str, int]]:
     """Folder key -> folder as written, and documents per folder key, from the index (read-only)."""
     display: dict[str, str] = {}
     counts: dict[str, int] = {}
-    with closing(sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)) as con:
+    with closing(sqlite3.connect(readonly_uri(db_path), uri=True)) as con:
         for path, folder_key in con.execute("SELECT path, folder_key FROM docs"):
             display.setdefault(folder_key, os.path.dirname(path))
             counts[folder_key] = counts.get(folder_key, 0) + 1
     return display, counts
 
 
-def _previous(out_paths: list[Path]) -> AccessData | None:
+def _previous(out_paths: list[Path]) -> tuple[AccessData | None, Path | None]:
+    """The previous rules and the file they come from: the first out path that can be read
+    (the master first)."""
     for p in out_paths:
         if Path(p).exists():
             try:
-                return AccessStore(p).load()
-            except sqlite3.Error:
+                return AccessStore(p).load(), Path(p)
+            except sqlite3.Error as e:
+                log.warning("previous rules: %s not readable (%s), trying the next file", p, e)
                 continue
-    return None
+    return None, None
 
 
 def _version_of(folder_pairs: dict[str, tuple[frozenset, frozenset]]) -> str:
@@ -90,7 +100,7 @@ def refresh_permissions(cfg, out_paths: list[Path], read_acl=aclsurvey.read_wind
                         account_name=aclsurvey.windows_account_name, workers: int = 16) -> RefreshResult:
     prefix = domain_prefix(cfg)
     display, doc_counts = _index_folders(cfg.db_path)
-    prev = _previous(out_paths)
+    prev, prev_from = _previous(out_paths)
     prev_pairs: dict[str, tuple[frozenset, frozenset]] = {}
     prev_ids: dict[str, int] = {}
     if prev:
@@ -109,14 +119,23 @@ def refresh_permissions(cfg, out_paths: list[Path], read_acl=aclsurvey.read_wind
     new_pairs: dict[str, tuple[frozenset, frozenset]] = {}
     unreadable: list[tuple[str, str]] = []
     errors: dict[str, str] = {}
+    read = allow_nobody = 0
     for k, acl, err in results:
         if acl is not None:
             new_pairs[k] = (usable_sids(acl.allow, prefix), usable_sids(acl.deny, prefix))
+            read += 1
+            if not new_pairs[k][0]:
+                allow_nobody += 1
         else:
             unreadable.append((display[k], err))
             errors[k] = err
             if k in prev_pairs:
                 new_pairs[k] = prev_pairs[k]
+    # Folders of the previous rules that this machine's index does not hold (a local copy older than
+    # the master's index): not read again, their rule is kept as it was.
+    kept_missing = [k for k in prev_pairs if k not in display]
+    for k in kept_missing:
+        new_pairs[k] = prev_pairs[k]
 
     # Rule ids: keep the previous id of a rule that still exists, number new ones after the highest.
     ids: dict[tuple[frozenset, frozenset], int] = {}
@@ -151,7 +170,19 @@ def refresh_permissions(cfg, out_paths: list[Path], read_acl=aclsurvey.read_wind
         _write(Path(out), {str(rid): rid for rid in rule_sets}, folder_rules, rule_sets, errors, names, version)
 
     return RefreshResult(folders=len(display), rules=len(rule_sets), changed=changed, unreadable=unreadable,
-                         docs_affected=docs_affected, version=version)
+                         docs_affected=docs_affected, version=version,
+                         previous_from=str(prev_from) if prev is not None else "",
+                         kept_missing=len(kept_missing), read=read, allow_nobody=allow_nobody)
+
+
+def nobody_warning(result: RefreshResult) -> str | None:
+    """A loud warning when every folder read allows nobody: typically a run under an account outside
+    the domain without [access] domain_sid, which drops every domain SID as local to some machine."""
+    if result.read and result.allow_nobody == result.read:
+        return (f"WARNING: all {result.read:,} folders read allow nobody once local and built-in SIDs are "
+                "dropped: nobody but the admins will read this world. Run under a domain account or set "
+                "[access] domain_sid.")
+    return None
 
 
 def write_change_report(result: RefreshResult, out_dir: Path) -> Path:
@@ -162,7 +193,14 @@ def write_change_report(result: RefreshResult, out_dir: Path) -> Path:
              f"{time.strftime('%Y-%m-%d %H:%M')} on {os.environ.get('COMPUTERNAME', '?')}: "
              f"{result.folders:,} folders, {result.rules} different reading rules, version {result.version}.", "",
              f"{len(result.changed)} folders changed their rule ({result.docs_affected:,} documents affected); "
-             f"{len(result.unreadable)} folders could not be read.", ""]
+             f"{len(result.unreadable)} folders could not be read.", "",
+             "Previous rules read from: " + (result.previous_from or "none (first refresh)") + ".",
+             f"{result.kept_missing:,} folders kept from the previous rules, not in this machine's index.",
+             f"{result.allow_nobody:,} folders whose rule allows nobody after dropping local/builtin SIDs "
+             f"(of {result.read:,} read).", ""]
+    warning = nobody_warning(result)
+    if warning:
+        lines[2:2] = [f"**{warning}**", ""]
     if result.changed:
         lines += ["## Changed", ""]
         for folder, old, new in result.changed:

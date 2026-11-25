@@ -174,3 +174,67 @@ def test_cli_permissions_writes_outputs_and_report_without_index_status(tmp_path
     out = capsys.readouterr().out
     assert o1.exists() and o2.exists() and list(rep.glob("changes-*.md"))
     assert "Written:" in out and _status_line(cfgfile) not in out
+
+
+def test_folders_missing_from_a_stale_local_index_keep_their_master_rule(world, tmp_path):
+    cfg, root, out = world
+    local = tmp_path / "local" / "projects" / "access.sqlite3"
+    refresh_permissions(cfg, [out, local], read_acl=reader({root / "A": acl(SALES), root / "B": acl(ENG)}),
+                        account_name=NAMES.get, workers=1)
+    before = AccessStore(out).load()
+    con = store.connect(cfg.db_path, create=False)  # this machine's index lost folder B (an older copy)
+    con.execute("DELETE FROM docs WHERE folder_key = ?", (key(root / "B"),))
+    con.commit()
+    con.close()
+    r = refresh_permissions(cfg, [out, local], read_acl=reader({root / "A": acl(SALES)}),
+                            account_name=NAMES.get, workers=1)
+    for path in (out, local):
+        data = AccessStore(path).load()
+        assert data.rules[data.folder_rule[key(root / "B")]] == before.rules[before.folder_rule[key(root / "B")]]
+    assert r.kept_missing == 1 and r.changed == [] and r.version == before.version
+    assert r.previous_from == str(out)
+    report = write_change_report(r, tmp_path / "reports").read_text(encoding="utf-8")
+    assert "1 folders kept from the previous rules, not in this machine's index." in report
+    assert f"Previous rules read from: {out}." in report
+
+
+def test_report_names_the_local_file_when_the_master_is_missing(world, tmp_path):
+    cfg, root, out = world
+    local = tmp_path / "local" / "access.sqlite3"
+    table = {root / "A": acl(SALES), root / "B": acl(ENG)}
+    refresh_permissions(cfg, [local], read_acl=reader(table), account_name=NAMES.get, workers=1)
+    r = refresh_permissions(cfg, [out, local], read_acl=reader(table), account_name=NAMES.get, workers=1)
+    assert r.previous_from == str(local)
+    first = refresh(cfg, tmp_path / "new" / "access.sqlite3", table)
+    assert first.previous_from == ""
+    assert "Previous rules read from: none (first refresh)." in write_change_report(
+        first, tmp_path / "reports").read_text(encoding="utf-8")
+
+
+def test_rules_that_allow_nobody_are_counted_and_all_of_them_is_a_loud_warning(world, tmp_path):
+    cfg, root, out = world
+    some = refresh(cfg, out, {root / "A": acl(SALES), root / "B": acl(ADMINS, "S-1-5-21-9-9-9-1001")})
+    assert (some.read, some.allow_nobody) == (2, 1) and permissions.nobody_warning(some) is None
+    report = write_change_report(some, tmp_path / "r1").read_text(encoding="utf-8")
+    assert "1 folders whose rule allows nobody after dropping local/builtin SIDs (of 2 read)." in report
+    assert "WARNING" not in report
+    # Every SID of another domain (a run under a local account without domain_sid): nobody reads anything.
+    none = refresh(cfg, out, {root / "A": acl("S-1-5-21-9-9-9-1001"), root / "B": acl(ADMINS)})
+    assert (none.read, none.allow_nobody) == (2, 2)
+    assert "WARNING: all 2 folders read allow nobody" in permissions.nobody_warning(none)
+    assert "**WARNING: all 2 folders read allow nobody" in write_change_report(
+        none, tmp_path / "r2").read_text(encoding="utf-8")
+
+
+def test_cli_permissions_warns_loudly_when_every_rule_allows_nobody(tmp_path, capsys, monkeypatch):
+    cfgfile, root = _config_file(tmp_path, 'access = "acl"\n')
+    cli.main(["--config", str(cfgfile), "--world", "projects", "index"])
+    capsys.readouterr()
+    real = permissions.refresh_permissions
+    monkeypatch.setattr(permissions, "refresh_permissions", lambda cfg, outs, workers=16: real(
+        cfg, outs, read_acl=lambda p, for_files=True: acl(ADMINS), account_name=lambda s: s, workers=workers))
+    o1, rep = tmp_path / "m" / "access.sqlite3", tmp_path / "rep"
+    cli.main(["--config", str(cfgfile), "--world", "projects", "permissions", "--out", str(o1), "--report-dir", str(rep)])
+    out = capsys.readouterr().out
+    assert "1 folders whose rule allows nobody after dropping local/builtin SIDs." in out
+    assert "WARNING: all 1 folders read allow nobody" in out and "Previous rules read from: none" in out

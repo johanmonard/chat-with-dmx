@@ -253,13 +253,20 @@ def main(argv: list[str] | None = None) -> None:
         if cfg.access != "acl":
             print(f"World '{cfg.world}' has access = \"world\": nothing to refresh.")
             sys.exit(2)
-        from .permissions import refresh_permissions, write_change_report
+        from .permissions import nobody_warning, refresh_permissions, write_change_report
         outs = [Path(o) for o in (args.out or [cfg.access_path])]
         print(f"Reading the permissions of the folders indexed in {cfg.db_path} (read-only) ...")
         r = refresh_permissions(cfg, outs, workers=args.workers)
         report = write_change_report(r, args.report_dir or cfg.world_dir / "acl-survey")
         print(f"{r.folders:,} folders, {r.rules} rules, {len(r.changed)} changed "
               f"({r.docs_affected:,} documents), {len(r.unreadable)} not readable; version {r.version}.")
+        print(f"Previous rules read from: {r.previous_from or 'none (first refresh)'}.")
+        if r.kept_missing:
+            print(f"{r.kept_missing:,} folders kept from the previous rules, not in this machine's index.")
+        print(f"{r.allow_nobody:,} folders whose rule allows nobody after dropping local/builtin SIDs.")
+        warning = nobody_warning(r)
+        if warning:
+            print("\n" + "!" * 78 + f"\n{warning}\n" + "!" * 78 + "\n")
         print(f"Report: {report}")
         for o in outs:
             print(f"Written: {o}")

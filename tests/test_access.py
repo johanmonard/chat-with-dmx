@@ -119,3 +119,51 @@ def test_reload_with_renumbered_rule_ids_keeps_one_consistent_snapshot(tmp_path)
     assert snap2.allowed == frozenset({2}) == acc.allowed_rules()
     assert acc.can_read("d:\\p\\acme\\a.pdf") and not acc.can_read("d:\\p\\thor\\a.pdf")
     assert acc._snapshot() is snap2         # no reload inside the 60 s window
+
+
+def test_readonly_uri_of_a_unc_path_has_an_empty_authority():
+    from dmx_docs.access import readonly_uri
+    assert (readonly_uri(r"\\server\share\DMX-RAG\worlds\p\access.sqlite3")
+            == "file:////server/share/DMX-RAG/worlds/p/access.sqlite3?mode=ro")
+    assert readonly_uri("//server/share/a.sqlite3") == "file:////server/share/a.sqlite3?mode=ro"
+
+
+def test_readonly_uri_escapes_question_mark_hash_and_percent():
+    from dmx_docs.access import readonly_uri
+    assert readonly_uri(r"D:\x\a?b#c%d e.sqlite3") == "file:D:/x/a%3Fb%23c%25d%20e.sqlite3?mode=ro"
+    assert readonly_uri(r"\\srv\s#1\a.sqlite3") == "file:////srv/s%231/a.sqlite3?mode=ro"
+
+
+def test_store_reads_a_file_whose_folder_has_hash_and_percent(tmp_path):
+    p = tmp_path / "dir #1 %41" / "access.sqlite3"
+    p.parent.mkdir()
+    _write(p, "v1", 1)
+    assert AccessStore(p).read_version() == "v1"
+    assert AccessStore(p).load().folder_rule["d:\\p\\acme"] == 1
+
+
+def test_admins_are_matched_on_domain_and_name_only(caplog):
+    from dmx_docs.access import admin_names, is_admin_account
+    with caplog.at_level("WARNING", logger="dmx_docs.access"):
+        wanted = admin_names([r"EXAMPLEDOM\Admin.Account", "admin.other", " ", r"\nodomain", "EXAMPLEDOM\\"])
+    assert wanted == {r"exampledom\admin.account"}
+    assert "'admin.other' ignored" in caplog.text and r"'\nodomain' ignored" in caplog.text
+    assert is_admin_account(wanted, "exampledom", "ADMIN.ACCOUNT")
+    assert not is_admin_account(wanted, "SOMEPC", "admin.account")      # same name, local account of a PC
+    assert not is_admin_account(admin_names(["admin.other"]), "SOMEPC", "admin.other")
+    assert not is_admin_account(wanted, "", "admin.account")
+
+
+def test_folder_predicate_token_follows_the_snapshot(tmp_path):
+    p = tmp_path / "access.sqlite3"
+    now = [1000.0]
+    _write(p, "v1", 1)
+    acc = Access(AccessStore(p), Caller(frozenset({A})), clock=lambda: now[0])
+    first = acc.folder_predicate()
+    assert first("d:\\p\\acme") and not first("d:\\p\\thor")
+    assert acc.folder_predicate().token == first.token
+    _write(p, "v2", 2)
+    now[0] += 61
+    second = acc.folder_predicate()
+    assert second.token != first.token and not second("d:\\p\\acme")
+    assert Access(AccessStore(p), Caller(frozenset(), admin=True)).folder_predicate() is None
