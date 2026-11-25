@@ -709,6 +709,38 @@ def test_machine_filter_uses_no_register_link_made_from_hidden_documents(acl_wor
         assert "Plan THOR" in tools.search("préhenseur", machine="Hector", mode="keyword")
 
 
+def test_card_document_source_must_be_an_indexed_document(acl_world, tmp_path):
+    """A cited path is judged as the indexed document it names: text after the file name, a second
+    file joined by a comma, or a file not indexed (even in a readable folder) is not readable."""
+    cfg, tools_for = acl_world
+    _thor_card(cfg, tmp_path)
+    plan = Path(cfg.roots[0], "THOR", "3_Mecanique", "Plan THOR.pdf")
+    fresh = Path(cfg.roots[0], "THOR", "3_Mecanique", "Nouveau plan.pdf")
+    make_pdf(str(fresh), ["Nouveau plan: bride"])  # on disk, readable folder, not indexed
+    text = (tmp_path / "knowledge" / "projects" / "THOR.md").read_text(encoding="utf-8").split("## A.")[0]
+    _card_file(tmp_path, "THOR.md", text + f"""## A. Document sources
+- Plain citation [{plan} p.1]
+- Text after the name [{plan} and 0_Vente\\Offre THOR.pdf]
+- Second file after a comma [{plan}, Offre THOR.pdf]
+- Not indexed [{fresh} p.1]
+
+## D. Key documents
+- Plan: {plan}
+""")
+    out = tools_for(MEC).project_card("THOR")
+    assert "Plain citation" in out and "3 lines not shown with your rights." in out
+    for hidden in ("Text after the name", "Second file after a comma", "Not indexed", "## D. Key documents"):
+        assert hidden not in out, hidden
+    both = tools_for(SALES, MEC).project_card("THOR")
+    assert "Plain citation" in both and "Text after the name" not in both and "Not indexed" not in both
+    assert "Not indexed" in tools_for(OTHER, admin=True).project_card("THOR")
+    assert "Not indexed" in DocTools(dataclasses.replace(cfg, access="world")).project_card("THOR")
+    _card_file(tmp_path, "THOR.md", text + f"## A. Indexed only\n- Plain citation [{plan} p.1]\n\n"
+                                           f"## D. Key documents\n- Plan: {plan}\n- New: {fresh}\n")
+    out = tools_for(SALES, MEC).project_card("THOR")
+    assert "Nouveau" not in out and "Some parts not shown with your rights." in out  # bare paths too
+
+
 def test_card_bracket_with_several_sources_needs_every_one(acl_world, tmp_path):
     cfg, tools_for = acl_world
     _thor_card(cfg, tmp_path)

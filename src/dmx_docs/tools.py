@@ -404,11 +404,24 @@ class DocTools:
 
     def _card_viewer(self, con, project_ok=None):
         """Function card -> (body, sourced lines left out, whole) as the caller may see it: nothing
-        of the card of a project the caller reads no document of; else a cited document by its own
-        rights, a note ([register], [user, date]) by those on the project, anything else not at all."""
+        of the card of a project the caller reads no document of; else a cited document - an indexed
+        one, exactly - by its own rights, a note ([register], [user, date]) by those on the project,
+        anything else not at all (text after a file name, a file not indexed...)."""
         if not self._restricted:
             return lambda card: (card.body, 0, True)
         project_ok = project_ok or self._project_reader(con)
+        indexed: dict[str, bool] = {}  # path key -> is it an indexed document (one lookup per key)
+
+        def document_ok(source: str) -> bool:
+            if not knowledge.DOCUMENT_SOURCE.match(source) or not knowledge.single_path(source):
+                return False
+            try:
+                key = store.path_key(sources.clean_path(source))
+            except ValueError:
+                return False
+            if key not in indexed:
+                indexed[key] = con.execute("SELECT 1 FROM docs WHERE path_key = ?", (key,)).fetchone() is not None
+            return indexed[key] and self.allows(key)
 
         def view(card):
             if not project_ok(card.project):
@@ -417,12 +430,7 @@ class DocTools:
             def can_read(source: str) -> bool:
                 if knowledge.NOTE_SOURCE.fullmatch(source):
                     return True  # the caller reads a document of the card's project (checked above)
-                if not knowledge.DOCUMENT_SOURCE.match(source) or not knowledge.single_path(source):
-                    return False  # neither a note nor one path: nobody can tell where it comes from
-                try:
-                    return self.allows(store.path_key(sources.clean_path(source)))
-                except ValueError:
-                    return False
+                return document_ok(source)  # neither a note nor an indexed document: not readable
             return knowledge.visible_card(card, can_read)
         return view
 
