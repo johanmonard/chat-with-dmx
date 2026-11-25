@@ -347,7 +347,10 @@ class Searcher:
 
     @staticmethod
     def _filters(folder: str | None, file_type: str | None, modified_after: str | None,
-                 facets: dict | None = None, profile: str = "projects", offer_register: bool = False):
+                 facets: dict | None = None, profile: str = "projects", offer_register: bool = False,
+                 con=None, readable: str | None = None):
+        """SQL clauses and parameters of the filters. readable (with con): the caller's readable
+        documents, among which a project's machines are confirmed for machine=."""
         clauses, params = [], []
         # Facet filters (project, collection, section, doc_type): comma-separated values,
         # case-insensitive. Documents without that facet are excluded by the filter.
@@ -364,14 +367,10 @@ class Searcher:
                     clauses.append(clause)
                     params += args
                 elif col == "machine":  # documents of projects with that machine family or model
-                    from .machines import confirmed_sql
-                    clauses.append(
-                        "d.id IN (SELECT doc_id FROM doc_facets WHERE project IN (SELECT project FROM "
-                        f"project_machines pm WHERE {confirmed_sql()} AND (family COLLATE NOCASE IN ({marks}) "
-                        f"OR model COLLATE NOCASE IN ({marks}))) OR project IN (SELECT project FROM "
-                        f"register_machines WHERE family_ok = 1 AND (family COLLATE NOCASE IN ({marks}) "
-                        f"OR (model_ok = 1 AND model COLLATE NOCASE IN ({marks})))))")
-                    params += values * 4
+                    from .machines import filter_sql
+                    cond, args = filter_sql(con, values, "project", readable=readable)
+                    clauses.append(f"d.id IN (SELECT doc_id FROM doc_facets WHERE {cond})")
+                    params += args
                 elif profile == "projects" and col in ("client", "country"):  # projects of that client / country
                     from . import register
                     cond, args = (register.client_clause if col == "client" else register.country_clause)(str(value))
@@ -430,11 +429,12 @@ class Searcher:
                mode: str = "hybrid", allowed=None, row_mask=None, folder_ok=None, facets: dict | None = None,
                expand: bool | None = None, pictures_only: bool = False, profile: str = "projects") -> list[Hit]:
         offer_register = profile != "projects" and store.has_table(con, "offers")
-        clauses, params = self._filters(folder, file_type, modified_after, facets, profile, offer_register)
+        readable = readable_clause(con, folder_ok)  # hidden documents must not take keyword slots
+        clauses, params = self._filters(folder, file_type, modified_after, facets, profile, offer_register,
+                                        con=con, readable=readable)
         if pictures_only:  # passages written from pictures by the vision model (describe.py)
             clauses.append("c.id IN (SELECT chunk_id FROM picture_uses WHERE chunk_id IS NOT NULL)")
         filtered = bool(clauses)
-        readable = readable_clause(con, folder_ok)  # hidden documents must not take keyword slots
         if readable:
             clauses.append(readable)
         ranked: dict[str, list[int]] = {}

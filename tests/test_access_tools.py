@@ -404,6 +404,53 @@ def test_machine_document_counts_cover_only_readable_documents(acl_world):
     assert "Paloma 4R (3 docs), not Presto 2R" in world.project_card("THOR")
 
 
+def test_list_projects_filters_keep_the_readable_clause(acl_world):
+    cfg, tools_for = acl_world
+    other, mec = tools_for(OTHER), tools_for(MEC)
+    for kwargs in ({}, {"collection": "%"}, {"collection": ""}, {"name": "THOR"}, {"name": "%"},
+                   {"machine": "Paloma"}, {"collection": "%", "name": "O"}):
+        assert other.list_projects(**kwargs).startswith("No matching project"), kwargs
+    for kwargs in ({}, {"collection": "%"}, {"name": "THOR"}):
+        out = mec.list_projects(**kwargs)
+        assert "THOR" in out and "| 1 docs |" in out and "| 2 docs |" not in out, kwargs
+
+
+def test_list_projects_lists_no_project_without_a_readable_document(acl_world, monkeypatch):
+    cfg, tools_for = acl_world
+    # A slip in the SQL (the readable condition lost) must still fail closed.
+    monkeypatch.setattr(DocTools, "_readable_facets", lambda self, con: "")
+    assert tools_for(OTHER).list_projects().startswith("No matching project")
+    assert "THOR" in tools_for(MEC).list_projects()
+
+
+def _model_only_in_a_hidden_document(cfg):
+    """THOR names Presto 3R in two sales documents (hidden from MEC); ORION names it in its mechanics."""
+    for p, sub in (("THOR", "0_Vente"), ("THOR", "0_Vente"), ("ORION", "3_Mecanique")):
+        n = len(list(Path(cfg.roots[0], p, sub).glob("*Presto*")))
+        make_pdf(str(Path(cfg.roots[0], p, sub, f"Variante {n} Presto 3R.pdf")), ["variante préhenseur"])
+    run_index(cfg, progress=quiet)
+
+
+def test_machine_filter_is_confirmed_among_readable_documents(acl_world):
+    cfg, tools_for = acl_world
+    _model_only_in_a_hidden_document(cfg)
+    mec = tools_for(MEC)
+    out = mec.list_projects(machine="Presto 3R")
+    assert "ORION" in out and "THOR" not in out
+    assert "THOR" not in mec.list_projects(machine="Presto")
+    hits = mec.search("préhenseur", machine="Presto 3R", mode="keyword", limit=30)
+    assert "ORION" in hits and "THOR" not in hits
+    for tools in (tools_for(OTHER, admin=True), DocTools(dataclasses.replace(cfg, access="world"),
+                                                         Caller(frozenset(), False))):
+        out = tools.list_projects(machine="Presto 3R")
+        assert "ORION" in out and "THOR" in out
+        hits = tools.search("préhenseur", machine="Presto 3R", mode="keyword", limit=30)
+        assert "Plan THOR" in hits and "Plan ORION" in hits
+    sales = tools_for(SALES)
+    assert "THOR" in sales.list_projects(machine="Presto 3R")
+    assert "ORION" not in sales.list_projects(machine="Presto 3R")
+
+
 def test_hidden_folder_answers_like_a_missing_one(acl_world):
     cfg, tools_for = acl_world
     hidden = str(Path(cfg.roots[0], "THOR", "0_Vente"))

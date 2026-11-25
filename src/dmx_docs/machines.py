@@ -134,6 +134,35 @@ def confirmed_sql(alias: str = "pm") -> str:
     return f"{alias}.confirmed = 1"
 
 
+def _readable_evidence(con, readable: str, project: str | None = None) -> list[tuple]:
+    """_confirm rows counted among the documents `readable` (a SQL condition on docs d) keeps;
+    nothing for an index from before per-document evidence (fail closed)."""
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'doc_machines'").fetchone():
+        return []
+    where, args = (" AND dm.project = ?", [project]) if project is not None else ("", [])
+    return _confirm({(p, f, m): [d, nd] for p, f, m, d, nd in con.execute(
+        f"""SELECT dm.project, dm.family, dm.model, count(*), sum(dm.in_name) FROM doc_machines dm
+            JOIN docs d ON d.id = dm.doc_id WHERE {readable}{where} GROUP BY 1, 2, 3""", args)})
+
+
+def filter_sql(con, values: list[str], column: str = "project", readable: str | None = None) -> tuple[str, list]:
+    """SQL condition on `column` (a project name) keeping the projects with one of these machine
+    families or models, confirmed by the documents or by the machine register. With `readable` (a SQL
+    condition on docs d: one caller's readable documents) the documents' evidence is counted and
+    confirmed among those documents only."""
+    marks = ",".join("?" * len(values))
+    register = (f"{column} IN (SELECT project FROM register_machines WHERE family_ok = 1 AND "
+                f"(family COLLATE NOCASE IN ({marks}) OR (model_ok = 1 AND model COLLATE NOCASE IN ({marks}))))")
+    if readable is None:
+        return (f"({column} IN (SELECT project FROM project_machines pm WHERE {confirmed_sql()} AND "
+                f"(family COLLATE NOCASE IN ({marks}) OR model COLLATE NOCASE IN ({marks}))) OR {register})",
+                values * 4)
+    wanted = {v.casefold() for v in values}
+    projects = sorted({p for p, f, m, _d, _nd, ok in _readable_evidence(con, readable)
+                       if ok and (f.casefold() in wanted or (m and m.casefold() in wanted))})
+    return f"({column} IN ({','.join('?' * len(projects))}) OR {register})", projects + values * 2
+
+
 def describe(con, project: str, limit: int = 4, readable: str | None = None) -> str:
     """'Paloma 11R (14 docs), Paloma 7R (3 docs)' - confirmed models first, families if no model.
     readable: SQL condition on docs d keeping one caller's readable documents; the evidence is then
@@ -142,13 +171,8 @@ def describe(con, project: str, limit: int = 4, readable: str | None = None) -> 
         rows = con.execute(
             f"""SELECT family, model, docs FROM project_machines pm WHERE project = ? AND {confirmed_sql()}
                 ORDER BY model = '', docs DESC""", (project,)).fetchall()
-    elif not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'doc_machines'").fetchone():
-        return ""  # index from before per-document evidence: nothing to count for a restricted caller
     else:
-        evidence = {(project, f, m): [d, nd] for f, m, d, nd in con.execute(
-            f"""SELECT dm.family, dm.model, count(*), sum(dm.in_name) FROM doc_machines dm
-                JOIN docs d ON d.id = dm.doc_id WHERE dm.project = ? AND {readable} GROUP BY 1, 2""", (project,))}
-        rows = sorted(((f, m, d) for _, f, m, d, _, ok in _confirm(evidence) if ok),
+        rows = sorted(((f, m, d) for _, f, m, d, _, ok in _readable_evidence(con, readable, project) if ok),
                       key=lambda r: (r[1] == "", -r[2]))
     models = [r for r in rows if r[1]]
     families_with_model = {r[0] for r in models}

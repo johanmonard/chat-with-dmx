@@ -789,17 +789,13 @@ class DocTools:
         try:
             where, having, params = self._readable_facets(con), "", []  # counts of readable documents only
             if collection:
-                where = " AND coalesce(f.collection, '') LIKE ?"
+                where += " AND coalesce(f.collection, '') LIKE ?"
                 params.append(f"%{collection}%")
             if machine:  # a family ("Paloma") or a model ("Paloma 4R"), comma-separated
                 values = [v.strip() for v in machine.split(",") if v.strip()]
-                marks = ",".join("?" * len(values))
-                where += (f" AND (f.project IN (SELECT project FROM project_machines pm WHERE "
-                          f"{machines.confirmed_sql()} AND (family COLLATE NOCASE IN ({marks}) "
-                          f"OR model COLLATE NOCASE IN ({marks}))) OR f.project IN (SELECT project FROM "
-                          f"register_machines WHERE family_ok = 1 AND (family COLLATE NOCASE IN ({marks}) "
-                          f"OR (model_ok = 1 AND model COLLATE NOCASE IN ({marks})))))")
-                params += values * 4
+                cond, args = machines.filter_sql(con, values, "f.project", readable=self._readable_sql(con))
+                where += " AND " + cond
+                params += args
             reg_cond, reg_params = self._register_filter(client, country, year_from, year_to)
             if reg_cond:
                 where += f" AND f.project IN (SELECT rm.project FROM register_machines rm WHERE {reg_cond})"
@@ -815,6 +811,14 @@ class DocTools:
                       GROUP BY f.project, f.collection{having}
                       ORDER BY f.collection IS NOT NULL, f.project LIMIT ?"""
             rows = con.execute(sql, params + [limit]).fetchall()
+            if rows and self.access.folder_predicate() is not None:
+                # Safety net, as in find_files: a listed project has a document the caller may read,
+                # whatever happened to the SQL above.
+                listed = sorted({r["project"] for r in rows})
+                seen = {(p, c) for p, c, k in con.execute(
+                    f"""SELECT f.project, f.collection, d.path_key FROM doc_facets f JOIN docs d ON d.id = f.doc_id
+                        WHERE f.project IN ({','.join('?' * len(listed))})""", listed) if self.allows(k)}
+                rows = [r for r in rows if (r["project"], r["collection"]) in seen]
             readable = self._readable_sql(con)  # machine evidence counted among the caller's documents
             machine_text = {r["project"]: machines.describe(con, r["project"], readable=readable) for r in rows}
             client_text = {r["project"]: register.summary(con, r["project"]) for r in rows}
