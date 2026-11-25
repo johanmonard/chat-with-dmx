@@ -530,10 +530,11 @@ class DocTools:
             return out
         out = {}
         machine_cache: dict[str, str] = {}
+        readable = self._readable_sql(con)  # machine evidence counted among the caller's documents
         for r in con.execute(f"SELECT * FROM doc_facets WHERE doc_id IN ({','.join('?' * len(ids))})", ids):
             project = r["project"] and (r["project"] + (f" / {r['subproject']}" if r["subproject"] else ""))
             if r["project"] and r["project"] not in machine_cache:
-                machine_cache[r["project"]] = machines.describe(con, r["project"], limit=2)
+                machine_cache[r["project"]] = machines.describe(con, r["project"], limit=2, readable=readable)
                 client = con.execute("SELECT client FROM register_machines WHERE project = ? AND client != '' "
                                      "GROUP BY client ORDER BY count(*) DESC LIMIT 1", (r["project"],)).fetchone()
                 machine_cache["client:" + r["project"]] = client[0] if client else ""
@@ -814,7 +815,8 @@ class DocTools:
                       GROUP BY f.project, f.collection{having}
                       ORDER BY f.collection IS NOT NULL, f.project LIMIT ?"""
             rows = con.execute(sql, params + [limit]).fetchall()
-            machine_text = {r["project"]: machines.describe(con, r["project"]) for r in rows}
+            readable = self._readable_sql(con)  # machine evidence counted among the caller's documents
+            machine_text = {r["project"]: machines.describe(con, r["project"], readable=readable) for r in rows}
             client_text = {r["project"]: register.summary(con, r["project"]) for r in rows}
             unindexed = []
             if reg_cond or (machine and not collection):  # delivered machines whose documents are not indexed
@@ -925,7 +927,7 @@ class DocTools:
                 if agents:
                     lines.append(f"Through agent/integrator: {', '.join(sorted(agents))}")
             if name:
-                found = machines.describe(con, name, limit=6)
+                found = machines.describe(con, name, limit=6, readable=self._readable_sql(con))
                 if found:
                     lines.append(f"\nMachines named in the documents: {found}")
             if reg:
@@ -949,7 +951,10 @@ class DocTools:
                         bits.append(r["status"])
                     if r["notes"]:
                         bits.append(r["notes"])
-                    lines.append("- " + " · ".join(bits) + (f"\n    ⚠ {r['doc_note']}" if r["doc_note"] else ""))
+                    note = r["doc_note"]
+                    if note and readable:  # its document counts were made over every document
+                        note = re.sub(r" \(\d+ docs\)", "", note)
+                    lines.append("- " + " · ".join(bits) + (f"\n    ⚠ {note}" if note else ""))
             if name:
                 moved = con.execute("SELECT serial, order_no, model, project FROM register_machines "
                                     "WHERE reg_project = ?", (name,)).fetchall()
@@ -1156,14 +1161,19 @@ class DocTools:
             indexed = {r["path_key"]: r for r in con.execute(
                 "SELECT path_key, status, n_pages FROM docs WHERE folder_key = ?", (key,))
                 if self.allows(r["path_key"])}
-            # A restricted caller sees a subfolder only if it holds at least one document they may read.
+            # A restricted caller sees a folder only if it holds at least one document they may read:
+            # any other folder, there or not, is answered as a missing one (its disk is not looked at),
+            # and a subfolder is listed only if it holds such a document.
             shown_folders = None
             readable = self._readable_sql(con, "folder_key")
             if readable:
                 prefix = key.rstrip(os.sep) + os.sep
-                shown_folders = {prefix + fk[len(prefix):].split(os.sep)[0] for (fk,) in con.execute(
-                    f"SELECT DISTINCT folder_key FROM docs WHERE substr(folder_key, 1, ?) = ? AND {readable}",
-                    (len(prefix), prefix))}
+                under = [fk for (fk,) in con.execute(
+                    f"SELECT DISTINCT folder_key FROM docs WHERE (folder_key = ? OR substr(folder_key, 1, ?) = ?) "
+                    f"AND {readable}", (key, len(prefix), prefix))]
+                if not under:
+                    return f"Cannot open folder {path}: folder not found."
+                shown_folders = {prefix + fk[len(prefix):].split(os.sep)[0] for fk in under if fk != key}
         finally:
             con.close()
 

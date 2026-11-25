@@ -376,6 +376,50 @@ def test_missing_access_file_hides_everything_but_for_admins(acl_world):
     assert "Offre THOR.pdf" in admin.find_files("Offre")
 
 
+def test_machine_document_counts_cover_only_readable_documents(acl_world):
+    cfg, tools_for = acl_world
+    for sub, name in (("0_Vente", "Offre Paloma 4R.pdf"), ("0_Vente", "Commande Paloma 4R.pdf"),
+                      ("3_Mecanique", "Plan Paloma 4R.pdf")):
+        make_pdf(str(Path(cfg.roots[0], "THOR", sub, name)), [f"{name}: machine"])
+    run_index(cfg, progress=quiet)
+    world = DocTools(dataclasses.replace(cfg, access="world"), Caller(frozenset(), False))
+    for tools, count in ((world, 3), (tools_for(OTHER, admin=True), 3), (tools_for(SALES), 2), (tools_for(MEC), 1)):
+        projects, card = tools.list_projects(), tools.project_card("THOR")
+        assert f"Paloma 4R ({count} docs)" in projects and f"Paloma 4R ({count} docs)" in card
+        for other in {3, 2, 1} - {count}:
+            assert f"({other} docs)" not in projects + card
+        if tools is not world:
+            assert f"Paloma 4R ({count} docs)" in tools.search("Paloma", limit=30)
+    assert tools_for(OTHER).list_projects().startswith("No matching project")
+    # The register's note on what the documents say keeps its counts for those who read everything only.
+    con = tools_for(MEC)._con()
+    try:
+        con.execute("INSERT INTO register_machines(project, serial, model, doc_note) VALUES "
+                    "('THOR', 'S-1', 'Presto 2R', 'the documents name Paloma 4R (3 docs), not Presto 2R')")
+        con.commit()
+    finally:
+        con.close()
+    assert "(3 docs)" not in tools_for(MEC).project_card("THOR")
+    assert "Paloma 4R (3 docs), not Presto 2R" in tools_for(OTHER, admin=True).project_card("THOR")
+    assert "Paloma 4R (3 docs), not Presto 2R" in world.project_card("THOR")
+
+
+def test_hidden_folder_answers_like_a_missing_one(acl_world):
+    cfg, tools_for = acl_world
+    hidden = str(Path(cfg.roots[0], "THOR", "0_Vente"))
+    missing = str(Path(cfg.roots[0], "THOR", "9_Vide"))
+    mec = tools_for(MEC)
+    got = _answer(mec.list_folder, hidden)
+    assert got.startswith("Cannot open folder") and "Offre" not in got
+    assert got.replace("0_Vente", "9_Vide") == _answer(mec.list_folder, missing)
+    assert _answer(tools_for().list_folder, str(Path(cfg.roots[0], "THOR"))).startswith("Cannot open folder")
+    assert "3_Mecanique" in mec.list_folder(str(Path(cfg.roots[0], "THOR")))
+    assert "Offre THOR.pdf" in tools_for(SALES).list_folder(hidden)
+    assert "Offre THOR.pdf" in tools_for(OTHER, admin=True).list_folder(hidden)
+    world = DocTools(dataclasses.replace(cfg, access="world"), Caller(frozenset(), False))
+    assert "Offre THOR.pdf" in world.list_folder(hidden)
+
+
 def test_world_world_search_is_unchanged(acl_world):
     cfg, _ = acl_world
     _embed(cfg)

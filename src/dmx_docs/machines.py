@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-MACHINES_VERSION = 2
+MACHINES_VERSION = 3  # 3: per-document evidence kept in doc_machines
 
 FAMILIES = {"paloma": "Paloma", "palom": "Paloma", "palomas": "Paloma", "presto": "Presto",
             "hector": "Hector", "delfi": "Delfi", "astor": "Astor", "nestor": "Nestor",
@@ -51,6 +51,15 @@ CREATE TABLE IF NOT EXISTS project_machines (
     confirmed  INTEGER NOT NULL, -- enough evidence to describe and filter the project
     PRIMARY KEY (project, family, model)
 );
+CREATE TABLE IF NOT EXISTS doc_machines (
+    doc_id     INTEGER NOT NULL,
+    project    TEXT NOT NULL,
+    family     TEXT NOT NULL,
+    model      TEXT NOT NULL,   -- '' = family (a model also counts for its family)
+    in_name    INTEGER NOT NULL, -- found in the file name or path
+    PRIMARY KEY (doc_id, family, model)
+);
+CREATE INDEX IF NOT EXISTS doc_machines_project ON doc_machines(project);
 """
 MIN_SHARE = 0.10  # of the evidence of the project's main machine: below, a passing reference
 
@@ -67,6 +76,7 @@ def refresh(con) -> bool:
     if store.get_meta(con, "machines_state") == state:
         return False
     evidence: dict[tuple[str, str, str], list[int]] = {}  # (project, family, model) -> [docs, name_docs]
+    doc_rows = []  # per document, so that counts can be made for one caller's readable documents
     per_doc: dict[int, set] = {}
     projects: dict[int, str] = {}
     for doc_id, path, project in con.execute(
@@ -97,30 +107,49 @@ def refresh(con) -> bool:
             e = evidence.setdefault((project, fam, mod), [0, 0])
             e[0] += 1
             e[1] += in_name
-    top: dict[str, int] = {}
-    for (p, f, m), (d, nd) in evidence.items():
-        top[p] = max(top.get(p, 0), d)
-    rows = [(p, f, m, d, nd, int((d >= MIN_DOCS or nd >= 1) and d >= MIN_SHARE * top[p]))
-            for (p, f, m), (d, nd) in evidence.items()]
+            doc_rows.append((doc_id, project, fam, mod, int(in_name)))
+    rows = _confirm(evidence)
     autocommit = con.isolation_level is None
     if autocommit:
         con.execute("BEGIN")
     con.execute("DELETE FROM project_machines")
     con.executemany("INSERT INTO project_machines VALUES (?,?,?,?,?,?)", rows)
+    con.execute("DELETE FROM doc_machines")
+    con.executemany("INSERT INTO doc_machines VALUES (?,?,?,?,?)", doc_rows)
     store.set_meta(con, "machines_state", state)
     con.execute("COMMIT") if autocommit else con.commit()
     return True
+
+
+def _confirm(evidence: dict[tuple[str, str, str], list[int]]) -> list[tuple]:
+    """(project, family, model, docs, name_docs, confirmed) from {(project, family, model): [docs, name_docs]}."""
+    top: dict[str, int] = {}
+    for (p, f, m), (d, nd) in evidence.items():
+        top[p] = max(top.get(p, 0), d)
+    return [(p, f, m, d, nd, int((d >= MIN_DOCS or nd >= 1) and d >= MIN_SHARE * top[p]))
+            for (p, f, m), (d, nd) in evidence.items()]
 
 
 def confirmed_sql(alias: str = "pm") -> str:
     return f"{alias}.confirmed = 1"
 
 
-def describe(con, project: str, limit: int = 4) -> str:
-    """'Paloma 11R (14 docs), Paloma 7R (3 docs)' - confirmed models first, families if no model."""
-    rows = con.execute(
-        f"""SELECT family, model, docs FROM project_machines pm WHERE project = ? AND {confirmed_sql()}
-            ORDER BY model = '', docs DESC""", (project,)).fetchall()
+def describe(con, project: str, limit: int = 4, readable: str | None = None) -> str:
+    """'Paloma 11R (14 docs), Paloma 7R (3 docs)' - confirmed models first, families if no model.
+    readable: SQL condition on docs d keeping one caller's readable documents; the evidence is then
+    counted and confirmed among those documents only (None: every document, as always)."""
+    if readable is None:
+        rows = con.execute(
+            f"""SELECT family, model, docs FROM project_machines pm WHERE project = ? AND {confirmed_sql()}
+                ORDER BY model = '', docs DESC""", (project,)).fetchall()
+    elif not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'doc_machines'").fetchone():
+        return ""  # index from before per-document evidence: nothing to count for a restricted caller
+    else:
+        evidence = {(project, f, m): [d, nd] for f, m, d, nd in con.execute(
+            f"""SELECT dm.family, dm.model, count(*), sum(dm.in_name) FROM doc_machines dm
+                JOIN docs d ON d.id = dm.doc_id WHERE dm.project = ? AND {readable} GROUP BY 1, 2""", (project,))}
+        rows = sorted(((f, m, d) for _, f, m, d, _, ok in _confirm(evidence) if ok),
+                      key=lambda r: (r[1] == "", -r[2]))
     models = [r for r in rows if r[1]]
     families_with_model = {r[0] for r in models}
     parts = [f"{m} ({d} docs)" for _, m, d in models[:limit]]
