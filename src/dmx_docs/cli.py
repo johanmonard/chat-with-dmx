@@ -240,6 +240,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Report: {report}")
         for o in outs:
             print(f"Written: {o}")
+    elif args.command == "status":
         from .tools import DocTools
         print(DocTools(cfg).index_status())
     elif args.command == "map":

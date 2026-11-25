@@ -134,3 +134,43 @@ def test_cli_refuses_a_world_without_acl_access(tmp_path, capsys):
         cli.main(["--config", str(cfgfile), "--world", "projects", "permissions"])
     assert e.value.code == 2
     assert "World 'projects' has access = \"world\": nothing to refresh." in capsys.readouterr().out
+
+
+def _config_file(tmp_path, access):
+    cfgfile = tmp_path / "config.toml"
+    root = tmp_path / "docs"
+    (root / "A").mkdir(parents=True)
+    make_pdf(str(root / "A" / "a.pdf"), ["Alpha document about suction cups."])
+    cfgfile.write_text(f"[access]\ndomain_sid = '{DOMAIN}'\n\n[index]\ndata_dir = '{(tmp_path / 'data').as_posix()}'\n"
+                       f"roots = ['{root.as_posix()}']\n[embeddings]\nmodel = 'hash:256'\nquery_prefix = ''\npassage_prefix = ''\n\n"
+                       f"[worlds.projects]\nprofile = \"projects\"\n{access}", encoding="utf-8")
+    return cfgfile, root
+
+
+def _status_line(cfgfile):
+    from dmx_docs.config import load_config
+    from dmx_docs.tools import DocTools
+    return DocTools(load_config(cfgfile, world="projects")).index_status().splitlines()[0]
+
+
+def test_cli_status_prints_the_index_status(tmp_path, capsys):
+    cfgfile, _ = _config_file(tmp_path, "")
+    cli.main(["--config", str(cfgfile), "--world", "projects", "index"])
+    capsys.readouterr()
+    cli.main(["--config", str(cfgfile), "--world", "projects", "status"])
+    assert _status_line(cfgfile) in capsys.readouterr().out
+
+
+def test_cli_permissions_writes_outputs_and_report_without_index_status(tmp_path, capsys, monkeypatch):
+    cfgfile, root = _config_file(tmp_path, 'access = "acl"\n')
+    cli.main(["--config", str(cfgfile), "--world", "projects", "index"])
+    capsys.readouterr()
+    real = permissions.refresh_permissions
+    monkeypatch.setattr(permissions, "refresh_permissions", lambda cfg, outs, workers=16: real(
+        cfg, outs, read_acl=lambda p, for_files=True: acl(SALES), account_name=lambda s: s, workers=workers))
+    o1, o2, rep = tmp_path / "m" / "access.sqlite3", tmp_path / "l" / "access.sqlite3", tmp_path / "rep"
+    cli.main(["--config", str(cfgfile), "--world", "projects", "permissions", "--out", str(o1), "--out", str(o2),
+              "--report-dir", str(rep)])
+    out = capsys.readouterr().out
+    assert o1.exists() and o2.exists() and list(rep.glob("changes-*.md"))
+    assert "Written:" in out and _status_line(cfgfile) not in out
