@@ -14,7 +14,7 @@ import urllib.request
 from datetime import datetime
 
 from . import facets, knowledge, machines, offer_tools, onenote, register, sources, store, verified, worldmap
-from .access import Access, AccessStore, Caller, Unrestricted
+from .access import Access, AccessStore, Caller, Unrestricted, readable_clause
 from .config import Config
 from .extract import PICTURE_EXTS, docx_picture_names, extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
@@ -253,9 +253,11 @@ def resolve_md_link(target: str, md_path: str, roots: list[str], allows=None) ->
     return None
 
 
-def _md_picture_raw(fs: str, path: str, image: int | None, cfg: Config) -> tuple[bytes, str, int, int, str]:
+def _md_picture_raw(fs: str, path: str, image: int | None, cfg: Config,
+                    allows=None) -> tuple[bytes, str, int, int, str]:
     """Original bytes of the image-th picture linked from a Markdown file:
-    (data, extension, number, pictures in the file, caption)."""
+    (data, extension, number, pictures in the file, caption). `allows` (default cfg.allows) says
+    which pictures the caller may see: one it may not is answered as one that does not exist."""
     from .extract import PICTURE_EXTS, md_pictures
 
     with open(fs, "rb") as f:
@@ -266,8 +268,8 @@ def _md_picture_raw(fs: str, path: str, image: int | None, cfg: Config) -> tuple
     if not 1 <= k <= len(pictures):
         raise ValueError(f"image must be between 1 and {len(pictures)}")
     caption, target = pictures[k - 1]
-    found = resolve_md_link(target, path, cfg.roots, allows=cfg.allows)
-    if found is None:
+    found = resolve_md_link(target, path, cfg.roots, allows=allows or cfg.allows)
+    if found is None:  # "outside" is the world's own rule, so a hidden picture reads "not found"
         candidates = _md_link_candidates(target, path, cfg.roots)
         if candidates and not any(cfg.allows(store.path_key(c)) for c in candidates):
             raise ValueError(f"Picture {k} is outside the indexed folders: {target}")
@@ -355,13 +357,30 @@ class DocTools:
         self.access = (Unrestricted() if cfg.access == "world" else
                        Access(AccessStore(cfg.access_path), caller or Caller.from_token(cfg.access_admins)))
         self.searcher = Searcher(cfg)
-        self._overview: tuple[float, worldmap.Overview] | None = None  # world_map's live part, cached
+        # world_map's live part, cached: (time, the caller's allowed set it was counted for, overview)
+        self._overview: tuple[float, object, worldmap.Overview] | None = None
         self.knowledge = knowledge.Knowledge(cfg.knowledge_path)  # written project cards
         self._listed: dict[tuple, float] = {}  # offers world: revisions listed under "To verify" (identity -> time)
 
     def allows(self, key: str) -> bool:
         """Is the document (or folder) with this path key inside the world and readable by the caller?"""
         return self.cfg.allows(key) and self.access.can_read(key)
+
+    def _readable_sql(self, con, column: str = "d.folder_key") -> str | None:
+        """SQL condition on `column` (a folder key) keeping the caller's readable documents;
+        None when the caller reads everything (world access, admins)."""
+        return readable_clause(con, self.access.folder_predicate(), column)
+
+    def _readable_facets(self, con) -> str:
+        """' AND doc_id IN (...)' keeping the doc_facets rows of readable documents; '' when the
+        caller reads everything (the query is then unchanged)."""
+        cond = self._readable_sql(con)
+        return f" AND doc_id IN (SELECT d.id FROM docs d WHERE {cond})" if cond else ""
+
+    def _is_file(self, path: str, key: str) -> bool:
+        """Does the file exist for this caller? A document the caller may not read does not, so
+        every tool answers for it exactly as for a missing file (and never reads it live)."""
+        return self.access.can_read(key) and os.path.isfile(store.fs_path(path))
 
     def _con(self):
         con = store.connect(self.cfg.db_path, create=False)
@@ -373,6 +392,8 @@ class DocTools:
         return con
 
     def _resolve(self, path: str) -> tuple[str, str]:
+        """(path, key) of a path inside the world. Whether the caller may read it is not said
+        here: the tools treat a document the caller may not read as a missing file (_is_file)."""
         path = sources.clean_path(path)  # also turns a mapped drive (N:\...) into the UNC path
         key = store.path_key(path)
         if not self.cfg.allows(key):
@@ -390,6 +411,8 @@ class DocTools:
             if re.match(r"^([a-zA-Z]:|[\\/]{2})", folder.strip()):
                 raise  # a full path outside the indexed folders
         rel = folder.strip().strip("\\/").replace("/", "\\")
+        readable = self._readable_sql(con, "folder_key")  # a name known only from hidden documents is unknown
+        readable = f" AND {readable}" if readable else ""
         for root in self.cfg.roots:
             base = root.rstrip("\\/").split("\\")[-1]
             tail = rel[len(base):].lstrip("\\") if rel.lower() == base.lower() or rel.lower().startswith(
@@ -397,11 +420,11 @@ class DocTools:
             cand = os.path.join(root, tail) if tail else root
             key = store.path_key(cand)
             if self.cfg.allows(key) and con.execute(
-                    "SELECT 1 FROM docs WHERE substr(path_key, 1, ?) = ? LIMIT 1",
+                    f"SELECT 1 FROM docs WHERE substr(path_key, 1, ?) = ?{readable} LIMIT 1",
                     (len(key) + 1, key.rstrip(os.sep) + os.sep)).fetchone():
                 return cand, key
         needle = os.sep + os.path.normcase(rel) + os.sep
-        row = con.execute("SELECT path, path_key FROM docs WHERE instr(path_key, ?) > 0 "
+        row = con.execute(f"SELECT path, path_key FROM docs WHERE instr(path_key, ?) > 0{readable} "
                           "ORDER BY instr(path_key, ?) LIMIT 1", (needle, needle)).fetchone()
         if row:
             end = row["path_key"].find(needle) + len(needle) - 1
@@ -553,16 +576,19 @@ class DocTools:
         return out
 
     # ---------------------------------------------------------- offers world
-    # The register keeps rows of folders excluded since it was built: cfg.allows hides them (after
+    # The register keeps rows of folders excluded since it was built: self.allows hides them (after
     # _con() has loaded the current root and excluded folders).
     def _to_verify(self) -> dict:
         """The settings of the bounded "To verify" list: off when no shared folder is configured."""
         return {"verify_limit": self.cfg.verify_per_request if self.cfg.verified_dir else 0, "listed": self._listed}
 
+    def _verified(self, con) -> verified.Loaded:
+        return verified.load(self.cfg, con, self.allows)
+
     def offer_health(self, **filters) -> str:
         con = self._con()
         try:
-            return offer_tools.offer_health(con, verified.load(self.cfg, con), **filters, allows=self.cfg.allows)
+            return offer_tools.offer_health(con, self._verified(con), **filters, allows=self.allows)
         finally:
             con.close()
 
@@ -595,15 +621,16 @@ class DocTools:
         try:
             label = f"offer {offer} rev {revision}" + (f" variant {variant}" if variant else "")
             if dispute or revoke:
-                if revoke and verified.identity(offer, revision, variant) not in verified.load(self.cfg, con).records:
+                if revoke and verified.identity(offer, revision, variant) not in self._verified(con).records:
                     return f"Not stored: {label} has no current verified record to revoke."
                 try:
-                    record = (verified.revoke if revoke else verified.dispute)(con, self.cfg, sub, reason)
+                    act = verified.revoke if revoke else verified.dispute
+                    record = act(con, self.cfg, sub, reason, allows=self.allows)
                 except ValueError as e:
                     return f"Not stored: {e}"
                 verb = "revoked" if revoke else "disputed"
             else:
-                verdict = verified.check(con, self.cfg, sub)
+                verdict = verified.check(con, self.cfg, sub, allows=self.allows)
                 if not verdict.ok:
                     return ("Not stored:\n" + "\n".join(f"- {p}" for p in verdict.problems)
                             + "\nRe-read the pages and call again, or call with dispute=true and the reason.")
@@ -623,21 +650,21 @@ class DocTools:
     def list_offers(self, **filters) -> str:
         con = self._con()
         try:
-            return offer_tools.list_offers(con, **filters, allows=self.cfg.allows, loaded=verified.load(self.cfg, con))
+            return offer_tools.list_offers(con, **filters, allows=self.allows, loaded=self._verified(con))
         finally:
             con.close()
 
     def offer_card(self, offer: str) -> str:
         con = self._con()
         try:
-            return offer_tools.offer_card(con, offer, allows=self.cfg.allows, loaded=verified.load(self.cfg, con))
+            return offer_tools.offer_card(con, offer, allows=self.allows, loaded=self._verified(con))
         finally:
             con.close()
 
     def offer_lines(self, **filters) -> str:
         con = self._con()
         try:
-            return offer_tools.offer_lines(con, **filters, allows=self.cfg.allows, loaded=verified.load(self.cfg, con),
+            return offer_tools.offer_lines(con, **filters, allows=self.allows, loaded=self._verified(con),
                                            **self._to_verify())
         finally:
             con.close()
@@ -645,8 +672,8 @@ class DocTools:
     def offer_stats(self, group_by: str, **filters) -> str:
         con = self._con()
         try:
-            return offer_tools.offer_stats(con, group_by, **filters, allows=self.cfg.allows,
-                                           loaded=verified.load(self.cfg, con), **self._to_verify())
+            return offer_tools.offer_stats(con, group_by, **filters, allows=self.allows,
+                                           loaded=self._verified(con), **self._to_verify())
         finally:
             con.close()
 
@@ -657,9 +684,9 @@ class DocTools:
         PowerPoint slide.
         Returns (caption, image bytes, format). Reads the live file: needs the network share."""
         self._con().close()  # loads the root/excluded folders that _resolve checks against
-        path, _ = self._resolve(path)
+        path, key = self._resolve(path)
         fs = store.fs_path(path)
-        if not os.path.isfile(fs):
+        if not self._is_file(path, key):
             raise FileNotFoundError(f"File not reachable now: {path} (viewing pages needs access to the file server)")
         ext = os.path.splitext(path)[1].lower()
         if ext in EXCEL_EXTS:
@@ -676,7 +703,7 @@ class DocTools:
             return (f"{path} — picture {k} of {total} on slide {page}/{n}, {w}x{h} px. Use image=N for "
                     "the others (whole slides cannot be shown, only their pictures)."), data, fmt
         if ext == ".md":
-            raw, pic_ext, k, total, caption = _md_picture_raw(fs, path, image, self.cfg)
+            raw, pic_ext, k, total, caption = _md_picture_raw(fs, path, image, self.cfg, self.allows)
             data, fmt, w, h = _scaled_picture(raw, pic_ext)
             label = f' "{caption}"' if caption else ""
             return (f"{path} — picture {k} of {total}{label} (the [Image {k}] marker in the text), "
@@ -694,9 +721,9 @@ class DocTools:
         """Save a PDF page/region rendering or a .docx or PowerPoint picture as an image file in the export
         folder (default C:\\dmx-rag\\exports), e.g. to put it on slides."""
         self._con().close()  # loads the root/excluded folders that _resolve checks against
-        path, _ = self._resolve(path)
+        path, key = self._resolve(path)
         fs = store.fs_path(path)
-        if not os.path.isfile(fs):
+        if not self._is_file(path, key):
             raise FileNotFoundError(f"File not reachable now: {path} (needs access to the file server)")
         ext = os.path.splitext(path)[1].lower()
         stem = _safe_name(os.path.splitext(os.path.basename(path))[0], 50)
@@ -716,7 +743,7 @@ class DocTools:
             data, out_ext, k, total, _ = _slide_picture_raw(fs, path, int(page), image, self.cfg.extract_options())
             default, what = f"{stem}_s{int(page)}_img{k}", f"picture {k} of {total} on slide {page}"
         elif ext == ".md":
-            data, out_ext, k, total, _ = _md_picture_raw(fs, path, image, self.cfg)  # original file
+            data, out_ext, k, total, _ = _md_picture_raw(fs, path, image, self.cfg, self.allows)  # original file
             default, what = f"{stem}_img{k}", f"picture {k} of {total}"
         elif ext in PICTURE_EXTS:
             with open(fs, "rb") as f:
@@ -743,12 +770,11 @@ class DocTools:
     def open_document(self, path: str, page: int | None = None) -> str:
         """Open a document on this PC in its usual application (for the user, not for Claude)."""
         self._con().close()  # loads the root/excluded folders that _resolve checks against
-        path, _ = self._resolve(path)
+        path, key = self._resolve(path)
         ext = os.path.splitext(path)[1].lower()
         if ext not in TYPE_LABEL:  # never launch anything but an indexed document type
             raise ValueError(f"Only {', '.join(TYPE_LABEL)} files can be opened")
-        fs = store.fs_path(path)
-        if not os.path.isfile(fs):
+        if not self._is_file(path, key):
             raise FileNotFoundError(f"File not reachable now: {path}")
         how = _open_file(path, ext, page)
         return f"Opened {path} {how}."
@@ -760,7 +786,7 @@ class DocTools:
         limit = max(1, min(int(limit), 1000))
         con = self._con()
         try:
-            where, having, params = "", "", []
+            where, having, params = self._readable_facets(con), "", []  # counts of readable documents only
             if collection:
                 where = " AND coalesce(f.collection, '') LIKE ?"
                 params.append(f"%{collection}%")
@@ -857,15 +883,16 @@ class DocTools:
         """Everything known about one project: client, delivered machines, order numbers, documents."""
         con = self._con()
         try:
-            hit = con.execute("SELECT project FROM doc_facets WHERE project = ? COLLATE NOCASE "
-                              "OR subproject = ? COLLATE NOCASE LIMIT 1", (project, project)).fetchone()
+            readable = self._readable_facets(con)  # a project with no readable document is not indexed
+            hit = con.execute("SELECT project FROM doc_facets WHERE (project = ? COLLATE NOCASE "
+                              f"OR subproject = ? COLLATE NOCASE){readable} LIMIT 1", (project, project)).fetchone()
             name = hit[0] if hit else None
             reg = con.execute(
                 "SELECT * FROM register_machines WHERE project = ? ORDER BY order_no, serial" if name else
                 "SELECT * FROM register_machines WHERE name = ? COLLATE NOCASE ORDER BY order_no, serial",
                 (name or project,)).fetchall()
             if not name and not reg:
-                like = con.execute("""SELECT DISTINCT project FROM doc_facets WHERE project LIKE ? UNION
+                like = con.execute(f"""SELECT DISTINCT project FROM doc_facets WHERE project LIKE ?{readable} UNION
                                       SELECT DISTINCT name FROM register_machines WHERE name LIKE ? LIMIT 10""",
                                    (f"%{project}%", f"%{project}%")).fetchall()
                 written = self._written_card(project)  # a card may outlive its project's documents
@@ -875,10 +902,10 @@ class DocTools:
             lines = []
             if name:
                 n, first, last, coll = con.execute(
-                    """SELECT count(*), min(d.mtime), max(d.mtime), max(f.collection) FROM doc_facets f
-                       JOIN docs d ON d.id = f.doc_id WHERE f.project = ?""", (name,)).fetchone()
+                    f"""SELECT count(*), min(d.mtime), max(d.mtime), max(f.collection) FROM doc_facets f
+                       JOIN docs d ON d.id = f.doc_id WHERE f.project = ?{readable}""", (name,)).fetchone()
                 subs = [r[0] for r in con.execute("SELECT DISTINCT subproject FROM doc_facets WHERE project = ? "
-                                                  "AND subproject IS NOT NULL ORDER BY 1", (name,))]
+                                                  f"AND subproject IS NOT NULL{readable} ORDER BY 1", (name,))]
                 lines.append(f"Project {name} ({coll or 'current'}): {n} indexed documents, files dated "
                              f"{_date(first)} to {_date(last)}" + (f"; sub-projects {', '.join(subs)}" if subs else ""))
             else:
@@ -933,7 +960,7 @@ class DocTools:
                                      for m in moved))
                 evidence = {}
                 for (path,) in con.execute("SELECT d.path FROM docs d JOIN doc_facets f ON f.doc_id = d.id "
-                                           "WHERE f.project = ?", (name,)):
+                                           f"WHERE f.project = ?{readable}", (name,)):
                     for num in register.numbers(path):
                         evidence[num] = evidence.get(num, 0) + 1
                 known = {n for r in reg for n in register.numbers(r["order_no"], r["serial"])}
@@ -943,14 +970,15 @@ class DocTools:
                         f"{k} ({evidence[k]} file names)" if k in evidence else f"{k} (register)" for k in nums))
                 lines.append("\nDocuments by type:")
                 for dt, cnt, newest in con.execute(
-                        """SELECT coalesce(f.doc_type, 'unknown'), count(*), max(d.mtime) FROM doc_facets f
-                           JOIN docs d ON d.id = f.doc_id WHERE f.project = ? GROUP BY 1 ORDER BY 2 DESC""", (name,)):
+                        f"""SELECT coalesce(f.doc_type, 'unknown'), count(*), max(d.mtime) FROM doc_facets f
+                           JOIN docs d ON d.id = f.doc_id WHERE f.project = ?{readable} GROUP BY 1 ORDER BY 2 DESC""",
+                        (name,)):
                     lines.append(f"- {dt}: {cnt} (newest {_date(newest)})")
                 lines.append("\nKey documents (newest of each kind):")
                 for dt in ("offre", "commande", "cahier_des_charges", "fat", "sat", "mise_en_service",
                            "reception", "cloture"):
-                    r = con.execute("""SELECT d.path, d.mtime FROM doc_facets f JOIN docs d ON d.id = f.doc_id
-                                       WHERE f.project = ? AND f.doc_type = ? ORDER BY d.mtime DESC LIMIT 1""",
+                    r = con.execute(f"""SELECT d.path, d.mtime FROM doc_facets f JOIN docs d ON d.id = f.doc_id
+                                       WHERE f.project = ? AND f.doc_type = ?{readable} ORDER BY d.mtime DESC LIMIT 1""",
                                     (name, dt)).fetchone()
                     if r:
                         lines.append(f"- {dt}: {r['path']} ({_date(r['mtime'])})")
@@ -1084,11 +1112,14 @@ class DocTools:
                 prefix = key.rstrip(os.sep) + os.sep
                 clauses.append("substr(d.path_key, 1, ?) = ?")
                 params += [len(prefix), prefix]
+            readable = self._readable_sql(con)  # hidden documents must not take the LIMIT's slots
+            if readable:
+                clauses.append(readable)
             where = " AND ".join(["docs_fts MATCH ?"] + clauses)
             rows = [r for r in con.execute(
                 f"""SELECT d.path, d.path_key, d.ext, d.size, d.mtime, d.n_pages, d.status FROM docs_fts f
                     JOIN docs d ON d.id = f.rowid WHERE {where} ORDER BY f.rank LIMIT ?""",
-                [fts] + params + [limit * 3]) if self.cfg.allows(r["path_key"])][:limit]
+                [fts] + params + [limit * 3]) if self.allows(r["path_key"])][:limit]
         finally:
             con.close()
         if not rows:
@@ -1110,9 +1141,11 @@ class DocTools:
                 if not self.cfg.roots:
                     return "No root folder is configured yet."
                 lines = ["Indexed root folders:"]
+                readable = self._readable_sql(con, "folder_key")  # the caller's documents only
+                readable = f" AND {readable}" if readable else ""
                 for root, rk in zip(self.cfg.roots, self.cfg.root_keys):
                     prefix = rk.rstrip(os.sep) + os.sep
-                    n = con.execute("SELECT count(*) FROM docs WHERE substr(path_key, 1, ?) = ?",
+                    n = con.execute(f"SELECT count(*) FROM docs WHERE substr(path_key, 1, ?) = ?{readable}",
                                     (len(prefix), prefix)).fetchone()[0]
                     state = "reachable" if os.path.isdir(root) else "NOT reachable"
                     lines.append(f"- {root} ({n} indexed documents, {state})")
@@ -1121,7 +1154,16 @@ class DocTools:
                 return "\n".join(lines)
             path, key = self._resolve_folder(con, path)
             indexed = {r["path_key"]: r for r in con.execute(
-                "SELECT path_key, status, n_pages FROM docs WHERE folder_key = ?", (key,))}
+                "SELECT path_key, status, n_pages FROM docs WHERE folder_key = ?", (key,))
+                if self.allows(r["path_key"])}
+            # A restricted caller sees a subfolder only if it holds at least one document they may read.
+            shown_folders = None
+            readable = self._readable_sql(con, "folder_key")
+            if readable:
+                prefix = key.rstrip(os.sep) + os.sep
+                shown_folders = {prefix + fk[len(prefix):].split(os.sep)[0] for (fk,) in con.execute(
+                    f"SELECT DISTINCT folder_key FROM docs WHERE substr(folder_key, 1, ?) = ? AND {readable}",
+                    (len(prefix), prefix))}
         finally:
             con.close()
 
@@ -1142,8 +1184,11 @@ class DocTools:
                 continue
             try:
                 if e.is_dir():
-                    if not self.cfg.is_excluded_dir(store.path_key(e.path)):
+                    sub = store.path_key(e.path)
+                    if not self.cfg.is_excluded_dir(sub) and (shown_folders is None or sub in shown_folders):
                         folders.append(f"[folder] {e.name}")
+                    continue
+                if not self.allows(store.path_key(e.path)):
                     continue
                 st = e.stat()
             except OSError:
@@ -1165,11 +1210,13 @@ class DocTools:
     # ------------------------------------------------------ document text
     def _pages(self, path: str, key: str) -> tuple[dict[int, str], int, dict]:
         """Return ({page_no: text}, n_pages, info). Uses the index, or extracts live if needed.
-        A OneNote section is only ever served from the index (only the index run reads sections)."""
+        A OneNote section is only ever served from the index (only the index run reads sections).
+        A document the caller may not read is answered as one that is neither indexed nor on disk."""
         section = os.path.splitext(path)[1].lower() == ".one"
+        readable = self.access.can_read(key)
         con = self._con()
         try:
-            doc = con.execute("SELECT * FROM docs WHERE path_key = ?", (key,)).fetchone()
+            doc = con.execute("SELECT * FROM docs WHERE path_key = ?", (key,)).fetchone() if readable else None
             info = {"source": "index"}
             fresh = False
             if doc is None and section:
@@ -1196,7 +1243,7 @@ class DocTools:
                     return pages, doc["n_pages"] or 0, info
         finally:
             con.close()
-        if not os.path.isfile(store.fs_path(path)):
+        if not (readable and os.path.isfile(store.fs_path(path))):
             raise FileNotFoundError(f"File not found: {path}")
         ext = os.path.splitext(path)[1].lower()
         result = extract_file(path, self.cfg.extract_options())
@@ -1279,17 +1326,26 @@ class DocTools:
     # ------------------------------------------------------------ status
     def world_map(self) -> str:
         now = time.monotonic()
-        if self._overview is None or now - self._overview[0] > worldmap.CACHE_S:
+        # Counted for the caller's allowed set: one caller's counts never serve another (None: reads everything).
+        restricted = self.access.folder_predicate() is not None
+        scope = (self.access.version, self.access.allowed_rules()) if restricted else None
+        if self._overview is None or now - self._overview[0] > worldmap.CACHE_S or self._overview[1] != scope:
             con = self._con()
             try:
-                self._overview = (now, worldmap.live_overview(con, self.cfg))
+                self._overview = (now, scope, worldmap.live_overview(con, self.cfg,
+                                                                     allows=self.allows if restricted else None))
             finally:
                 con.close()
-        return worldmap.compose(worldmap.load_map_text(self.cfg.map_path), self._overview[1])
+        return worldmap.compose(worldmap.load_map_text(self.cfg.map_path), self._overview[2])
 
     def index_status(self) -> str:
         con = self._con()
         try:
+            readable = None  # documents this caller can read, for worlds with per-person access
+            if self.cfg.access == "acl":
+                cond = self._readable_sql(con, "folder_key")
+                readable = con.execute(f"SELECT count(*) FROM docs WHERE {cond}" if cond else
+                                       "SELECT count(*) FROM docs").fetchone()[0]
             by_status = con.execute("SELECT status, count(*) n FROM docs GROUP BY status").fetchall()
             by_ext = con.execute("SELECT ext, count(*) n FROM docs WHERE status='ok' GROUP BY ext").fetchall()
             chunks = con.execute("SELECT count(*), sum(embedded) FROM chunks").fetchone()
@@ -1319,6 +1375,12 @@ class DocTools:
                  "Roots: " + (", ".join(self.cfg.roots) or "none"),
                  "Excluded folders: " + (", ".join(self.cfg.excluded_dirs) or "none"),
                  f"Indexed file types: {', '.join(self.cfg.extensions)} (other types, e.g. Excel, are not searchable yet)"]
+        if readable is not None:  # world totals are the only place hidden documents show up
+            access = [f"You can read {readable} of {total} documents of this world."]
+            if not self.access.loaded:
+                access.append("Access rules not loaded yet: only admins can read this world.")
+            at = lines.index(f"Indexed documents: {total}") + 1
+            lines[at:at] = access
         if self.cfg.profile == "engineering":  # proposals waiting for the user (suggestions.py)
             lines.insert(lines.index(next(l for l in lines if l.startswith("Roots:"))) + 1,
                          f"Keyword suggestions waiting: {waiting or 0}")

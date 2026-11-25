@@ -163,8 +163,10 @@ def _scan(folder: Path) -> tuple[list[Record], list[str]] | None:
     return records, damaged
 
 
-def load(cfg: Config, con) -> Loaded:
-    """The current record per revision: the shared folder, else the pull's mirror (said in `note`)."""
+def load(cfg: Config, con, allows=None) -> Loaded:
+    """The current record per revision: the shared folder, else the pull's mirror (said in `note`).
+    `allows` (default cfg.allows) says which documents the caller may see."""
+    allows = allows or cfg.allows
     out = Loaded()
     scanned = None
     if cfg.verified_dir:
@@ -189,7 +191,7 @@ def load(cfg: Config, con) -> Loaded:
             out.revoked += 1
         elif rec.state == "disputed":
             out.disputed.append(rec)
-        elif cfg.allows(store.path_key(rec.path)) and _fingerprint_ok(con, rec, docs):
+        elif allows(store.path_key(rec.path)) and _fingerprint_ok(con, rec, docs):
             out.records[key] = rec
         else:
             out.expired.append(rec)
@@ -289,7 +291,7 @@ def _money(currency: str, v: float) -> str:
     return f"{currency} {text}".replace(",", "'")
 
 
-def _find(con, cfg: Config, sub: Submission):
+def _find(con, cfg: Config, sub: Submission, allows=None):
     """(revision row, document row, problems): the register's revision of the submission and the document
     whose pages were looked at."""
     ident = identity(sub.offer, sub.revision, sub.variant)
@@ -304,7 +306,7 @@ def _find(con, cfg: Config, sub: Submission):
                             + (f" variant {sub.variant}" if sub.variant else "")
                             + " is not in the register (list_offers / offer_card show the revisions)"]
     key = store.path_key(sub.path) if sub.path else None
-    if not key or not cfg.allows(key):
+    if not key or not (allows or cfg.allows)(key):
         return rev, None, [f"{sub.path or 'no path'}: not inside the indexed folders"]
     doc = con.execute("SELECT * FROM docs WHERE path_key = ?", (key,)).fetchone()
     offer = con.execute("SELECT folder FROM offers WHERE offer_key = ?", (rev["offer_key"],)).fetchone()
@@ -314,7 +316,7 @@ def _find(con, cfg: Config, sub: Submission):
     return rev, doc, []
 
 
-def check(con, cfg: Config, sub: Submission) -> Verdict:
+def check(con, cfg: Config, sub: Submission, allows=None) -> Verdict:
     """The submission accepted as a verified record, or the problems the agent can act on."""
     from . import offers, prices
 
@@ -327,7 +329,7 @@ def check(con, cfg: Config, sub: Submission) -> Verdict:
         problems.append("no line submitted")
     if problems:
         return Verdict(False, None, problems)
-    rev, doc, found = _find(con, cfg, sub)
+    rev, doc, found = _find(con, cfg, sub, allows)
     if found:
         return Verdict(False, None, found)
 
@@ -443,11 +445,11 @@ def check(con, cfg: Config, sub: Submission) -> Verdict:
     return Verdict(True, record, [])
 
 
-def dispute(con, cfg: Config, sub: Submission, reason: str, state: str = "disputed") -> Record:
+def dispute(con, cfg: Config, sub: Submission, reason: str, state: str = "disputed", allows=None) -> Record:
     """A record that says the agent could not confirm the register's reading (state disputed), or takes a
     verified one back (state revoked); no grounding. Raises ValueError when the revision or the document is
     not what the register holds."""
-    rev, doc, found = _find(con, cfg, sub)
+    rev, doc, found = _find(con, cfg, sub, allows)
     if found:
         raise ValueError("; ".join(found))
     return Record(offer=rev["offer_key"], revision=rev["revision"] or sub.revision, variant=rev["variant"],
@@ -457,9 +459,9 @@ def dispute(con, cfg: Config, sub: Submission, reason: str, state: str = "disput
                   note=_clean(reason, MAX_NOTE), state=state)
 
 
-def revoke(con, cfg: Config, sub: Submission, reason: str) -> Record:
+def revoke(con, cfg: Config, sub: Submission, reason: str, allows=None) -> Record:
     """A record that takes the revision's verified record back: the register's reading stands again."""
-    return dispute(con, cfg, sub, reason, state="revoked")
+    return dispute(con, cfg, sub, reason, state="revoked", allows=allows)
 
 
 # --- Overlay: verified values in place of the register's, corrections first ----------------------------

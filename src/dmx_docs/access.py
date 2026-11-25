@@ -59,6 +59,17 @@ def may_read(caller_sids: frozenset[str], allow: frozenset[str], deny: frozenset
     return bool(caller_sids & allow) and not (caller_sids & deny)
 
 
+def readable_clause(con, predicate, column: str = "d.folder_key") -> str | None:
+    """SQL condition keeping the rows whose `column` passes `predicate` (None when there is no
+    predicate: no restriction, no clause). Filtering in SQL rather than afterwards keeps hidden
+    rows from taking the slots of a LIMIT. Registers the function dmx_can_read on `con`: one
+    predicate per connection."""
+    if predicate is None:
+        return None
+    con.create_function("dmx_can_read", 1, lambda value: bool(predicate(value)), deterministic=True)
+    return f"dmx_can_read({column})"
+
+
 @dataclass(frozen=True)
 class AccessData:
     version: str
@@ -247,6 +258,11 @@ class Access:
     def allowed_rules(self) -> frozenset[int]:
         snap = self._snapshot()
         return snap.allowed if snap else frozenset()
+
+    @property
+    def loaded(self) -> bool:
+        """Are reading rules in hand (False: access.sqlite3 not written yet, only admins read)?"""
+        return self._snapshot() is not None
 
     @property
     def version(self) -> str:

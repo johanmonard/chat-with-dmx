@@ -13,6 +13,7 @@ from datetime import datetime
 import numpy as np
 
 from . import store
+from .access import readable_clause
 from .config import Config
 
 log = logging.getLogger("dmx_docs.search")
@@ -433,9 +434,9 @@ class Searcher:
         if pictures_only:  # passages written from pictures by the vision model (describe.py)
             clauses.append("c.id IN (SELECT chunk_id FROM picture_uses WHERE chunk_id IS NOT NULL)")
         filtered = bool(clauses)
-        if folder_ok is not None:  # hidden documents must not take keyword slots
-            con.create_function("dmx_can_read", 1, lambda fk: bool(folder_ok(fk)), deterministic=True)
-            clauses.append("dmx_can_read(d.folder_key)")
+        readable = readable_clause(con, folder_ok)  # hidden documents must not take keyword slots
+        if readable:
+            clauses.append(readable)
         ranked: dict[str, list[int]] = {}
         qvec = None
         self.last_expanded = []

@@ -165,45 +165,56 @@ def _counts(con, sql: str) -> str:
     return ", ".join(f"{k if k is not None else '(unknown)'} {n}" for k, n in con.execute(sql).fetchall()) or "none"
 
 
-def live_overview(con, cfg) -> Overview:
-    """Counts and folders of the world, from the index."""
+def live_overview(con, cfg, allows=None) -> Overview:
+    """Counts and folders of the world, from the index. With `allows` (a path-key predicate: the
+    caller's readable documents), every count and folder covers only the documents it allows;
+    without it (a world everybody reads, an admin) the counts are as they always were."""
     from datetime import datetime
 
+    from .access import readable_clause
+
+    # Facet and picture counts keep the rows of allowed documents (no clause: every row, as always).
+    cond = readable_clause(con, allows, "d.path_key")
+    facets = f"doc_facets f JOIN docs d ON d.id = f.doc_id WHERE {cond}" if cond else "doc_facets f"
+    docs = f"docs d WHERE {cond}" if cond else "docs d"
+    pictures = f"picture_uses p JOIN docs d ON d.id = p.doc_id AND {cond}" if cond else "picture_uses p"
+
+    def by(column: str) -> str:
+        return _counts(con, f"SELECT f.{column}, count(*) n FROM {facets} GROUP BY 1 ORDER BY n DESC")
+
+    allows = allows or cfg.allows
     last = store.get_meta(con, "last_index_finished")
     when = datetime.fromtimestamp(float(last)).strftime("%Y-%m-%d") if last else "never"
     title = f"{cfg.world_title} ({cfg.world})" if cfg.world else "Index"
     if cfg.profile == "projects":
         rows = [tuple(r) for r in con.execute(
             """SELECT d.path, d.path_key, f.project, f.subproject FROM docs d
-               LEFT JOIN doc_facets f ON f.doc_id = d.id""") if cfg.allows(r[1])]
+               LEFT JOIN doc_facets f ON f.doc_id = d.id""") if allows(r[1])]
     else:
-        rows = [tuple(r) for r in con.execute("SELECT path, path_key FROM docs") if cfg.allows(r[1])]
+        rows = [tuple(r) for r in con.execute("SELECT path, path_key FROM docs") if allows(r[1])]
     head = ["## Live overview (from the index)",
             f"{title}: {len(rows)} documents; last full index run {when}."]
     if cfg.profile == "projects":
         head += [f"Projects: {len({r[2] for r in rows if r[2]})}",
-                 "By collection: " + _counts(con, "SELECT collection, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC"),
-                 "By section: " + _counts(con, "SELECT section, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC"),
-                 "By document type: " + _counts(con, "SELECT doc_type, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC")]
+                 "By collection: " + by("collection"),
+                 "By section: " + by("section"),
+                 "By document type: " + by("doc_type")]
         tree_title = ("Template folders across projects (section folder and the folder below it; "
                       "number of projects and documents having it):")
         tree = template_folders(rows, cfg.roots)
     else:
-        head.append("By file type: " + _counts(con, "SELECT ext, count(*) n FROM docs GROUP BY 1 ORDER BY n DESC"))
+        head.append("By file type: " + _counts(con, f"SELECT d.ext, count(*) n FROM {docs} GROUP BY 1 ORDER BY n DESC"))
         if cfg.profile == "documentation":
-            head.append("By language: " + _counts(
-                con, "SELECT language, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC"))
+            head.append("By language: " + by("language"))
         if cfg.profile == "engineering":
-            head.append("By discipline: " + _counts(
-                con, "SELECT category, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC"))
-            head.append("By section: " + _counts(
-                con, "SELECT section, count(*) n FROM doc_facets GROUP BY 1 ORDER BY n DESC"))
+            head.append("By discipline: " + by("category"))
+            head.append("By section: " + by("section"))
         tree_title = "Folders (documents, subfolders included; depth 3):"
         tree = folder_tree([r[:2] for r in rows], cfg.roots,
                            min_docs=1 if len(rows) < SMALL_WORLD else MIN_DOCS)
     if store.has_table(con, "picture_uses"):
-        kinds = _counts(con, """SELECT type, count(*) n FROM picture_uses WHERE status = 'described'
-                                GROUP BY 1 ORDER BY n DESC""")
+        kinds = _counts(con, f"""SELECT p.type, count(*) n FROM {pictures} WHERE p.status = 'described'
+                                 GROUP BY 1 ORDER BY n DESC""")
         if kinds != "none":
             head.append("Described pictures (search with pictures=true): " + kinds)
     return Overview(head=head, tree_title=tree_title, tree=tree)
