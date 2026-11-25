@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
 import time
 from contextlib import closing
 from dataclasses import dataclass
@@ -186,6 +187,12 @@ class Caller:
         return cls(usable_sids(raw, prefix) | KEEP_ALWAYS, False, ", ".join(names))
 
 
+@dataclass(frozen=True)
+class _Snapshot:
+    data: AccessData
+    allowed: frozenset[int]     # ids of data.rules this caller may read, computed from the same data
+
+
 class Access:
     """What one caller may read in one world."""
 
@@ -193,45 +200,54 @@ class Access:
         self.store = store
         self.caller = caller
         self._clock = clock
-        self._data: AccessData | None = None
+        self._snap: _Snapshot | None = None   # replaced as one object, never edited
         self._checked: float | None = None
-        self._allowed: frozenset[int] = frozenset()
+        self._lock = threading.Lock()         # serializes reloads; readers take no lock
 
     def _refresh(self) -> None:
         now = self._clock()
         if self._checked is not None and now - self._checked < RELOAD_SECONDS:
             return
-        self._checked = now
-        try:
-            if self._data is not None and self.store.read_version() == self._data.version:
+        with self._lock:
+            now = self._clock()
+            if self._checked is not None and now - self._checked < RELOAD_SECONDS:
                 return
-            data = self.store.load()
-        except Exception:
-            return  # keep what we have
-        if data is None:
-            return
-        self._data = data
-        self._allowed = frozenset(
-            rid for rid, (allow, deny) in data.rules.items()
-            if may_read(self.caller.sids, allow, deny))
+            self._checked = now
+            snap = self._snap
+            try:
+                if snap is not None and self.store.read_version() == snap.data.version:
+                    return
+                data = self.store.load()
+            except Exception:
+                return  # keep what we have
+            if data is None:
+                return
+            allowed = frozenset(rid for rid, (allow, deny) in data.rules.items()
+                                if may_read(self.caller.sids, allow, deny))
+            self._snap = _Snapshot(data, allowed)
+
+    def _snapshot(self) -> _Snapshot | None:
+        """The current rules, folder map and allowed ids, consistent with each other (None: no data)."""
+        self._refresh()
+        return self._snap
 
     def can_read(self, path_key: str) -> bool:
         if self.caller.admin:
             return True
-        self._refresh()
-        if self._data is None:
+        snap = self._snapshot()
+        if snap is None:
             return False
-        rid = self._data.folder_rule.get(os.path.dirname(path_key))
-        return rid is not None and rid in self._allowed
+        rid = snap.data.folder_rule.get(os.path.dirname(path_key))
+        return rid is not None and rid in snap.allowed
 
     def allowed_rules(self) -> frozenset[int]:
-        self._refresh()
-        return self._allowed
+        snap = self._snapshot()
+        return snap.allowed if snap else frozenset()
 
     @property
     def version(self) -> str:
-        self._refresh()
-        return self._data.version if self._data else ""
+        snap = self._snapshot()
+        return snap.data.version if snap else ""
 
 
 class Unrestricted:
