@@ -290,6 +290,35 @@ U:\DMX-RAG\
 | Offers (`dmx-offers`) | every offer sent to clients, won or not, all revisions, with a register of priced lines | `offers` |
 | Engineering (`dmx-engineering`) | the engineering groups' own folders: reference documents, calculations, OneNote notebooks; each document gets a discipline (Mechanical, Electrical, Software, Mixed, Unknown) at indexing from the folder rules and word lists of `disciplines.toml` (start from `disciplines.example.toml`); the run writes `engineering-classification.csv` and `keyword-suggestions.csv` for you to review | `engineering` |
 
+### Per-person access
+
+By default everyone who reaches a world reads every document of it. A world with `access = "acl"`
+(`[worlds.<name>]` in `config.toml`) shows each person only the documents whose folder they can read on the
+file server. Administrators listed in `[access] admins` (`DOMAIN\admin.account` or a group) see everything;
+`domain_sid` is only needed when the refresh runs under a non-domain account (see `config.example.toml`).
+
+* **Filling.** `dmx-docs --world projects permissions` reads the folder rules of the indexed folders into
+  `access.sqlite3` (options `--out <file>`, `--report-dir <folder>`, `--workers N`). In the shared set-up use
+  `dmx.ps1 permissions -World <name>` or launcher 8, run daily as described above; `update` ends with it and
+  `pull` copies the file down. The projects master on the share (`index.sqlite3`) must be readable only by the
+  admins and the VM account once employees use the central server.
+* **New folders.** A document in a folder created since the last refresh is hidden from everyone but the admins
+  until the next permissions refresh (daily, or launcher 8 / `dmx.ps1 permissions -World projects`).
+* **Hidden documents.** A document you may not read answers like a missing one. Only `index_status` says
+  "You can read N of M documents of this world."
+* **Project cards** are shown line by line: a line only if every document it cites is readable (and indexed);
+  the summary and header only if the whole card is readable. Hidden parts are announced as "k lines not shown
+  with your rights." / "Some parts not shown with your rights."
+* **Machine register.** A project's register entry is shown only to people who can read at least one indexed
+  document of that project. Register-only projects (no indexed documents) are hidden from restricted users, and
+  register links built from order numbers found in documents are not used for them.
+* **Local mode (Claude Desktop over stdio)** uses the groups of the Windows user running it. It is a test mode,
+  not a protection: anyone holding a local copy of the index can open the SQLite file and read everything in it.
+* **`--as-groups "G1,G2"`** (on `serve`, `search`, `read`, `status`; admins only) shows what a group would see,
+  e.g. `--as-groups DMX_Project_Mec_R_GA`.
+* **Upgrade.** The first server call after upgrading rebuilds the per-document machine data once
+  (`MACHINES_VERSION` 3). Upgrade every machine sharing an index together.
+
 ### The offers world (sales and management only)
 
 The sales folder (`\\DMX-FS01.rotzingerag.local\Daten$\RMA_ORG\SAL\Clients`: client folders, the
