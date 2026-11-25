@@ -253,6 +253,24 @@ class Access:
         snap = self._snapshot()
         return snap.data.version if snap else ""
 
+    def folder_predicate(self):
+        """Function folder_key -> bool for SQL (None: no restriction). Built from one snapshot."""
+        if self.caller.admin:
+            return None
+        snap = self._snapshot()
+        if snap is None:
+            return lambda folder_key: False
+        key = ("folders", snap.data.version, snap.allowed)
+        with self._mask_lock:
+            folders = self._masks.get(key)
+        if folders is None:
+            folders = frozenset(fk for fk, rid in snap.data.folder_rule.items() if rid in snap.allowed)
+            with self._mask_lock:
+                self._masks[key] = folders
+                while len(self._masks) > 8:
+                    del self._masks[next(iter(self._masks))]
+        return folders.__contains__
+
     def row_mask(self, index, con) -> np.ndarray | None:
         """Boolean mask over the vector index rows this caller may read (None: no restriction).
         Without access data a non-admin reads nothing. Rule map, allowed set and version come
@@ -270,7 +288,7 @@ class Access:
             mask = np.isin(rows, list(snap.allowed))
             with self._mask_lock:
                 self._masks[key] = mask
-                while len(self._masks) > 4:
+                while len(self._masks) > 8:
                     del self._masks[next(iter(self._masks))]
         return mask
 
@@ -289,4 +307,7 @@ class Unrestricted:
         return "world"
 
     def row_mask(self, index, con) -> None:
+        return None
+
+    def folder_predicate(self) -> None:
         return None

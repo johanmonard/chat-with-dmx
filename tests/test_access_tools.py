@@ -8,7 +8,7 @@ import pytest
 
 from conftest import make_pdf
 from dmx_docs import cli
-from dmx_docs.access import KEEP_ALWAYS, AccessStore, Caller, Unrestricted
+from dmx_docs.access import KEEP_ALWAYS, Access, AccessStore, Caller, Unrestricted
 from dmx_docs.indexer import run_index
 from dmx_docs.store import path_key
 from dmx_docs.tools import DocTools
@@ -133,14 +133,17 @@ def test_search_shows_only_readable_documents(acl_world, mode):
     assert "3_Mecanique" not in sales
 
 
-def test_semantic_top_k_is_taken_among_allowed_rows(tmp_path, make_cfg):
+def _crowded_world(tmp_path, make_cfg):
+    """150 sales documents that match "ventouses" much better than the 5 mechanical ones."""
     root = tmp_path / "RMA"
     folder_rules = {}
     for sub, n, rule in (("0_Vente", 150, 1), ("3_Mecanique", 5, 2)):
         d = root / "THOR" / sub
         d.mkdir(parents=True)
         for i in range(n):
-            make_pdf(str(d / f"Doc {sub} {i:03d}.pdf"), [f"prix offre ventouses {i}"])
+            text = (f"ventouses ventouses ventouses ventouses {i}" if rule == 1 else
+                    f"plan {i} garniture bride levier cadre rail axe vis écrou ventouses")
+            make_pdf(str(d / f"Doc {sub} {i:03d}.pdf"), [text])
         folder_rules[path_key(str(d))] = rule
     cfg = make_cfg(root, access="acl")
     cfg.register_path = None
@@ -149,9 +152,53 @@ def test_semantic_top_k_is_taken_among_allowed_rows(tmp_path, make_cfg):
     AccessStore.write(cfg.access_path, rules={"sales": 1, "mec": 2}, folder_rules=folder_rules,
                       rule_sets={1: (frozenset({SALES}), frozenset()), 2: (frozenset({MEC}), frozenset())},
                       errors={}, names={}, version="v1")
-    out = DocTools(cfg, Caller(frozenset({MEC}) | KEEP_ALWAYS, False)).search(
-        "prix offre ventouses", mode="semantic", limit=5)
+    return cfg
+
+
+def _mec_hits(cfg, mode):
+    tools = DocTools(cfg, Caller(frozenset({MEC}) | KEEP_ALWAYS, False))
+    con = tools._con()
+    try:
+        row_mask = None
+        if mode != "keyword" and tools.searcher.vectors.ensure(con):
+            row_mask = tools.access.row_mask(tools.searcher.vectors, con)
+        hits = tools.searcher.search(con, "ventouses", limit=10, mode=mode, allowed=tools.allows,
+                                     row_mask=row_mask, folder_ok=tools.access.folder_predicate())
+    finally:
+        con.close()
+    assert all("3_Mecanique" in h.path for h in hits)
+    return hits
+
+
+def test_semantic_top_k_is_taken_among_allowed_rows(tmp_path, make_cfg, monkeypatch):
+    cfg = _crowded_world(tmp_path, make_cfg)
+    assert len(_mec_hits(cfg, "semantic")) == 5
+    out = DocTools(cfg, Caller(frozenset({MEC}) | KEEP_ALWAYS, False)).search("ventouses", mode="semantic", limit=5)
     assert out.count("3_Mecanique") >= 5 and "0_Vente" not in out
+    # Without the mask the 150 closer sales rows fill the top 100: the mask is what finds the 5.
+    monkeypatch.setattr(Access, "row_mask", lambda self, index, con: None)
+    from dmx_docs.search import Searcher
+    tools = DocTools(cfg, Caller(frozenset({MEC}) | KEEP_ALWAYS, False))
+    con = tools._con()
+    try:
+        tools.searcher.vectors.ensure(con)
+        found = tools.searcher.search(con, "ventouses", limit=10, mode="semantic", allowed=tools.allows)
+    finally:
+        con.close()
+    assert len(found) < 5
+
+
+def test_keyword_slots_are_not_used_by_hidden_documents(tmp_path, make_cfg):
+    cfg = _crowded_world(tmp_path, make_cfg)
+    assert len(_mec_hits(cfg, "keyword")) == 5
+    tools = DocTools(cfg, Caller(frozenset({MEC}) | KEEP_ALWAYS, False))
+    con = tools._con()
+    try:  # without the folder predicate the 100 FTS slots go to hidden documents
+        bare = tools.searcher.search(con, "ventouses", limit=10, mode="keyword", allowed=tools.allows)
+    finally:
+        con.close()
+    assert len(bare) < 5
+    assert tools.search("ventouses", mode="keyword").count("3_Mecanique") >= 5
 
 
 def test_row_mask_is_none_for_admins_and_world(acl_world):

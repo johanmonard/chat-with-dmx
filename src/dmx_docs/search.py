@@ -426,13 +426,16 @@ class Searcher:
 
     def search(self, con, query: str, limit: int = 10, folder: str | None = None,
                file_type: str | None = None, modified_after: str | None = None,
-               mode: str = "hybrid", allowed=None, row_mask=None, facets: dict | None = None,
+               mode: str = "hybrid", allowed=None, row_mask=None, folder_ok=None, facets: dict | None = None,
                expand: bool | None = None, pictures_only: bool = False, profile: str = "projects") -> list[Hit]:
         offer_register = profile != "projects" and store.has_table(con, "offers")
         clauses, params = self._filters(folder, file_type, modified_after, facets, profile, offer_register)
         if pictures_only:  # passages written from pictures by the vision model (describe.py)
             clauses.append("c.id IN (SELECT chunk_id FROM picture_uses WHERE chunk_id IS NOT NULL)")
         filtered = bool(clauses)
+        if folder_ok is not None:  # hidden documents must not take keyword slots
+            con.create_function("dmx_can_read", 1, lambda fk: bool(folder_ok(fk)), deterministic=True)
+            clauses.append("dmx_can_read(d.folder_key)")
         ranked: dict[str, list[int]] = {}
         qvec = None
         self.last_expanded = []

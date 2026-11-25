@@ -440,7 +440,8 @@ class DocTools:
                 row_mask = self.access.row_mask(self.searcher.vectors, con)
             hits = self.searcher.search(con, query, limit=limit, folder=folder, file_type=file_type,
                                         modified_after=modified_after, mode=mode,
-                                        allowed=self.allows, row_mask=row_mask, facets=facet_filter, expand=expand,
+                                        allowed=self.allows, row_mask=row_mask,
+                                        folder_ok=self.access.folder_predicate(), facets=facet_filter, expand=expand,
                                         pictures_only=bool(pictures), profile=self.cfg.profile)
             doc_facets = self._facets(con, {h.doc_id for h in hits})
             ocr_pages = _ocr_text_pages(con, {h.doc_id for h in hits})
