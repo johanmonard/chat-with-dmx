@@ -143,6 +143,7 @@ class VectorIndex:
         self.ids: np.ndarray | None = None
         self.mat: np.ndarray | None = None
         self.lock = threading.Lock()
+        self._rule_rows: tuple | None = None  # ((vector version, access version), int32 array)
 
     def _cache_paths(self, version: str):
         # One file pair per vector version: a new cache never has to replace a file that
@@ -205,15 +206,47 @@ class VectorIndex:
         except OSError as e:
             log.warning("could not write vector cache: %s", e)
 
-    def query(self, qvec: np.ndarray, k: int) -> list[tuple[int, float]]:
+    def rule_rows(self, con, folder_rule: dict[str, int], version: str) -> np.ndarray:
+        """Rule id of each vector row's document folder (-1: no rule), cached per versions."""
+        with self.lock:
+            ids, vec_version = self.ids, self.version
+        key = (vec_version, version)
+        cached = self._rule_rows
+        if cached is not None and cached[0] == key and len(cached[1]) == len(ids):
+            return cached[1]
+        out = np.full(len(ids), -1, dtype=np.int32)
+        by_chunk = {}
+        for cid, fk in con.execute("SELECT c.id, d.folder_key FROM chunks c JOIN docs d ON d.id = c.doc_id "
+                                   "WHERE c.id IN (SELECT chunk_id FROM vectors)"):
+            rid = folder_rule.get(fk)
+            if rid is not None:
+                by_chunk[cid] = rid
+        if by_chunk:
+            cids = np.fromiter(by_chunk.keys(), dtype=np.int64, count=len(by_chunk))
+            rids = np.fromiter(by_chunk.values(), dtype=np.int32, count=len(by_chunk))
+            pos = np.searchsorted(ids, cids)
+            pos[pos >= len(ids)] = 0
+            ok = ids[pos] == cids
+            out[pos[ok]] = rids[ok]
+        self._rule_rows = (key, out)
+        return out
+
+    def query(self, qvec: np.ndarray, k: int, mask: np.ndarray | None = None) -> list[tuple[int, float]]:
         n = len(self.ids)
         if n == 0:
             return []
+        if mask is not None and len(mask) != n:
+            return []  # index replaced under the mask: show nothing rather than the wrong rows
         q = qvec.astype(np.float32)
         scores = np.empty(n, dtype=np.float32)
         for start in range(0, n, BLOCK_ROWS):
             block = np.asarray(self.mat[start:start + BLOCK_ROWS], dtype=np.float32)
             scores[start:start + len(block)] = block @ q
+        if mask is not None:
+            scores[~mask] = -np.inf
+            n = int(mask.sum())
+            if n == 0:
+                return []
         k = min(k, n)
         top = np.argpartition(-scores, k - 1)[:k]
         top = top[np.argsort(-scores[top])]
@@ -381,7 +414,7 @@ class Searcher:
             log.warning("FTS query failed (%s): %s", fts, e)
             return []
 
-    def semantic(self, con, query: str, limit: int) -> tuple[list[int], np.ndarray | None]:
+    def semantic(self, con, query: str, limit: int, row_mask: np.ndarray | None = None) -> tuple[list[int], np.ndarray | None]:
         """Chunk ids closest in meaning, and the query vector (None if unavailable)."""
         if not self.cfg.embeddings_enabled or not self.vectors.ensure(con):
             return [], None
@@ -389,11 +422,11 @@ class Searcher:
         if emb is None:
             return [], None
         qvec = emb.embed_query(query)
-        return [cid for cid, _ in self.vectors.query(qvec, limit)], qvec
+        return [cid for cid, _ in self.vectors.query(qvec, limit, row_mask)], qvec
 
     def search(self, con, query: str, limit: int = 10, folder: str | None = None,
                file_type: str | None = None, modified_after: str | None = None,
-               mode: str = "hybrid", allowed=None, facets: dict | None = None,
+               mode: str = "hybrid", allowed=None, row_mask=None, facets: dict | None = None,
                expand: bool | None = None, pictures_only: bool = False, profile: str = "projects") -> list[Hit]:
         offer_register = profile != "projects" and store.has_table(con, "offers")
         clauses, params = self._filters(folder, file_type, modified_after, facets, profile, offer_register)
@@ -412,7 +445,7 @@ class Searcher:
                 if self.last_expanded:
                     ranked["thesaurus"] = expanded
         if mode in ("hybrid", "semantic"):
-            ranked["semantic"], qvec = self.semantic(con, query, 2000 if filtered else 100)
+            ranked["semantic"], qvec = self.semantic(con, query, 2000 if filtered else 100, row_mask)
 
         fused: dict[int, float] = {}
         sources: dict[int, list[str]] = {}

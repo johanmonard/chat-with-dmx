@@ -115,3 +115,75 @@ def test_as_groups_builds_a_caller_for_admins(acl_world, monkeypatch, tmp_path, 
     conf.write_text("", encoding="utf-8")
     cli.main(["--config", str(conf), "status", "--as-groups", "G1,G2"])
     assert capsys.readouterr().out
+
+
+def _embed(cfg):
+    from dmx_docs.embeddings import run_embed
+    assert run_embed(cfg, progress=quiet) > 0
+
+
+@pytest.mark.parametrize("mode", ["keyword", "semantic", "hybrid"])
+def test_search_shows_only_readable_documents(acl_world, mode):
+    cfg, tools_for = acl_world
+    _embed(cfg)
+    out = tools_for(MEC).search("prix", mode=mode)
+    assert "0_Vente" not in out and "Offre" not in out
+    sales = tools_for(SALES).search("prix", mode=mode)
+    assert "Offre THOR" in sales and "Offre ORION" in sales
+    assert "3_Mecanique" not in sales
+
+
+def test_semantic_top_k_is_taken_among_allowed_rows(tmp_path, make_cfg):
+    root = tmp_path / "RMA"
+    folder_rules = {}
+    for sub, n, rule in (("0_Vente", 150, 1), ("3_Mecanique", 5, 2)):
+        d = root / "THOR" / sub
+        d.mkdir(parents=True)
+        for i in range(n):
+            make_pdf(str(d / f"Doc {sub} {i:03d}.pdf"), [f"prix offre ventouses {i}"])
+        folder_rules[path_key(str(d))] = rule
+    cfg = make_cfg(root, access="acl")
+    cfg.register_path = None
+    run_index(cfg, progress=quiet)
+    _embed(cfg)
+    AccessStore.write(cfg.access_path, rules={"sales": 1, "mec": 2}, folder_rules=folder_rules,
+                      rule_sets={1: (frozenset({SALES}), frozenset()), 2: (frozenset({MEC}), frozenset())},
+                      errors={}, names={}, version="v1")
+    out = DocTools(cfg, Caller(frozenset({MEC}) | KEEP_ALWAYS, False)).search(
+        "prix offre ventouses", mode="semantic", limit=5)
+    assert out.count("3_Mecanique") >= 5 and "0_Vente" not in out
+
+
+def test_row_mask_is_none_for_admins_and_world(acl_world):
+    cfg, tools_for = acl_world
+    _embed(cfg)
+    tools = tools_for(MEC)
+    con = tools._con()
+    try:
+        assert tools.searcher.vectors.ensure(con)
+        mask = tools.access.row_mask(tools.searcher.vectors, con)
+        assert mask is not None and mask.dtype == bool and 0 < mask.sum() < len(mask)
+        assert tools_for(OTHER, admin=True).access.row_mask(tools.searcher.vectors, con) is None
+        assert Unrestricted().row_mask(tools.searcher.vectors, con) is None
+        cfg.access_path.unlink()
+        none = tools_for(MEC)
+        none.access._snap = None
+        assert not none.access.row_mask(tools.searcher.vectors, con).any()
+    finally:
+        con.close()
+
+
+def test_world_world_search_is_unchanged(acl_world):
+    cfg, _ = acl_world
+    _embed(cfg)
+    world = DocTools(dataclasses.replace(cfg, access="world"), Caller(frozenset(), False))
+    con = world._con()
+    try:
+        assert world.access.row_mask(world.searcher.vectors, con) is None
+    finally:
+        con.close()
+    expected = world.searcher.search(world._con(), "prix", limit=10, allowed=world.cfg.allows)
+    out = world.search("prix")
+    assert out.count("Offre") >= 2 and "Plan" not in out.split("Offre")[0]
+    for h in expected:
+        assert h.path in out

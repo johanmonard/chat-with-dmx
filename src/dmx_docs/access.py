@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+import numpy as np
+
 # Everyone and Authenticated Users: every caller carries them, rules naming them are kept.
 KEEP_ALWAYS = {"S-1-1-0", "S-1-5-11"}
 
@@ -203,6 +205,8 @@ class Access:
         self._snap: _Snapshot | None = None   # replaced as one object, never edited
         self._checked: float | None = None
         self._lock = threading.Lock()         # serializes reloads; readers take no lock
+        self._masks: dict = {}                # last few row masks, keyed by versions and allowed set
+        self._mask_lock = threading.Lock()
 
     def _refresh(self) -> None:
         now = self._clock()
@@ -249,6 +253,27 @@ class Access:
         snap = self._snapshot()
         return snap.data.version if snap else ""
 
+    def row_mask(self, index, con) -> np.ndarray | None:
+        """Boolean mask over the vector index rows this caller may read (None: no restriction).
+        Without access data a non-admin reads nothing. Rule map, allowed set and version come
+        from one snapshot, so a concurrent reload cannot mix two numberings."""
+        if self.caller.admin:
+            return None
+        snap = self._snapshot()
+        if snap is None:
+            return np.zeros(0 if index.ids is None else len(index.ids), dtype=bool)
+        key = (index.version, snap.data.version, snap.allowed)
+        with self._mask_lock:
+            mask = self._masks.get(key)
+        if mask is None:
+            rows = index.rule_rows(con, snap.data.folder_rule, snap.data.version)
+            mask = np.isin(rows, list(snap.allowed))
+            with self._mask_lock:
+                self._masks[key] = mask
+                while len(self._masks) > 4:
+                    del self._masks[next(iter(self._masks))]
+        return mask
+
 
 class Unrestricted:
     """Worlds with access = "world": every caller reads everything."""
@@ -262,3 +287,6 @@ class Unrestricted:
     @property
     def version(self) -> str:
         return "world"
+
+    def row_mask(self, index, con) -> None:
+        return None
