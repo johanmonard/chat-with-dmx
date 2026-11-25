@@ -1,4 +1,4 @@
-"""Command line: dmx-docs web | index | ocr | describe | embed | offers | verify-seed | status | search | read | serve."""
+"""Command line: dmx-docs web | index | ocr | describe | embed | offers | verify-seed | status | search | read | serve | acl-survey."""
 
 from __future__ import annotations
 
@@ -104,6 +104,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--end-page", type=int)
 
     sub.add_parser("serve", help="run the MCP server (stdio) for Claude Desktop / Claude Code")
+    p = sub.add_parser("acl-survey", help="read-only: which accounts and groups can read the indexed folders "
+                                          "(one report per world, changes nothing)")
+    p.add_argument("--out", default=None, help="report folder (default: <world folder>/acl-survey)")
+    p.add_argument("--files", action="store_true", help="also check every document for permissions of its own (slower)")
+    p.add_argument("--workers", type=int, default=16)
 
     args = parser.parse_args(argv)
     config_path = Path(args.config)
@@ -207,6 +212,14 @@ def main(argv: list[str] | None = None) -> None:
                 print(line)
         finally:
             con.close()
+    elif args.command == "acl-survey":
+        from .aclsurvey import survey_index, write_reports
+        out = args.out or str(cfg.world_dir / "acl-survey")
+        print(f"Reading the permissions of the folders indexed in {cfg.db_path} (read-only) ...")
+        s = survey_index(cfg.db_path, cfg.world or "docs", check_files=args.files, workers=args.workers)
+        for f in write_reports(s, out):
+            print(f"Written: {f}")
+        print(f"{s.docs:,} documents, {len(s.rule_acl)} reading rules, {len(s.errors)} not readable.")
     elif args.command == "status":
         from .tools import DocTools
         print(DocTools(cfg).index_status())

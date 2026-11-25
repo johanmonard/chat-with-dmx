@@ -40,12 +40,14 @@ first argument; otherwise the script asks (Enter = projects).
   status         index statistics of the local copy
   map            print the world map (maps\<world>.md on the shared folder + live counts of the local copy)
   search "..."   test a search on the local copy
+  acl-survey [--files]  read-only: which accounts and groups can read the folders of the local copy's documents;
+                 report in <shared>\worlds\<world>\acl-survey (run it under the account that will serve the world)
   unlock -Force  remove a stale lock left by a machine that crashed (also one of the old layout)
   migrate        one-time move from the single-index layout (every command but unlock does it first)
 #>
 param(
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet('setup', 'web', 'index', 'embed', 'ocr', 'describe', 'offers', 'update', 'pull', 'status', 'map', 'search', 'unlock', 'migrate')]
+    [ValidateSet('setup', 'web', 'index', 'embed', 'ocr', 'describe', 'offers', 'update', 'pull', 'status', 'map', 'search', 'acl-survey', 'unlock', 'migrate')]
     [string]$Command,
     [string]$World,
     [switch]$Force,
@@ -589,6 +591,12 @@ try {
         'status' { Assert-Env; Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $WorldArgs + @('status')) -AllowFail }
         'map' { Assert-Env; Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $WorldArgs + @('map')) -AllowFail }
         'search' { Assert-Env; Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $WorldArgs + @('search') + $Rest) -AllowFail }
+        'acl-survey' {
+            Assert-Env
+            if (-not (Test-Path $LocalDb)) { throw "No local copy of '$World' on this machine: run 'pull' (or an index run) first." }
+            $out = Join-Path $SharedWorld 'acl-survey'
+            Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $WorldArgs + @('acl-survey', '--out', $out) + $Rest) -AllowFail
+        }
         'unlock' {
             $held = Get-LockInfo
             # Before the move to worlds\ the lock of the projects index was <shared>\data\LOCK.
