@@ -34,6 +34,25 @@ def _relabel_engineering(cfg) -> None:
         sys.exit(2)
 
 
+def _as_groups(p) -> None:
+    p.add_argument("--as-groups", metavar="G1,G2",
+                   help="act as members of these AD groups (admins only; worlds with access = \"acl\")")
+
+
+def _caller(args, cfg, parser):
+    """The caller for --as-groups (None: the process's own identity)."""
+    groups = getattr(args, "as_groups", None)
+    if not groups:
+        return None
+    from .access import Caller
+    if not Caller.from_token(cfg.access_admins).admin:
+        parser.error("--as-groups is for the admins listed in [access] admins.")
+    try:
+        return Caller.from_groups([g.strip() for g in groups.split(",") if g.strip()])
+    except ValueError as e:
+        parser.error(str(e))
+
+
 def main(argv: list[str] | None = None) -> None:
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -87,7 +106,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("folders", nargs="+", metavar="FOLDER", help="folders holding batch<n>.json / result<n>.json")
     p.add_argument("--dry-run", action="store_true", help="say what would be seeded, write nothing")
 
-    sub.add_parser("status", help="show index statistics")
+    p = sub.add_parser("status", help="show index statistics")
+    _as_groups(p)
     sub.add_parser("map", help="print the world map (map file + live overview), as the world_map tool returns it")
     p = sub.add_parser("knowledge", help="check the knowledge cards (knowledge\\ next to config.toml)")
     p.add_argument("action", choices=["check"])
@@ -97,13 +117,16 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--limit", type=int, default=10)
     p.add_argument("--mode", default="hybrid", choices=["hybrid", "keyword", "semantic"])
     p.add_argument("--folder")
+    _as_groups(p)
 
     p = sub.add_parser("read", help="print a document as the read_document tool returns it")
     p.add_argument("path")
     p.add_argument("--start-page", type=int, default=1)
     p.add_argument("--end-page", type=int)
+    _as_groups(p)
 
-    sub.add_parser("serve", help="run the MCP server (stdio) for Claude Desktop / Claude Code")
+    p = sub.add_parser("serve", help="run the MCP server (stdio) for Claude Desktop / Claude Code")
+    _as_groups(p)
     p = sub.add_parser("acl-survey", help="read-only: which accounts and groups can read the indexed folders "
                                           "(one report per world, changes nothing)")
     p.add_argument("--out", default=None, help="report folder (default: <world folder>/acl-survey)")
@@ -135,7 +158,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "serve":
         from .server import serve
-        serve(cfg)
+        serve(cfg, _caller(args, cfg, parser))
         return
 
     if args.command == "index":
@@ -242,7 +265,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Written: {o}")
     elif args.command == "status":
         from .tools import DocTools
-        print(DocTools(cfg).index_status())
+        print(DocTools(cfg, _caller(args, cfg, parser)).index_status())
     elif args.command == "map":
         from .tools import DocTools
         print(DocTools(cfg).world_map())
@@ -268,10 +291,10 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(1)
     elif args.command == "search":
         from .tools import DocTools
-        print(DocTools(cfg).search(args.query, folder=args.folder, limit=args.limit, mode=args.mode))
+        print(DocTools(cfg, _caller(args, cfg, parser)).search(args.query, folder=args.folder, limit=args.limit, mode=args.mode))
     elif args.command == "read":
         from .tools import DocTools
-        print(DocTools(cfg).read_document(args.path, args.start_page, args.end_page))
+        print(DocTools(cfg, _caller(args, cfg, parser)).read_document(args.path, args.start_page, args.end_page))
 
 
 if __name__ == "__main__":

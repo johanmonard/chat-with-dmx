@@ -18,6 +18,7 @@ except Exception:  # pragma: no cover
     READ_ONLY = None
 
 from .config import Config
+from .access import Caller
 from .tools import DocTools
 
 WORLD_MAP_LINE = ("Call world_map first when you do not know where a kind of information is kept or whether "
@@ -271,8 +272,8 @@ def instructions_for(cfg: Config) -> str:
     return base + "\n" + PICTURES_NOTE
 
 
-def build_server(cfg: Config) -> MCPServer:
-    tools = DocTools(cfg)
+def build_server(cfg: Config, caller: Caller | None = None) -> MCPServer:
+    tools = DocTools(cfg, caller)
     mcp = MCPServer(cfg.server_name, instructions=instructions_for(cfg))
     kw = {"annotations": READ_ONLY} if READ_ONLY is not None else {}
 
@@ -830,7 +831,7 @@ def build_server(cfg: Config) -> MCPServer:
     return mcp
 
 
-def serve(cfg: Config) -> None:
+def serve(cfg: Config, caller: Caller | None = None) -> None:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    build_server(cfg).run()
+    build_server(cfg, caller).run()

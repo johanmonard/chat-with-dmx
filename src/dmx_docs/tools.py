@@ -14,6 +14,7 @@ import urllib.request
 from datetime import datetime
 
 from . import facets, knowledge, machines, offer_tools, onenote, register, sources, store, verified, worldmap
+from .access import Access, AccessStore, Caller, Unrestricted
 from .config import Config
 from .extract import PICTURE_EXTS, docx_picture_names, extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
@@ -348,12 +349,19 @@ def _picture_pages(con, doc_id: int) -> list[int]:
 
 
 class DocTools:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, caller: Caller | None = None):
         self.cfg = cfg
+        # Per-person access: a world with access = "world" shows everything to everybody.
+        self.access = (Unrestricted() if cfg.access == "world" else
+                       Access(AccessStore(cfg.access_path), caller or Caller.from_token(cfg.access_admins)))
         self.searcher = Searcher(cfg)
         self._overview: tuple[float, worldmap.Overview] | None = None  # world_map's live part, cached
         self.knowledge = knowledge.Knowledge(cfg.knowledge_path)  # written project cards
         self._listed: dict[tuple, float] = {}  # offers world: revisions listed under "To verify" (identity -> time)
+
+    def allows(self, key: str) -> bool:
+        """Is the document (or folder) with this path key inside the world and readable by the caller?"""
+        return self.cfg.allows(key) and self.access.can_read(key)
 
     def _con(self):
         con = store.connect(self.cfg.db_path, create=False)
