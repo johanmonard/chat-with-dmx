@@ -510,6 +510,28 @@ def test_visible_card_bare_paths_in_any_slash_form(bare):
     assert asked == [PLAN, bare]  # the web address is no document
 
 
+@pytest.mark.parametrize("before", [" ", "x", ":", "Plan:"])
+def test_visible_card_unc_bare_path_after_any_character(before):
+    unc = r"\\srv\share\THOR\0_Vente\a.pdf"
+    card = parse_card(CARD + f"\n## B. The line\n- Gripper [{PLAN} p.2]\n\n## D. Key documents\n"
+                             f"- Offer{before}{unc}\n- Site:https://x\n", "THOR.md")
+    asked = []
+    knowledge.visible_card(card, lambda source: asked.append(source) or True)
+    assert asked == [PLAN, unc]
+
+
+def test_visible_card_splits_a_bracket_with_several_sources():
+    card = parse_card(CARD + f"\n## A. Sources\n- Two [{PLAN} p.1; {OFFRE} p.2]\n- Note [register; user, 2026-01-02]\n"
+                             f"- Bare: {PLAN}; {OFFRE}\n", "THOR.md")
+    asked = []
+    knowledge.visible_card(card, lambda source: asked.append(source) or True)
+    assert asked == [PLAN, OFFRE, "register", "user, 2026-01-02", PLAN, OFFRE]
+    body, hidden, whole = knowledge.visible_card(card, lambda source: "0_Vente" not in source)
+    assert "- Note" in body and "- Two" not in body and hidden == 2 and not whole
+    assert knowledge.single_path(PLAN) and not knowledge.single_path(f"{PLAN}, {OFFRE}")
+    assert knowledge.single_path(r"\\srv\share\a.pdf") and knowledge.single_path("//srv/share/a.pdf")
+
+
 def test_visible_card_without_any_citation_is_never_whole():
     card = parse_card(CARD, "THOR.md")   # a summary, no source at all
     assert knowledge.visible_card(card, lambda source: True) == ("", 0, False)

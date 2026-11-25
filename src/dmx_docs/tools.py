@@ -417,8 +417,8 @@ class DocTools:
             def can_read(source: str) -> bool:
                 if knowledge.NOTE_SOURCE.fullmatch(source):
                     return True  # the caller reads a document of the card's project (checked above)
-                if not knowledge.DOCUMENT_SOURCE.match(source):
-                    return False  # neither a note nor a path: nobody can tell where it comes from
+                if not knowledge.DOCUMENT_SOURCE.match(source) or not knowledge.single_path(source):
+                    return False  # neither a note nor one path: nobody can tell where it comes from
                 try:
                     return self.allows(store.path_key(sources.clean_path(source)))
                 except ValueError:

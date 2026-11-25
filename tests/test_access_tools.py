@@ -688,6 +688,50 @@ def test_register_links_made_from_hidden_documents_are_not_used(acl_world, tmp_p
     assert "Plan THOR" in world.search("préhenseur", client="ACME Hidden", mode="keyword")
 
 
+def test_machine_filter_uses_no_register_link_made_from_hidden_documents(acl_world, tmp_path):
+    """The register files a Hector under GHOST; its number is only in THOR's sales (hidden from MEC):
+    machine=Hector must not bring THOR to MEC through that link."""
+    from test_register import write_register
+    cfg, tools_for = acl_world
+    make_pdf(str(Path(cfg.roots[0], "THOR", "0_Vente", "Commande 100700009.pdf")), ["Commande machine"])
+    cfg.register_path = str(tmp_path / "register.csv")
+    write_register(cfg.register_path, [
+        dict(project="THOR", serial="100700001", model="Paloma 4R", year="2019", client="ACME Foods"),
+        dict(project="GHOST", serial="100700009", model="Hector", year="2001", client="ACME Hidden"),
+    ])
+    run_index(cfg, progress=quiet)
+    mec = tools_for(MEC)
+    assert mec.list_projects(machine="Hector").startswith("No matching project")
+    assert "Plan THOR" not in mec.search("préhenseur", machine="Hector", mode="keyword")
+    assert "THOR" in mec.list_projects(machine="Paloma 4R")  # the register's own link stays
+    for tools in (DocTools(dataclasses.replace(cfg, access="world")), tools_for(OTHER, admin=True)):
+        assert "THOR" in tools.list_projects(machine="Hector")
+        assert "Plan THOR" in tools.search("préhenseur", machine="Hector", mode="keyword")
+
+
+def test_card_bracket_with_several_sources_needs_every_one(acl_world, tmp_path):
+    cfg, tools_for = acl_world
+    _thor_card(cfg, tmp_path)
+    offre = Path(cfg.roots[0], "THOR", "0_Vente", "Offre THOR.pdf")
+    plan, plan_o = (Path(cfg.roots[0], p, "3_Mecanique", f"Plan {p}.pdf") for p in ("THOR", "ORION"))
+    text = (tmp_path / "knowledge" / "projects" / "THOR.md").read_text(encoding="utf-8").split("## A.")[0]
+    _card_file(tmp_path, "THOR.md", text + f"""## A. Several sources in one bracket
+- Mechanics then sales [{plan} p.1; {offre} p.2]
+- Sales then mechanics [{offre}; {plan}]
+- Joined by a comma [{plan}, {offre}]
+- Note then sales [register; {offre}]
+- Path then unknown [{plan}; Offre ORION.pdf]
+- Both mechanics [{plan} p.1; {plan_o} p.3]
+""")
+    out = tools_for(MEC).project_card("THOR")
+    assert "Both mechanics" in out and "5 lines not shown with your rights." in out
+    for hidden in ("Mechanics then sales", "Sales then mechanics", "Joined by a comma", "Note then sales",
+                   "Path then unknown"):
+        assert hidden not in out, hidden
+    both = tools_for(SALES, MEC).project_card("THOR")
+    assert "Mechanics then sales" in both and "Note then sales" in both and "Path then unknown" not in both
+
+
 def test_list_projects_filters_keep_the_readable_clause(acl_world):
     cfg, tools_for = acl_world
     other, mec = tools_for(OTHER), tools_for(MEC)

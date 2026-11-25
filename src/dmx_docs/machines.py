@@ -150,8 +150,13 @@ def filter_sql(con, values: list[str], column: str = "project", readable: str | 
     families or models, confirmed by the documents or by the machine register. With `readable` (a SQL
     condition on docs d: one caller's readable documents) the documents' evidence is counted and
     confirmed among those documents only."""
+    from .register import own_project_sql
+
     marks = ",".join("?" * len(values))
-    register = (f"{column} IN (SELECT project FROM register_machines WHERE family_ok = 1 AND "
+    # For one caller (readable): the register's own project links, none made from order numbers
+    # found in documents that caller may not read.
+    own = "project" if readable is None else own_project_sql()
+    register = (f"{column} IN (SELECT {own} FROM register_machines WHERE family_ok = 1 AND "
                 f"(family COLLATE NOCASE IN ({marks}) OR (model_ok = 1 AND model COLLATE NOCASE IN ({marks}))))")
     if readable is None:
         return (f"({column} IN (SELECT project FROM project_machines pm WHERE {confirmed_sql()} AND "

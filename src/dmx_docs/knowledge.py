@@ -248,10 +248,22 @@ def _sourced_lines(body: str):
 
 
 # A document path written outside brackets (the key documents of section D): N:\X\a.pdf, N:/X/a.pdf,
-# \\server\share\a.pdf or //server/share/a.pdf, up to a bracket ("https://" is not one).
-BARE_PATH = re.compile(r"(?:\b[A-Za-z]:[\\/]|(?<![:\w])[\\/]{2}(?=\w))[^\[\]\n]+")
+# \\server\share\a.pdf (after any character) or //server/share/a.pdf, up to a bracket ("https://" is
+# not one). Several paths in a row (separated by ';') are split by source_parts.
+BARE_PATH = re.compile(r"(?:\b[A-Za-z]:[\\/]|\\\\(?=\w)|(?<![:\w])//(?=\w))[^\[\]\n]+")
 DOCUMENT_SOURCE = re.compile(r"[A-Za-z]:[\\/]|[\\/]{2}\w")          # a cited source that is a path
+PATH_START = re.compile(r"[A-Za-z]:[\\/]|[\\/]{2}")
 NOTE_SOURCE = re.compile(r"register|user,\s*\d{4}-\d{2}-\d{2}")     # [register], [user, YYYY-MM-DD]
+
+
+def single_path(source: str) -> bool:
+    """Is this cited source one path only (not two run together, as in 'a.pdf, b.pdf')?"""
+    return len(PATH_START.findall(source)) == 1
+
+
+def source_parts(text: str) -> list[str]:
+    """The sources in one bracket (or one run of bare paths): split on ';', each without its page."""
+    return [source_path(part) for part in text.split(";") if part.strip()]
 
 
 def source_path(source: str) -> str:
@@ -273,7 +285,8 @@ def backs(vocab: Vocabulary, key: str, value: str, folded_body: str) -> bool:
 def visible_card(card: Card, can_read_source: Callable[[str], bool]) -> tuple[str, int, bool]:
     """The card as one caller may see it: (body to show, sourced lines left out, whole).
 
-    Each source is judged by can_read_source, without its page suffix: a document path, a note
+    Each source (each part of a bracket holding several, separated by ';') is judged by
+    can_read_source, without its page suffix: a document path, a note
     ('register', 'user, 2026-...') or anything else, for the caller to tell apart (DOCUMENT_SOURCE,
     NOTE_SOURCE). A document path written outside brackets (the key documents of section D) is a
     source too. whole: the card cites at least one source and every source is readable; the body is
@@ -284,8 +297,11 @@ def visible_card(card: Card, can_read_source: Callable[[str], bool]) -> tuple[st
     when no line of A, B or C was left out). Nothing left: ''.
     """
     def sources_readable(line: str) -> bool:
-        cited = [source_path(s) for s in SOURCE.findall(line)]
-        bare = [source_path(p.rstrip(" -")) for p in BARE_PATH.findall(SOURCE.sub("", line))]
+        brackets = [source_parts(s) for s in SOURCE.findall(line)]
+        if not all(brackets):
+            return False  # an empty bracket ('[ ]', '[;]') says nothing of where the line comes from
+        cited = [part for parts in brackets for part in parts]
+        bare = [part for p in BARE_PATH.findall(SOURCE.sub("", line)) for part in source_parts(p.rstrip(" -"))]
         return all(can_read_source(s) for s in cited + bare)
 
     def readable(line: str) -> bool:  # a line is shown on its citations: one without any is not
