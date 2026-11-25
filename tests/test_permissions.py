@@ -176,25 +176,50 @@ def test_cli_permissions_writes_outputs_and_report_without_index_status(tmp_path
     assert "Written:" in out and _status_line(cfgfile) not in out
 
 
-def test_folders_missing_from_a_stale_local_index_keep_their_master_rule(world, tmp_path):
+class _Win32Error(Exception):
+    """Like pywintypes.error: the Win32 code in winerror."""
+    def __init__(self, code):
+        super().__init__(code, "GetFileSecurity", "win32 error")
+        self.winerror = code
+
+
+def test_folders_missing_from_a_stale_local_index_are_read_again(world, tmp_path):
     cfg, root, out = world
+    extra = ("C", "D", "E", "F")
+    for name in extra:
+        (root / name).mkdir()
+        make_pdf(str(root / name / f"{name.lower()}.pdf"), [f"Document {name}."])
+    run_index(cfg, progress=lambda *_: None)
     local = tmp_path / "local" / "projects" / "access.sqlite3"
-    refresh_permissions(cfg, [out, local], read_acl=reader({root / "A": acl(SALES), root / "B": acl(ENG)}),
-                        account_name=NAMES.get, workers=1)
+    table = {root / n: acl(ENG) for n in ("B",) + extra} | {root / "A": acl(SALES)}
+    refresh_permissions(cfg, [out, local], read_acl=reader(table), account_name=NAMES.get, workers=1)
     before = AccessStore(out).load()
-    con = store.connect(cfg.db_path, create=False)  # this machine's index lost folder B (an older copy)
-    con.execute("DELETE FROM docs WHERE folder_key = ?", (key(root / "B"),))
+    con = store.connect(cfg.db_path, create=False)  # this machine's index is older: B..F are not in it
+    for n in ("B",) + extra:
+        con.execute("DELETE FROM docs WHERE folder_key = ?", (key(root / n),))
     con.commit()
     con.close()
-    r = refresh_permissions(cfg, [out, local], read_acl=reader({root / "A": acl(SALES)}),
-                            account_name=NAMES.get, workers=1)
+    r = refresh_permissions(cfg, [out, local], read_acl=reader({
+        root / "A": acl(SALES),
+        root / "B": acl(SALES),                       # IT changed the rule: the new one is written
+        root / "C": FileNotFoundError("gone"),        # deleted or moved: the rule is dropped
+        root / "D": PermissionError("denied"),        # cannot be read now: the previous rule is kept
+        root / "E": _Win32Error(3),                   # path not found (pywintypes.error): dropped
+        root / "F": _Win32Error(53),                  # network path not found: kept
+    }), account_name=NAMES.get, workers=1)
+    eng_rule = before.rules[before.folder_rule[key(root / "D")]]
     for path in (out, local):
         data = AccessStore(path).load()
-        assert data.rules[data.folder_rule[key(root / "B")]] == before.rules[before.folder_rule[key(root / "B")]]
-    assert r.kept_missing == 1 and r.changed == [] and r.version == before.version
-    assert r.previous_from == str(out)
+        assert data.rules[data.folder_rule[key(root / "B")]] == (frozenset({SALES}), frozenset())
+        assert key(root / "C") not in data.folder_rule and key(root / "E") not in data.folder_rule
+        assert data.rules[data.folder_rule[key(root / "D")]] == eng_rule
+        assert data.rules[data.folder_rule[key(root / "F")]] == eng_rule
+    assert (r.missing, r.missing_dropped) == (5, 2)
+    assert {p for p, _ in r.unreadable} == {key(root / "D"), key(root / "F")}
+    assert {c[0] for c in r.changed} == {key(root / "B"), key(root / "C"), key(root / "E")}
+    assert r.version != before.version and r.previous_from == str(out)
     report = write_change_report(r, tmp_path / "reports").read_text(encoding="utf-8")
-    assert "1 folders kept from the previous rules, not in this machine's index." in report
+    assert "5 folders not in this machine's index, re-read from the file server; 2 dropped as deleted." in report
     assert f"Previous rules read from: {out}." in report
 
 

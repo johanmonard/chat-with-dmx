@@ -910,6 +910,25 @@ def test_project_reader_scans_the_readable_documents_once(acl_world, monkeypatch
         con.close()
 
 
+def test_filling_the_readable_ids_commits_nothing(acl_world):
+    from dmx_docs import store
+    cfg, tools_for = acl_world
+    mec = tools_for(MEC)
+    con = mec._con()
+    try:
+        con.execute("INSERT INTO meta(key, value) VALUES ('pending_probe', '1')")  # someone else's pending write
+        table = mec._readable_ids(con)
+        assert con.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 2
+        con.rollback()
+    finally:
+        con.close()
+    con = store.connect(cfg.db_path, create=False)
+    try:
+        assert con.execute("SELECT 1 FROM meta WHERE key = 'pending_probe'").fetchone() is None
+    finally:
+        con.close()
+
+
 def test_catalog_and_project_card_do_not_scan_once_per_project(acl_world, tmp_path, monkeypatch):
     cfg, tools_for = acl_world
     _thor_card(cfg, tmp_path)

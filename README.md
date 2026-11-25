@@ -263,8 +263,9 @@ U:\DMX-RAG\
   On the VM, a daily run at 05:00 under the VM account, whether logged on or not (asks for its password).
   Such a task has no mapped drives: give the shared folder by its UNC path (`U:` mapped to `\\server\share`):
   `schtasks /Create /TN "DMX permissions" /SC DAILY /ST 05:00 /RU <DOMAIN\account> /RP * /TR "\"\\server\share\DMX-RAG\8 - Refresh permissions.cmd\""`
-  The report says which file served as the previous rules, how many folders were kept from them
-  because this machine's index does not hold them, and how many folders allow nobody once local and
+  The report says which file served as the previous rules, how many of their folders this machine's
+  index does not hold (read again on the file server; dropped when deleted, the previous rule kept when
+  they cannot be read), and how many folders allow nobody once local and
   built-in accounts are dropped (all of them: run under a domain account or set `[access] domain_sid`).
 * One machine at a time works on a world; two machines can work on two different worlds.
 * Local copies are in `C:\dmx-rag\data\<world>`. Claude Desktop gets one server per world:

@@ -261,8 +261,9 @@ def main(argv: list[str] | None = None) -> None:
         print(f"{r.folders:,} folders, {r.rules} rules, {len(r.changed)} changed "
               f"({r.docs_affected:,} documents), {len(r.unreadable)} not readable; version {r.version}.")
         print(f"Previous rules read from: {r.previous_from or 'none (first refresh)'}.")
-        if r.kept_missing:
-            print(f"{r.kept_missing:,} folders kept from the previous rules, not in this machine's index.")
+        if r.missing:
+            print(f"{r.missing:,} folders not in this machine's index, re-read from the file server; "
+                  f"{r.missing_dropped:,} dropped as deleted.")
         print(f"{r.allow_nobody:,} folders whose rule allows nobody after dropping local/builtin SIDs.")
         warning = nobody_warning(r)
         if warning:

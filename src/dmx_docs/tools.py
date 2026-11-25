@@ -398,7 +398,8 @@ class DocTools:
             con.execute(f"INSERT INTO temp.readable_docs(id) SELECT id FROM docs WHERE {cond}")
             if token is not None:
                 con.execute("INSERT INTO temp.readable_docs_token(token) VALUES (?)", (token,))
-            con.commit()  # ends the read transaction on the index the fill opened
+            # No commit: the TEMP rows are this connection's own (closing it drops them), and a
+            # commit here could end someone else's pending writes at an unexpected point.
         return "temp.readable_docs"
 
     def _readable_facets(self, con) -> str:

@@ -36,7 +36,8 @@ class RefreshResult:
     docs_affected: int = 0
     version: str = ""
     previous_from: str = ""   # the file the previous rules were read from ("" when there were none)
-    kept_missing: int = 0     # folders of the previous rules missing from this machine's index, kept as they were
+    missing: int = 0          # folders of the previous rules missing from this machine's index, read again
+    missing_dropped: int = 0  # of those, folders not found on the file server (deleted or moved): rule dropped
     read: int = 0             # folders whose rule was read in this run
     allow_nobody: int = 0     # of those, folders whose rule allows nobody once local/builtin SIDs are dropped
 
@@ -107,35 +108,37 @@ def refresh_permissions(cfg, out_paths: list[Path], read_acl=aclsurvey.read_wind
         prev_pairs = {k: prev.rules[rid] for k, rid in prev.folder_rule.items() if rid in prev.rules}
         prev_ids = dict(prev.folder_rule)
 
+    # Folders of the previous rules that this machine's index does not hold (a local copy older than
+    # the master's index) are read again too, by their folder key (a full path): a rule is never
+    # carried forward unread, or a group removed from the folder would keep reading it.
+    missing = sorted(k for k in prev_pairs if k not in display)
+
     def one(k):
         try:
-            return k, read_acl(display[k], for_files=True), None
+            return k, read_acl(display.get(k, k), for_files=True), None, False
         except Exception as e:  # unreadable list, missing folder...
-            return k, None, f"{type(e).__name__}: {e}"
+            return k, None, f"{type(e).__name__}: {e}", _not_found(e)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = list(pool.map(one, sorted(display)))
+        results = list(pool.map(one, sorted(display) + missing))
 
     new_pairs: dict[str, tuple[frozenset, frozenset]] = {}
     unreadable: list[tuple[str, str]] = []
     errors: dict[str, str] = {}
-    read = allow_nobody = 0
-    for k, acl, err in results:
+    read = allow_nobody = dropped = 0
+    for k, acl, err, gone in results:
         if acl is not None:
             new_pairs[k] = (usable_sids(acl.allow, prefix), usable_sids(acl.deny, prefix))
             read += 1
             if not new_pairs[k][0]:
                 allow_nobody += 1
+        elif gone and k not in display:
+            dropped += 1  # deleted or moved, and no indexed document here: its rule goes
         else:
-            unreadable.append((display[k], err))
+            unreadable.append((display.get(k, k), err))
             errors[k] = err
             if k in prev_pairs:
-                new_pairs[k] = prev_pairs[k]
-    # Folders of the previous rules that this machine's index does not hold (a local copy older than
-    # the master's index): not read again, their rule is kept as it was.
-    kept_missing = [k for k in prev_pairs if k not in display]
-    for k in kept_missing:
-        new_pairs[k] = prev_pairs[k]
+                new_pairs[k] = prev_pairs[k]  # access denied, network...: the last rule read is kept
 
     # Rule ids: keep the previous id of a rule that still exists, number new ones after the highest.
     ids: dict[tuple[frozenset, frozenset], int] = {}
@@ -172,7 +175,13 @@ def refresh_permissions(cfg, out_paths: list[Path], read_acl=aclsurvey.read_wind
     return RefreshResult(folders=len(display), rules=len(rule_sets), changed=changed, unreadable=unreadable,
                          docs_affected=docs_affected, version=version,
                          previous_from=str(prev_from) if prev is not None else "",
-                         kept_missing=len(kept_missing), read=read, allow_nobody=allow_nobody)
+                         missing=len(missing), missing_dropped=dropped, read=read, allow_nobody=allow_nobody)
+
+
+def _not_found(e: Exception) -> bool:
+    """Does the error say the folder does not exist (deleted or moved)? Win32 errors 2 and 3 (file,
+    path not found); network errors and access denied are not."""
+    return isinstance(e, FileNotFoundError) or getattr(e, "winerror", None) in (2, 3)
 
 
 def nobody_warning(result: RefreshResult) -> str | None:
@@ -195,7 +204,8 @@ def write_change_report(result: RefreshResult, out_dir: Path) -> Path:
              f"{len(result.changed)} folders changed their rule ({result.docs_affected:,} documents affected); "
              f"{len(result.unreadable)} folders could not be read.", "",
              "Previous rules read from: " + (result.previous_from or "none (first refresh)") + ".",
-             f"{result.kept_missing:,} folders kept from the previous rules, not in this machine's index.",
+             f"{result.missing:,} folders not in this machine's index, re-read from the file server; "
+             f"{result.missing_dropped:,} dropped as deleted.",
              f"{result.allow_nobody:,} folders whose rule allows nobody after dropping local/builtin SIDs "
              f"(of {result.read:,} read).", ""]
     warning = nobody_warning(result)
