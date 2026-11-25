@@ -374,8 +374,10 @@ class Searcher:
                 elif profile == "projects" and col in ("client", "country"):  # projects of that client / country
                     from . import register
                     cond, args = (register.client_clause if col == "client" else register.country_clause)(str(value))
+                    # a restricted caller: the register's own links, none made from hidden documents
+                    own = register.own_project_sql("rm") if readable else "rm.project"
                     clauses.append("d.id IN (SELECT doc_id FROM doc_facets WHERE project IN "
-                                   f"(SELECT rm.project FROM register_machines rm WHERE {cond}))")
+                                   f"(SELECT {own} FROM register_machines rm WHERE {cond}))")
                     params += args
                 elif col == "project":  # a project name or one of its sub-projects (machines)
                     clauses.append(f"d.id IN (SELECT doc_id FROM doc_facets WHERE project COLLATE NOCASE "

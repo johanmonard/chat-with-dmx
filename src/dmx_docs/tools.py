@@ -403,16 +403,22 @@ class DocTools:
         return can_read
 
     def _card_viewer(self, con, project_ok=None):
-        """Function card -> (body, sourced lines left out, whole) as the caller may see it: a cited
-        document by its own rights, any other citation by those on the card's project."""
+        """Function card -> (body, sourced lines left out, whole) as the caller may see it: nothing
+        of the card of a project the caller reads no document of; else a cited document by its own
+        rights, a note ([register], [user, date]) by those on the project, anything else not at all."""
         if not self._restricted:
             return lambda card: (card.body, 0, True)
         project_ok = project_ok or self._project_reader(con)
 
         def view(card):
+            if not project_ok(card.project):
+                return "", 0, False
+
             def can_read(source: str) -> bool:
-                if "\\" not in source:
-                    return project_ok(card.project)
+                if knowledge.NOTE_SOURCE.fullmatch(source):
+                    return True  # the caller reads a document of the card's project (checked above)
+                if not knowledge.DOCUMENT_SOURCE.match(source):
+                    return False  # neither a note nor a path: nobody can tell where it comes from
                 try:
                     return self.allows(store.path_key(sources.clean_path(source)))
                 except ValueError:
@@ -574,11 +580,12 @@ class DocTools:
         out = {}
         machine_cache: dict[str, str] = {}
         readable = self._readable_sql(con)  # machine evidence counted among the caller's documents
+        own = register.own_project_sql() if self._restricted else "project"  # no link from hidden documents
         for r in con.execute(f"SELECT * FROM doc_facets WHERE doc_id IN ({','.join('?' * len(ids))})", ids):
             project = r["project"] and (r["project"] + (f" / {r['subproject']}" if r["subproject"] else ""))
             if r["project"] and r["project"] not in machine_cache:
                 machine_cache[r["project"]] = machines.describe(con, r["project"], limit=2, readable=readable)
-                client = con.execute("SELECT client FROM register_machines WHERE project = ? AND client != '' "
+                client = con.execute(f"SELECT client FROM register_machines WHERE {own} = ? AND client != '' "
                                      "GROUP BY client ORDER BY count(*) DESC LIMIT 1", (r["project"],)).fetchone()
                 machine_cache["client:" + r["project"]] = client[0] if client else ""
             if r["project"] and machine_cache[r["project"]]:
@@ -840,9 +847,10 @@ class DocTools:
                 where += " AND " + cond
                 params += args
             restricted = self._restricted
-            reg_cond, reg_params = self._register_filter(client, country, year_from, year_to, own_year=restricted)
-            if reg_cond:
-                where += f" AND f.project IN (SELECT rm.project FROM register_machines rm WHERE {reg_cond})"
+            reg_cond, reg_params = self._register_filter(client, country, year_from, year_to, own=restricted)
+            if reg_cond:  # a restricted caller: the register's own links, none made from hidden documents
+                own = register.own_project_sql("rm") if restricted else "rm.project"
+                where += f" AND f.project IN (SELECT {own} FROM register_machines rm WHERE {reg_cond})"
                 params += reg_params
             if name:  # match the project or any of its sub-projects, but list the whole project
                 having = " HAVING f.project LIKE ? OR coalesce(group_concat(f.subproject), '') LIKE ?"
@@ -866,7 +874,7 @@ class DocTools:
             readable = self._readable_sql(con)  # machine evidence counted among the caller's documents
             machine_text = {r["project"]: machines.describe(con, r["project"], readable=readable) for r in rows}
             # The register's years where the documents disagree come from every document, hidden ones too.
-            client_text = {r["project"]: register.summary(con, r["project"], own_year=restricted) for r in rows}
+            client_text = {r["project"]: register.summary(con, r["project"], own=restricted) for r in rows}
             unindexed = []
             # Delivered machines whose documents are not indexed: a restricted caller reads no document
             # of theirs, so the register is not shown for them.
@@ -913,10 +921,10 @@ class DocTools:
         return "\n".join(lines)
 
     @staticmethod
-    def _register_filter(client, country, year_from, year_to, own_year: bool = False) -> tuple[str, list]:
-        """own_year: filter on the register's own years, not those taken from the project's documents."""
+    def _register_filter(client, country, year_from, year_to, own: bool = False) -> tuple[str, list]:
+        """own: filter on the register's own years, not those taken from the project's documents."""
         conds, params = [], []
-        year = "coalesce(rm.reg_year, rm.year)" if own_year else "rm.year"
+        year = "coalesce(rm.reg_year, rm.year)" if own else "rm.year"
         if client:
             c, p = register.client_clause(client)
             conds.append(c)
@@ -942,18 +950,21 @@ class DocTools:
             hit = con.execute("SELECT project FROM doc_facets WHERE (project = ? COLLATE NOCASE "
                               f"OR subproject = ? COLLATE NOCASE){readable} LIMIT 1", (project, project)).fetchone()
             name = hit[0] if hit else None
-            reg = con.execute(
-                "SELECT * FROM register_machines WHERE project = ? ORDER BY order_no, serial" if name else
-                "SELECT * FROM register_machines WHERE name = ? COLLATE NOCASE ORDER BY order_no, serial",
-                (name or project,)).fetchall()
-            # The register is shown for a project the caller reads at least one document of.
+            # The register is shown for a project the caller reads at least one document of; for a
+            # restricted caller by the register's own links (own), none made from order numbers found in
+            # documents the caller may not read.
             restricted, project_ok = self._restricted, self._project_reader(con)
-            reg = [r for r in reg if project_ok(r["project"])]
+            own = register.own_project_sql() if restricted else "project"
+            reg = con.execute(
+                f"SELECT *, {own} AS own FROM register_machines WHERE {own} = ? ORDER BY order_no, serial" if name
+                else f"SELECT *, {own} AS own FROM register_machines WHERE name = ? COLLATE NOCASE "
+                     "ORDER BY order_no, serial", (name or project,)).fetchall()
+            reg = [r for r in reg if project_ok(r["own"])]
             if not name and not reg:
                 if restricted:
                     names = {r[0] for r in con.execute(
                         f"SELECT DISTINCT project FROM doc_facets WHERE project LIKE ?{readable}", (f"%{project}%",))}
-                    names |= {n for n, p in con.execute("SELECT DISTINCT name, project FROM register_machines "
+                    names |= {n for n, p in con.execute(f"SELECT DISTINCT name, {own} FROM register_machines "
                                                         "WHERE name LIKE ?", (f"%{project}%",)) if project_ok(p)}
                     like = [(n,) for n in sorted(names)[:10]]
                 else:
@@ -963,7 +974,8 @@ class DocTools:
                 written = self._written_card(con, project)  # a card may outlive its project's documents
                 return (f"No project '{project}' in the index or the machine register."
                         + (f" Similar names: {', '.join(r[0] for r in like)}" if like else "")
-                        + ("" if written == "No written card yet." else "\n\n" + written))
+                        # a hidden project's card answers like no card, as for a name that does not exist
+                        + ("" if written in ("No written card yet.", self.NOT_AVAILABLE) else "\n\n" + written))
             lines = []
             if name:
                 n, first, last, coll = con.execute(
@@ -1020,8 +1032,10 @@ class DocTools:
                     note = None if restricted else r["doc_note"]
                     lines.append("- " + " · ".join(bits) + (f"\n    ⚠ {note}" if note else ""))
             if name:
-                moved = [m for m in con.execute("SELECT serial, order_no, model, project FROM register_machines "
-                                                "WHERE reg_project = ?", (name,)) if project_ok(m["project"])]
+                # Moved by order numbers found in documents: for a restricted caller they stay where the
+                # register files them (here), so there is nothing to list.
+                moved = [] if restricted else con.execute("SELECT serial, order_no, model, project FROM "
+                                                          "register_machines WHERE reg_project = ?", (name,)).fetchall()
                 if moved:
                     lines.append("\nFiled under this project in the register, but their numbers are in another "
                                  "project's documents (counted there): " + "; ".join(
@@ -1056,11 +1070,11 @@ class DocTools:
             if clients:
                 year = "coalesce(reg_year, year)" if restricted else "year"
                 others = [o for o in con.execute(
-                    f"""SELECT coalesce(project, name) p, group_concat(DISTINCT model), min({year}),
-                               max(project IS NOT NULL), max(project) FROM register_machines
+                    f"""SELECT coalesce({own}, name) p, group_concat(DISTINCT model), min({year}),
+                               max({own} IS NOT NULL), max({own}) FROM register_machines
                         WHERE (client IN ({','.join('?' * len(clients))})
                         OR grp IN ({','.join('?' * len(groups)) or "''"}))
-                        AND coalesce(project, name) != ? GROUP BY 1 ORDER BY 3 DESC""",
+                        AND coalesce({own}, name) != ? GROUP BY 1 ORDER BY 3 DESC""",
                     clients + groups + [name or reg[0]["name"]]) if project_ok(o[4])][:25]
                 if others:
                     lines.append("\nOther projects for the same client or group: " + "; ".join(
@@ -1149,7 +1163,7 @@ class DocTools:
             seen = {}
             for c in cards:
                 body, hidden, whole = view(c)
-                seen[c.file] = (body.rsplit("\n\n", 1)[0] if hidden else body, whole)
+                seen[c.file] = (body.rsplit("\n\n", 1)[0] if body and not whole else body, whole)
 
             def visible(card) -> bool:
                 body, whole = seen[card.file]
@@ -1157,12 +1171,15 @@ class DocTools:
 
             def values(card, key: str) -> list[str]:
                 """The header values the caller may see: all of them for a whole card, else those
-                backed by its visible lines (by the rule of knowledge check)."""
+                backed by its visible lines (by the rule of knowledge check) - for a word-list field
+                its word only, since the detail in parentheses may come from a hidden line."""
                 body, whole = seen[card.file]
                 if whole:
                     return card.values(key)
                 folded = fold(body)
-                return [v for v in card.values(key) if knowledge.backs(vocab, key, v, folded)]
+                words = key in ("infeed", "outfeed", "end_effectors")
+                return [knowledge.form_of(v) if words else v for v in card.values(key)
+                        if knowledge.backs(vocab, key, v, folded)]
 
             def keep(card) -> bool:
                 if not visible(card):

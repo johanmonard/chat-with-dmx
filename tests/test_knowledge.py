@@ -491,12 +491,42 @@ def test_visible_card_counts_bare_document_paths_as_sources():
     body, hidden, whole = knowledge.visible_card(card, mec_only)
     assert OFFRE in asked and PLAN in asked and not whole and hidden == 0
     assert "Offre" not in body and "- End effector: suction cups" in body
+    assert body.endswith("\n\nSome parts not shown with your rights.")  # no line of A-C left out
     body, hidden, whole = knowledge.visible_card(card, lambda source: True)
     assert whole and body == card.body
     line = f"- Offer v3 {OFFRE} [{PLAN} p.1]"   # a bare path in a sourced line counts too
     card = parse_card(CARD + f"\n## C. History\n{line}\n- Plan [{PLAN} p.1]\n", "THOR.md")
     body, hidden, whole = knowledge.visible_card(card, mec_only)
     assert "Offre" not in body and "- Plan" in body and hidden == 1
+
+
+@pytest.mark.parametrize("bare", ["N:/RMA/THOR/0_Vente/Offre THOR.pdf", r"\\srv\RMA\THOR\0_Vente\Offre THOR.pdf",
+                                  "//srv/RMA/THOR/0_Vente/Offre THOR.pdf"])
+def test_visible_card_bare_paths_in_any_slash_form(bare):
+    card = parse_card(CARD + f"\n## B. The line\n- Gripper [{PLAN} p.2]\n\n## D. Key documents\n- Offer: {bare}\n"
+                             "- Site: https://example.com/thor\n", "THOR.md")
+    asked = []
+    knowledge.visible_card(card, lambda source: asked.append(source) or True)
+    assert asked == [PLAN, bare]  # the web address is no document
+
+
+def test_visible_card_without_any_citation_is_never_whole():
+    card = parse_card(CARD, "THOR.md")   # a summary, no source at all
+    assert knowledge.visible_card(card, lambda source: True) == ("", 0, False)
+
+
+def test_visible_card_passes_every_source_without_its_page():
+    card = parse_card(CARD + "\n## A. Client\n- Offer [Offre ORION.pdf p.1]\n- Plan [N:/RMA/x/Plan.pdf pp. 1, 3]\n"
+                             "- Client [register]\n- Speed [user, 2026-01-02]\n", "THOR.md")
+    asked = []
+    knowledge.visible_card(card, lambda source: asked.append(source) or True)
+    assert asked == ["Offre ORION.pdf", "N:/RMA/x/Plan.pdf", "register", "user, 2026-01-02"]
+    assert knowledge.NOTE_SOURCE.fullmatch("register") and knowledge.NOTE_SOURCE.fullmatch("user, 2026-01-02")
+    assert not knowledge.NOTE_SOURCE.fullmatch("Offre ORION.pdf")
+    for path in ("N:/RMA/x.pdf", "N:\\RMA\\x.pdf", "\\\\srv\\x.pdf", "//srv/x.pdf"):
+        assert knowledge.DOCUMENT_SOURCE.match(path), path
+    for other in ("Offre ORION.pdf", "register", "N:RMA\\x.pdf"):
+        assert not knowledge.DOCUMENT_SOURCE.match(other), other
 
 
 def test_visible_card_judges_register_and_user_sources_with_the_caller():
@@ -506,7 +536,7 @@ def test_visible_card_judges_register_and_user_sources_with_the_caller():
     assert (body, hidden, whole) == ("", 2, False)  # nothing left: the caller says "not available"
     body, hidden, whole = knowledge.visible_card(card, lambda source: source == "register")
     assert "Client ACME Foods" in body and "Speed 120" not in body and (hidden, whole) == (1, False)
-    assert body.rstrip().endswith("1 lines not shown with your rights.")
+    assert body.rstrip().endswith("\n1 line not shown with your rights.")
 
 
 def test_project_card_names_an_unreadable_card(indexed):

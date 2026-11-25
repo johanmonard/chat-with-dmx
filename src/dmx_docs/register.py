@@ -276,18 +276,29 @@ def country_clause(value: str, alias: str = "rm") -> tuple[str, list[str]]:
     return f"{alias}.country COLLATE NOCASE IN ({','.join('?' * len(values))})", values
 
 
-def summary(con, project: str, own_year: bool = False) -> str:
-    """'ACME FOODS (France), 3 machines 2023' - one line for lists and search hits. own_year: the
-    register's own years, not those taken from the project's documents where they disagree."""
-    year = "coalesce(reg_year, year)" if own_year else "year"
-    n, y0, y1 = con.execute(f"SELECT count(*), min({year}), max({year}) FROM register_machines WHERE project = ?",
+def own_project_sql(alias: str = "") -> str:
+    """SQL for the project the register itself gives a row (by its folder or project name), without
+    the links made from order numbers found in the documents - which may be documents the caller
+    cannot read. NULL when the register names no indexed project."""
+    a = f"{alias}." if alias else ""
+    return (f"(CASE WHEN {a}reg_project IS NOT NULL THEN {a}reg_project "
+            f"WHEN {a}matched_by = 'order' THEN NULL ELSE {a}project END)")
+
+
+def summary(con, project: str, own: bool = False) -> str:
+    """'ACME FOODS (France), 3 machines 2023' - one line for lists and search hits. own: the
+    register's own project links and years, not those taken from the documents where they disagree
+    (for callers who do not read every document)."""
+    year = "coalesce(reg_year, year)" if own else "year"
+    proj = own_project_sql() if own else "project"
+    n, y0, y1 = con.execute(f"SELECT count(*), min({year}), max({year}) FROM register_machines WHERE {proj} = ?",
                             (project,)).fetchone()
     if not n:
         return ""
-    clients = con.execute("""SELECT client, max(country) FROM register_machines WHERE project = ? AND client != ''
-                             GROUP BY client ORDER BY count(*) DESC""", (project,)).fetchall()
+    clients = con.execute(f"""SELECT client, max(country) FROM register_machines WHERE {proj} = ? AND client != ''
+                              GROUP BY client ORDER BY count(*) DESC""", (project,)).fetchall()
     if not clients:
-        clients = [("client ?", con.execute("SELECT max(country) FROM register_machines WHERE project = ?",
+        clients = [("client ?", con.execute(f"SELECT max(country) FROM register_machines WHERE {proj} = ?",
                                             (project,)).fetchone()[0])]
     who = " / ".join(f"{c}{f' ({k})' if k else ''}" for c, k in clients[:2]) + (" ..." if len(clients) > 2 else "")
     years = "" if not y0 else f" {y0}" if y0 == y1 else f" {y0}-{y1}"

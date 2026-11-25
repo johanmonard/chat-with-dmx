@@ -2,6 +2,8 @@
 (two projects, sales and mechanical folders, one reading rule each) used by the access tests."""
 
 import dataclasses
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -487,9 +489,82 @@ def test_project_card_for_a_mechanical_caller_shows_only_mechanical_lines(acl_wo
     assert "Chocolate bars for ACME Foods." in full and "not shown with your rights" not in full
     for tools in (tools_for(OTHER, admin=True), DocTools(dataclasses.replace(cfg, access="world"))):
         assert "price 100000 CHF" in tools.project_card("THOR")
-    nobody = tools_for(OTHER).project_card("THOR")
-    assert "Card not available with your rights." in nobody
-    assert "ACME" not in nobody and "Paloma" not in nobody and "ventouses" not in nobody
+    nobody = tools_for(OTHER)
+    out = nobody.project_card("THOR")
+    assert "ACME" not in out and "Paloma" not in out and "ventouses" not in out and "Card" not in out
+    assert out.replace("THOR", "NOPE") == nobody.project_card("NOPE")  # as for a name that does not exist
+
+
+def _card_file(tmp_path, name, text):
+    path = tmp_path / "knowledge" / "projects" / name
+    path.write_text(text, encoding="utf-8")
+    os.utime(path, (time.time() + 5, time.time() + 5))  # mtime resolution: the card is read again
+
+
+def test_hidden_project_with_a_card_answers_like_a_missing_name(acl_world, tmp_path):
+    cfg, tools_for = acl_world
+    _thor_card(cfg, tmp_path)
+    _card_file(tmp_path, "ORION.md", "no header")
+    nobody = tools_for(OTHER)
+    for name in ("THOR", "ORION"):  # a card, an unparseable card file
+        assert nobody.project_card(name).replace(name, "NOPE") == nobody.project_card("NOPE"), name
+    _mec_reads_only_thor(cfg)
+    orion = (tmp_path / "knowledge" / "projects" / "THOR.md").read_text(encoding="utf-8").replace(
+        "project: THOR", "project: ORION").replace("Outfeed: case", "Outfeed: crate")
+    _card_file(tmp_path, "ORION.md", orion)  # ORION's card citing THOR's plan, which MEC reads
+    mec = tools_for(MEC)
+    assert mec.project_card("ORION").replace("ORION", "NOPE") == mec.project_card("NOPE")
+    assert "ORION" not in mec.catalog() and "crate" not in mec.catalog()
+    assert "Outfeed: crate" in tools_for(OTHER, admin=True).project_card("ORION")
+
+
+def test_card_without_any_citation_is_for_those_who_read_everything(acl_world, tmp_path):
+    cfg, tools_for = acl_world
+    _thor_card(cfg, tmp_path)
+    text = (tmp_path / "knowledge" / "projects" / "THOR.md").read_text(encoding="utf-8")
+    _card_file(tmp_path, "THOR.md", text.split("## A.")[0])  # header and summary only
+    mec = tools_for(MEC)
+    assert "Card not available with your rights." in mec.project_card("THOR")
+    assert "Chocolate" not in mec.project_card("THOR") and "THOR ·" not in mec.catalog()
+    assert "Cards exist for 0 of 2 projects" in mec.catalog()
+    admin = tools_for(OTHER, admin=True)
+    assert "Chocolate bars for ACME Foods." in admin.project_card("THOR") and "THOR ·" in admin.catalog()
+
+
+def test_card_citations_that_are_neither_paths_nor_notes_are_hidden(acl_world, tmp_path):
+    cfg, tools_for = acl_world
+    _thor_card(cfg, tmp_path)
+    offre = str(Path(cfg.roots[0], "THOR", "0_Vente", "Offre THOR.pdf")).replace("\\", "/")
+    plan = str(Path(cfg.roots[0], "THOR", "3_Mecanique", "Plan THOR.pdf")).replace("\\", "/")
+    text = (tmp_path / "knowledge" / "projects" / "THOR.md").read_text(encoding="utf-8").split("## A.")[0]
+    _card_file(tmp_path, "THOR.md", text + f"""## A. Sources of every kind
+- Bare file name [Offre ORION.pdf p.1]
+- Forward slashes, sales [{offre} p.1]
+- Forward slashes, mechanics [{plan} p.2]
+- A correction [user, 2026-01-02]
+- From the register [register]
+""")
+    out = tools_for(MEC).project_card("THOR")
+    for shown in ("Forward slashes, mechanics", "A correction", "From the register", "2 lines not shown"):
+        assert shown in out, shown
+    assert "Bare file name" not in out and "Forward slashes, sales" not in out
+    both = tools_for(SALES, MEC).project_card("THOR")
+    assert "Forward slashes, sales" in both and "Bare file name" not in both
+    assert "1 line not shown with your rights." in both  # nobody can tell where it comes from
+    assert "Bare file name" in tools_for(OTHER, admin=True).project_card("THOR")
+
+
+def test_catalog_shows_no_header_detail_from_a_hidden_line(acl_world, tmp_path):
+    cfg, tools_for = acl_world
+    _thor_card(cfg, tmp_path)
+    path = tmp_path / "knowledge" / "projects" / "THOR.md"
+    _card_file(tmp_path, "THOR.md", path.read_text(encoding="utf-8").replace(
+        "- Outfeed: case, Paloma 4R with ventouses", "- Outfeed: case, Paloma 4R with ventouses, fed in flow-pack"))
+    mec, both = tools_for(MEC), tools_for(SALES, MEC)
+    out = mec.catalog(infeed="flowpack")  # backed by the visible line; "chocolate bar" only by a hidden one
+    assert "THOR · " in out and "flowpack -> case" in out and "chocolate" not in out
+    assert "THOR" not in mec.catalog(infeed="chocolate")
+    assert "flowpack (chocolate bar)" in both.catalog() and "THOR ·" in both.catalog(infeed="chocolate")
 
 
 def test_catalog_matches_only_on_visible_lines(acl_world, tmp_path):
@@ -527,15 +602,20 @@ def test_catalog_does_not_name_an_unreadable_card_of_a_hidden_project(acl_world,
     assert "card ORION.md unreadable: no header" in tools_for(OTHER, admin=True).catalog()
 
 
-def _register_world(cfg, tmp_path):
-    """MEC reads THOR's mechanics only (ORION's mechanics are for SALES); the register lists THOR,
-    ORION and GHOST (no indexed documents), all for the same client group."""
-    from test_register import write_register
+def _mec_reads_only_thor(cfg):
+    """New rules: MEC reads THOR's mechanics only (ORION's mechanics are for SALES)."""
     folder_rules = {key(cfg, "THOR", "0_Vente"): 1, key(cfg, "THOR", "3_Mecanique"): 2,
                     key(cfg, "ORION", "0_Vente"): 1, key(cfg, "ORION", "3_Mecanique"): 1}
     AccessStore.write(cfg.access_path, rules={"sales": 1, "mec": 2}, folder_rules=folder_rules,
                       rule_sets={1: (frozenset({SALES}), frozenset()), 2: (frozenset({MEC}), frozenset())},
-                      errors={}, names={}, version="v-register")
+                      errors={}, names={}, version="v-thor-only")
+
+
+def _register_world(cfg, tmp_path):
+    """MEC reads THOR's mechanics only (ORION's mechanics are for SALES); the register lists THOR,
+    ORION and GHOST (no indexed documents), all for the same client group."""
+    from test_register import write_register
+    _mec_reads_only_thor(cfg)
     cfg.register_path = str(tmp_path / "register.csv")
     write_register(cfg.register_path, [
         dict(project="THOR", serial="100700001", model="Paloma 4R", year="2019", client="ACME Foods",
@@ -572,6 +652,40 @@ def test_register_shown_only_with_a_readable_document_of_the_project(acl_world, 
     assert "GHOST" in admin.list_projects(client="ACME") and "ACME Old" in admin.project_card("GHOST")
     world = DocTools(dataclasses.replace(cfg, access="world"))
     assert "ACME Snacks" in world.project_card("ORION") and "GHOST" in world.list_projects(client="ACME")
+
+
+def test_register_links_made_from_hidden_documents_are_not_used(acl_world, tmp_path):
+    """Register rows linked to a project by order numbers found in its sales documents (hidden from
+    MEC): MEC gets the register's own links. 100700009 is filed under GHOST (not indexed) and named
+    only in THOR's sales; 100700008 is filed under THOR and named only in ORION's sales."""
+    from test_register import write_register
+    cfg, tools_for = acl_world
+    for p, name in (("THOR", "Commande 100700009.pdf"), ("ORION", "Commande 100700008.pdf"),
+                    ("ORION", "Facture 100700008.pdf")):
+        make_pdf(str(Path(cfg.roots[0], p, "0_Vente", name)), ["Commande machine"])
+    cfg.register_path = str(tmp_path / "register.csv")
+    write_register(cfg.register_path, [
+        dict(project="THOR", serial="100700001", model="Paloma 4R", year="2019", client="ACME Foods"),
+        dict(project="GHOST", serial="100700009", model="Hector", year="2001", client="ACME Hidden"),
+        dict(project="THOR", serial="100700008", model="Delfi", year="2018", client="ACME Foods"),
+    ])
+    run_index(cfg, progress=quiet)
+    world = DocTools(dataclasses.replace(cfg, access="world"))
+    for tools in (world, tools_for(OTHER, admin=True)):
+        thor = tools.project_card("THOR")
+        assert "100700009" in thor and "ACME Hidden" in thor and "100700008 Delfi -> ORION" in thor
+        assert "100700008" in tools.project_card("ORION")
+        assert "THOR" in tools.list_projects(client="ACME Hidden")
+    mec = tools_for(MEC)
+    thor = mec.project_card("THOR")
+    assert "100700009" not in thor and "ACME Hidden" not in thor and "Hector" not in thor
+    assert "100700008 · Delfi" in thor and "ORION" not in thor  # where the register files it
+    assert "100700008" not in mec.project_card("ORION") and "Delfi" not in mec.project_card("ORION")
+    assert mec.list_projects(client="ACME Hidden").startswith("No matching project")
+    assert "ACME Hidden" not in mec.list_projects()
+    hits = mec.search("préhenseur", client="ACME Hidden", mode="keyword")
+    assert "Plan THOR" not in hits
+    assert "Plan THOR" in world.search("préhenseur", client="ACME Hidden", mode="keyword")
 
 
 def test_list_projects_filters_keep_the_readable_clause(acl_world):

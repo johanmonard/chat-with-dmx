@@ -247,7 +247,11 @@ def _sourced_lines(body: str):
             yield line
 
 
-BARE_PATH = re.compile(r"(?:\b[A-Za-z]:\\|\\\\)[^\[\]\n]+")   # N:\X\a.pdf or \\server\share\a.pdf, to a bracket
+# A document path written outside brackets (the key documents of section D): N:\X\a.pdf, N:/X/a.pdf,
+# \\server\share\a.pdf or //server/share/a.pdf, up to a bracket ("https://" is not one).
+BARE_PATH = re.compile(r"(?:\b[A-Za-z]:[\\/]|(?<![:\w])[\\/]{2}(?=\w))[^\[\]\n]+")
+DOCUMENT_SOURCE = re.compile(r"[A-Za-z]:[\\/]|[\\/]{2}\w")          # a cited source that is a path
+NOTE_SOURCE = re.compile(r"register|user,\s*\d{4}-\d{2}-\d{2}")     # [register], [user, YYYY-MM-DD]
 
 
 def source_path(source: str) -> str:
@@ -269,16 +273,18 @@ def backs(vocab: Vocabulary, key: str, value: str, folded_body: str) -> bool:
 def visible_card(card: Card, can_read_source: Callable[[str], bool]) -> tuple[str, int, bool]:
     """The card as one caller may see it: (body to show, sourced lines left out, whole).
 
-    Each source is judged by can_read_source: a document path (with a backslash) without its page
-    suffix, any other source ('register', 'user, 2026-...') as written. A document path written
-    outside brackets (the key documents of section D) is a source too. whole: every source of the
-    card is readable, and the body is then unchanged. Otherwise only the '- ' lines of sections
-    A, B and C whose sources are all readable are kept; the other sections (Summary, key documents...)
-    and unsourced text go, since nothing says where they come from; a section left without lines
-    goes too, and the text ends with 'k lines not shown with your rights.'. Nothing left: ''.
+    Each source is judged by can_read_source, without its page suffix: a document path, a note
+    ('register', 'user, 2026-...') or anything else, for the caller to tell apart (DOCUMENT_SOURCE,
+    NOTE_SOURCE). A document path written outside brackets (the key documents of section D) is a
+    source too. whole: the card cites at least one source and every source is readable; the body is
+    then unchanged. Otherwise only the '- ' lines of sections A, B and C whose sources are all
+    readable are kept; the other sections (Summary, key documents...) and unsourced text go, since
+    nothing says where they come from; a section left without lines goes too, and the text ends with
+    'k lines not shown with your rights.' ('1 line ...'; 'Some parts not shown with your rights.'
+    when no line of A, B or C was left out). Nothing left: ''.
     """
     def sources_readable(line: str) -> bool:
-        cited = [source_path(s) if "\\" in s else s.strip() for s in SOURCE.findall(line)]
+        cited = [source_path(s) for s in SOURCE.findall(line)]
         bare = [source_path(p.rstrip(" -")) for p in BARE_PATH.findall(SOURCE.sub("", line))]
         return all(can_read_source(s) for s in cited + bare)
 
@@ -286,7 +292,8 @@ def visible_card(card: Card, can_read_source: Callable[[str], bool]) -> tuple[st
         return bool(SOURCE.search(line)) and sources_readable(line)
 
     lines = card.body.split("\n")
-    if all(sources_readable(line) for line in lines):
+    cites = any(SOURCE.search(line) or BARE_PATH.search(SOURCE.sub("", line)) for line in lines)
+    if cites and all(sources_readable(line) for line in lines):  # a card citing nothing is never whole
         return card.body, 0, True
     kept: list[str] = []
     section: list[str] = []   # the heading of the current sourced section, until its first kept line
@@ -306,8 +313,8 @@ def visible_card(card: Card, can_read_source: Callable[[str], bool]) -> tuple[st
                 hidden += 1
     if not kept:
         return "", hidden, False
-    if hidden:
-        kept += ["", f"{hidden} lines not shown with your rights."]
+    kept += ["", f"{hidden} line{'s' if hidden > 1 else ''} not shown with your rights." if hidden
+             else "Some parts not shown with your rights."]
     return "\n".join(kept), hidden, False
 
 
