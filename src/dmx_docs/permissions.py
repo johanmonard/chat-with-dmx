@@ -40,6 +40,8 @@ class RefreshResult:
     missing_dropped: int = 0  # of those, folders not found on the file server (deleted or moved): rule dropped
     read: int = 0             # folders whose rule was read in this run
     allow_nobody: int = 0     # of those, folders whose rule allows nobody once local/builtin SIDs are dropped
+    deny_unjudged: list[str] = field(default_factory=list)  # folders made admins-only: a deny entry names
+                                                             # a local/builtin SID that cannot be judged here
 
 
 def domain_prefix(cfg) -> str:
@@ -126,9 +128,16 @@ def refresh_permissions(cfg, out_paths: list[Path], read_acl=aclsurvey.read_wind
     unreadable: list[tuple[str, str]] = []
     errors: dict[str, str] = {}
     read = allow_nobody = dropped = 0
+    deny_unjudged: list[str] = []
     for k, acl, err, gone in results:
         if acl is not None:
-            new_pairs[k] = (usable_sids(acl.allow, prefix), usable_sids(acl.deny, prefix))
+            allow, deny = usable_sids(acl.allow, prefix), usable_sids(acl.deny, prefix)
+            if deny != frozenset(acl.deny):
+                # A deny entry for BUILTIN\Users, a file-server local account...: on the file server it
+                # may shut out every domain user, here it cannot be judged. Fail closed: admins only.
+                allow = frozenset()
+                deny_unjudged.append(display.get(k, k))
+            new_pairs[k] = (allow, deny)
             read += 1
             if not new_pairs[k][0]:
                 allow_nobody += 1
@@ -175,7 +184,8 @@ def refresh_permissions(cfg, out_paths: list[Path], read_acl=aclsurvey.read_wind
     return RefreshResult(folders=len(display), rules=len(rule_sets), changed=changed, unreadable=unreadable,
                          docs_affected=docs_affected, version=version,
                          previous_from=str(prev_from) if prev is not None else "",
-                         missing=len(missing), missing_dropped=dropped, read=read, allow_nobody=allow_nobody)
+                         missing=len(missing), missing_dropped=dropped, read=read, allow_nobody=allow_nobody,
+                         deny_unjudged=deny_unjudged)
 
 
 def _not_found(e: Exception) -> bool:
@@ -207,7 +217,9 @@ def write_change_report(result: RefreshResult, out_dir: Path) -> Path:
              f"{result.missing:,} folders not in this machine's index, re-read from the file server; "
              f"{result.missing_dropped:,} dropped as deleted.",
              f"{result.allow_nobody:,} folders whose rule allows nobody after dropping local/builtin SIDs "
-             f"(of {result.read:,} read).", ""]
+             f"(of {result.read:,} read).",
+             f"{len(result.deny_unjudged):,} folders made admins-only: a deny entry names a local or built-in "
+             "account that cannot be judged outside the file server.", ""]
     warning = nobody_warning(result)
     if warning:
         lines[2:2] = [f"**{warning}**", ""]
@@ -216,6 +228,10 @@ def write_change_report(result: RefreshResult, out_dir: Path) -> Path:
         for folder, old, new in result.changed:
             lines.append(f"- {folder}: rule {old if old is not None else '-'} -> "
                          f"{new if new is not None else '-'}")
+        lines += [""]
+    if result.deny_unjudged:
+        lines += ["## Admins only (deny entry that cannot be judged)", ""]
+        lines += [f"- {path}" for path in result.deny_unjudged[:200]]
         lines += [""]
     if result.unreadable:
         lines += ["## Not readable (previous rule kept, none for a new folder)", ""]

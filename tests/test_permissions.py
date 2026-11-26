@@ -103,6 +103,30 @@ def test_unreadable_folder_keeps_its_previous_rule(world):
     assert key(root / "C") not in data.folder_rule
 
 
+def test_a_deny_entry_that_cannot_be_judged_makes_the_folder_admins_only(world, tmp_path):
+    # BUILTIN\Users (S-1-5-32-545) or a file-server local account in a deny entry: on the file server it
+    # may cover every domain user, here it means nothing. Dropping it would open the folder; it closes it.
+    cfg, root, out = world
+    r = refresh(cfg, out, {root / "A": acl(SALES, ENG, deny=("S-1-5-32-545",)),
+                           root / "B": acl(SALES, deny=(ENG, "S-1-5-21-9-1001"))})
+    data = AccessStore(out).load()
+    for folder in ("A", "B"):
+        allow, deny = data.rules[data.folder_rule[key(root / folder)]]
+        assert allow == frozenset(), folder
+    assert data.rules[data.folder_rule[key(root / "B")]][1] == {ENG}
+    assert sorted(r.deny_unjudged) == [str(root / "A"), str(root / "B")]
+    report = write_change_report(r, tmp_path / "reports").read_text(encoding="utf-8")
+    assert "2 folders made admins-only" in report and str(root / "A") in report
+
+
+def test_a_deny_entry_of_the_domain_is_kept_and_judged(world):
+    cfg, root, out = world
+    r = refresh(cfg, out, {root / "A": acl(SALES, ENG, deny=(ENG,)), root / "B": acl(ENG)})
+    data = AccessStore(out).load()
+    assert data.rules[data.folder_rule[key(root / "A")]] == ({SALES, ENG}, {ENG})
+    assert r.deny_unjudged == []
+
+
 def test_dropped_domains_and_unreadable_sids(world):
     cfg, root, out = world
     refresh(cfg, out, {root / "A": acl(SALES, "S-1-5-21-9-500", "S-1-3-0", "S-1-1-0"), root / "B": acl(ENG)})
