@@ -59,6 +59,13 @@ def usable_sids(sids: Iterable[str], domain_prefix: str) -> frozenset[str]:
     return frozenset(keep)
 
 
+def deny_judgeable(sid: str, domain_prefix: str) -> bool:
+    """Can a deny entry for this SID be judged from a caller's AD groups? Only Everyone, Authenticated
+    Users and the AD domain's accounts: NETWORK, INTERACTIVE, BUILTIN\\Users, a machine's local accounts...
+    may shut out every user on the file server but are never among a caller's groups here."""
+    return sid in KEEP_ALWAYS or (sid.startswith("S-1-5-21-") and sid.rpartition("-")[0] == domain_prefix)
+
+
 def may_read(caller_sids: frozenset[str], allow: frozenset[str], deny: frozenset[str]) -> bool:
     return bool(caller_sids & allow) and not (caller_sids & deny)
 

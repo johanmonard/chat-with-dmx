@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import aclsurvey
-from .access import AccessData, AccessStore, readonly_uri, usable_sids
+from .access import AccessData, AccessStore, deny_judgeable, readonly_uri, usable_sids
 
 log = logging.getLogger("dmx_docs.permissions")
 
@@ -131,10 +131,11 @@ def refresh_permissions(cfg, out_paths: list[Path], read_acl=aclsurvey.read_wind
     deny_unjudged: list[str] = []
     for k, acl, err, gone in results:
         if acl is not None:
-            allow, deny = usable_sids(acl.allow, prefix), usable_sids(acl.deny, prefix)
+            allow = usable_sids(acl.allow, prefix)
+            deny = frozenset(s for s in acl.deny if deny_judgeable(s, prefix))
             if deny != frozenset(acl.deny):
-                # A deny entry for BUILTIN\Users, a file-server local account...: on the file server it
-                # may shut out every domain user, here it cannot be judged. Fail closed: admins only.
+                # A deny entry for NETWORK, BUILTIN\Users, a file-server local account...: on the file
+                # server it may shut out every user, here it cannot be judged. Fail closed: admins only.
                 allow = frozenset()
                 deny_unjudged.append(display.get(k, k))
             new_pairs[k] = (allow, deny)

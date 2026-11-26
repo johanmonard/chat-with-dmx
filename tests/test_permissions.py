@@ -119,6 +119,19 @@ def test_a_deny_entry_that_cannot_be_judged_makes_the_folder_admins_only(world, 
     assert "2 folders made admins-only" in report and str(root / "A") in report
 
 
+def test_a_deny_entry_for_a_logon_kind_is_not_judged_either(world):
+    # NETWORK (S-1-5-2) or INTERACTIVE (S-1-5-4): on the file server a NETWORK deny shuts out every share
+    # user, but no caller's groups here ever hold it. Only Everyone, Authenticated Users and domain SIDs
+    # can be judged.
+    cfg, root, out = world
+    r = refresh(cfg, out, {root / "A": acl(SALES, deny=("S-1-5-2",)),
+                           root / "B": acl(SALES, deny=("S-1-5-11",))})
+    data = AccessStore(out).load()
+    assert data.rules[data.folder_rule[key(root / "A")]][0] == frozenset()
+    assert data.rules[data.folder_rule[key(root / "B")]] == ({SALES}, {"S-1-5-11"})
+    assert r.deny_unjudged == [str(root / "A")]
+
+
 def test_a_deny_entry_of_the_domain_is_kept_and_judged(world):
     cfg, root, out = world
     r = refresh(cfg, out, {root / "A": acl(SALES, ENG, deny=(ENG,)), root / "B": acl(ENG)})
