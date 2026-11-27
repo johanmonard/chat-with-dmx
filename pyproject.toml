@@ -17,6 +17,7 @@ dependencies = [
     "openpyxl>=3.1",
     "mcp>=1.2",
     "numpy>=1.26",
+    "faiss-cpu>=1.16",
     "fastembed>=0.8,<0.9",  # same version everywhere: vectors must stay comparable
     "fastapi>=0.110",
     "uvicorn>=0.29",

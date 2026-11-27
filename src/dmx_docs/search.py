@@ -22,6 +22,8 @@ RRF_K = 60
 THESAURUS_WEIGHT = 0.5  # weight of the thesaurus-expanded keyword list in the fusion
 MAX_PER_DOC = 3
 BLOCK_ROWS = 131072
+IVF_TRAIN_ROWS = 100_000  # rows the IVF cells are trained on
+IVF_ADD_ROWS = 200_000    # rows converted to float32 at a time when filling the IVF index
 # Vectors are stored as float16; below this size they are kept in RAM as
 # float32, which makes each query several times faster.
 FLOAT32_MAX_BYTES = 8 * 1024**3
@@ -143,6 +145,7 @@ class VectorIndex:
         self.version: str | None = None
         self.ids: np.ndarray | None = None
         self.mat: np.ndarray | None = None
+        self.ivf = None  # faiss IVF index (worlds of ivf_min_rows+ vectors), None for exact search
         self.lock = threading.Lock()
         self._rule_rows: tuple | None = None  # ((vector version, access version), int32 array)
 
@@ -153,9 +156,17 @@ class VectorIndex:
         safe = re.sub(r"[^0-9A-Za-z]", "", version)[:40] or "0"
         return d / f"vec_ids.{safe}.npy", d / f"vec_mat.{safe}.npy"
 
+    def _ivf_path(self, version: str):
+        safe = re.sub(r"[^0-9A-Za-z]", "", version)[:40] or "0"
+        return self.cfg.world_dir / f"vec_ivf.{safe}.faiss"
+
+    @property
+    def uses_ivf(self) -> bool:
+        return self.ivf is not None
+
     def _cleanup_old_caches(self, keep: str) -> None:
-        keep_names = {p.name for p in self._cache_paths(keep)}
-        for p in list(self.cfg.world_dir.glob("vec_*.npy")) + list(self.cfg.world_dir.glob("vec_*.tmp")) + list(self.cfg.world_dir.glob("vec_cache.json")):
+        keep_names = {p.name for p in self._cache_paths(keep)} | {self._ivf_path(keep).name}
+        for p in list(self.cfg.world_dir.glob("vec_*.npy")) + list(self.cfg.world_dir.glob("vec_ivf.*.faiss")) + list(self.cfg.world_dir.glob("vec_*.tmp")) + list(self.cfg.world_dir.glob("vec_cache.json")):
             if p.name not in keep_names:
                 try:
                     p.unlink()
@@ -178,9 +189,44 @@ class VectorIndex:
             if self.version != version or self.mat is None:
                 self._load_from_db(con, version)
             self._cleanup_old_caches(version)
-            if self.mat.nbytes * 2 <= FLOAT32_MAX_BYTES:
+            self.ivf = None
+            if len(self.ids) >= self.cfg.ivf_min_rows:
+                self.ivf = self._load_ivf(version)
+            if self.ivf is None and self.mat.nbytes * 2 <= FLOAT32_MAX_BYTES:
                 self.mat = np.asarray(self.mat, dtype=np.float32)
             return len(self.ids) > 0
+
+    def _load_ivf(self, version: str):
+        """The faiss IVF index of the current vectors: read from its cache file, else built and saved.
+        None when faiss is unavailable (exact search is used then)."""
+        try:
+            import faiss
+        except ImportError:
+            log.warning("faiss is not installed: exact vector search on a large world")
+            return None
+        path = self._ivf_path(version)
+        n, dim = self.mat.shape
+        if path.exists():
+            try:
+                index = faiss.read_index(str(path))
+                if index.ntotal == n and index.d == dim:
+                    return index
+            except (OSError, RuntimeError) as e:
+                log.warning("vector index file unreadable, rebuilding: %s", e)
+        nlist = min(self.cfg.ivf_lists, n)
+        index = faiss.IndexIVFScalarQuantizer(faiss.IndexFlatIP(dim), dim, nlist,
+                                              faiss.ScalarQuantizer.QT_fp16, faiss.METRIC_INNER_PRODUCT)
+        sample = np.sort(np.random.default_rng(0).choice(n, size=min(n, IVF_TRAIN_ROWS), replace=False))
+        index.train(np.asarray(self.mat[sample], dtype=np.float32))
+        for start in range(0, n, IVF_ADD_ROWS):
+            index.add(np.asarray(self.mat[start:start + IVF_ADD_ROWS], dtype=np.float32))
+        try:
+            tmp = path.with_name(path.stem + f".{os.getpid()}.tmp")
+            faiss.write_index(index, str(tmp))
+            os.replace(tmp, path)
+        except OSError as e:
+            log.warning("could not write vector index file: %s", e)
+        return index
 
     def _load_from_db(self, con, version: str) -> None:
         n = con.execute("SELECT count(*) FROM vectors").fetchone()[0]
@@ -240,6 +286,8 @@ class VectorIndex:
             # index replaced under the mask: show nothing rather than the wrong rows
             log.warning("semantic search skipped: access mask has %d rows, vector index %d", len(mask), n)
             return []
+        if self.ivf is not None:
+            return self._query_ivf(qvec, k, mask)
         q = qvec.astype(np.float32)
         scores = np.empty(n, dtype=np.float32)
         for start in range(0, n, BLOCK_ROWS):
@@ -254,6 +302,21 @@ class VectorIndex:
         top = np.argpartition(-scores, k - 1)[:k]
         top = top[np.argsort(-scores[top])]
         return [(int(self.ids[i]), float(scores[i])) for i in top]
+
+    def _query_ivf(self, qvec: np.ndarray, k: int, mask: np.ndarray | None) -> list[tuple[int, float]]:
+        import faiss
+        n = len(self.ids)
+        bitmap = None  # faiss does not own it: kept alive until the search returns
+        if mask is not None:
+            n = int(mask.sum())
+            if n == 0:
+                return []
+            bitmap = np.packbits(mask, bitorder="little")
+        k = min(k, n)
+        params = faiss.SearchParametersIVF(sel=faiss.IDSelectorBitmap(bitmap) if bitmap is not None else None,
+                                           nprobe=self.cfg.ivf_nprobe)
+        scores, rows = self.ivf.search(qvec.astype(np.float32)[None, :], k, params=params)
+        return [(int(self.ids[r]), float(sc)) for sc, r in zip(scores[0], rows[0]) if r != -1]
 
     def similarity(self, qvec: np.ndarray, chunk_ids: list[int]) -> dict[int, float]:
         """Cosine similarity between the query and the given chunks (vectors are normalized)."""

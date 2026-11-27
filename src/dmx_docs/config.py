@@ -50,6 +50,9 @@ class Config:
     max_read_chars: int = 40000
     thesaurus_path: str | None = None   # thesaurus.toml next to config.toml by default
     expand_synonyms: bool = False       # expand keyword searches with the thesaurus
+    ivf_min_rows: int = 200_000         # worlds with at least this many vectors use a faiss IVF index
+    ivf_lists: int = 2048               # IVF cells
+    ivf_nprobe: int = 64                # IVF cells searched per query
     register_path: str | None = None    # register.csv (installed machines) next to config.toml by default
     corrections_path: str | None = None  # corrections.csv (offers world: the user's own statuses and amounts)
     verified_dir: str | None = None     # offers world: the shared folder of verified offer records (verified.py)
@@ -233,6 +236,9 @@ def load_config(path: str | os.PathLike, world: str | None = None) -> Config:
         tp = Path(os.path.expandvars(str(thesaurus)))
         kwargs["thesaurus_path"] = str(tp if tp.is_absolute() else (path.parent / tp))
     kwargs["expand_synonyms"] = bool(srch.get("expand", False))
+    for key in ("ivf_min_rows", "ivf_lists", "ivf_nprobe"):
+        if key in srch:
+            kwargs[key] = int(srch[key])
     # The world map (world_map tool): maps\<world>.md next to config.toml, or [worlds.<name>] map.
     mp = Path(os.path.expandvars(str(w.get("map") or f"maps/{name or 'default'}.md")))
     kwargs["map_path"] = str(mp if mp.is_absolute() else (path.parent / mp))
