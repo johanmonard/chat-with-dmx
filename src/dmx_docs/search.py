@@ -225,7 +225,9 @@ class VectorIndex:
             ivf = None
             if len(ids) >= self.cfg.ivf_min_rows:
                 ivf = self._load_ivf(version, mat)
-            if ivf is None and mat.nbytes * 2 <= FLOAT32_MAX_BYTES:
+            if ivf is None and len(ids) < self.cfg.ivf_min_rows and mat.nbytes * 2 <= FLOAT32_MAX_BYTES:
+                # Small worlds only: a world that should have an IVF index (faiss missing or broken) keeps its
+                # float16 memory map and the block search, never a float32 copy in memory.
                 mat = np.asarray(mat, dtype=np.float32)
             self._snap = _Snapshot(version, ids, mat, ivf)
             return len(ids) > 0
@@ -243,8 +245,8 @@ class VectorIndex:
         None when faiss is unavailable (exact search is used then)."""
         try:
             import faiss
-        except ImportError:
-            log.warning("faiss is not installed: exact vector search on a large world")
+        except Exception as e:  # not only ImportError: a broken install (DLL, binary mismatch) fails otherwise
+            log.warning("faiss is not usable (%s: %s): exact vector search on a large world", type(e).__name__, e)
             return None
         path = self._ivf_path(version)
         n, dim = mat.shape

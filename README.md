@@ -410,7 +410,9 @@ access"). Employees do not install Python or an index: they install one extensio
 Claude Desktop, and the extension (`relay\dmx-relay.ps1`) talks to the server.
 
 Settings go in a `[central]` table of `config.toml` (all optional): `port` (8765), `admin_port` (8766),
-`workers` (4), `certfile` and `keyfile` (HTTPS when both are set).
+`workers` (4), `busy_seconds` (30: a call that waits longer for a worker gets "busy"), `caller_cache_seconds`
+(300: how long a signed-in caller and their access are kept), `certfile` and `keyfile` (HTTPS when both are
+set). `config.example.toml` shows them, with the `[search]` settings `ivf_min_rows`, `ivf_lists` and `ivf_nprobe`.
 
 1. **Machine environment variable.** The VM keeps the index on its data disk, not on `C:`:
    `setx DMX_RAG_LOCAL J:\chatwithdmx /M` (an administrator prompt). It must be a machine variable (`/M`) and
@@ -419,18 +421,29 @@ Settings go in a `[central]` table of `config.toml` (all optional): `port` (8765
    or restart the VM.
    Run launcher 1, then launcher 5 for each world, so that the local copies exist.
 2. **Start at boot.** A scheduled task "at startup" runs launcher 9 under the domain account
-   `ROTZINGERAG\dmx.datahub`, whether it is logged on or not (it asks for the password). IT must give that
-   account the right "Log on as a batch job" on the VM, for this and the other tasks that run without a user logged on:
-   `schtasks /Create /TN "DMX central" /SC ONSTART /RU ROTZINGERAG\dmx.datahub /RP * /TR "\"\\server\share\DMX-RAG\9 - Central server.cmd\""`
-   Use the UNC path of the shared folder: such a task has no mapped drives. Options go through,
-   e.g. `--worlds projects`.
+   `ROTZINGERAG\dmx.datahub`, whether it is logged on or not. IT must give that
+   account the right "Log on as a batch job" on the VM, for this and the other tasks that run without a user logged on.
+   Do not create this task with `schtasks /Create`: its defaults stop a task after 72 hours and nothing restarts it
+   after a crash. In an administrator PowerShell on the VM (the password is typed in the prompt):
+   ```
+   $cred = Get-Credential ROTZINGERAG\dmx.datahub
+   $action = New-ScheduledTaskAction -Execute '"\\server\share\DMX-RAG\9 - Central server.cmd"'
+   $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
+   Register-ScheduledTask -TaskName 'DMX central' -Action $action -Trigger (New-ScheduledTaskTrigger -AtStartup) -Settings $settings -User $cred.UserName -Password $cred.GetNetworkCredential().Password
+   ```
+   Use the UNC path of the shared folder: such a task has no mapped drives. Options such as `--worlds projects`
+   go with `-Argument` of `New-ScheduledTaskAction`.
+   Afterwards check the task's settings on the VM (Task Scheduler, tab Settings): no time limit, restart every
+   minute on failure (999 times), and the task is not stopped when it runs longer than expected.
 3. **Firewall.** Open the server's port, for the domain network only:
    `New-NetFirewallRule -DisplayName "dmx central" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow -Profile Domain`
    Only 8765 is opened. The admin listener (`127.0.0.1:8766`, pause and resume of a world while it is
    updated) listens on the VM itself only and needs no rule.
 4. **Nightly updates.** A GPU machine updates the worlds with launcher 7 (section 6). On the VM, one task per
    world copies the new index: it runs the script directly, not launcher 5 (launchers 5 and 7 end with `pause`,
-   which would keep an unattended task waiting for a key press for ever and block the following nights):
+   which would keep an unattended task waiting for a key press for ever and block the following nights).
+   Stagger the tasks: one world at a time, about 30 minutes apart (e.g. projects at 06:00, the next world at
+   06:30, and so on), not all at 06:00, so that the copies and the search-cache builds do not load the VM together:
    `schtasks /Create /TN "DMX pull projects" /SC DAILY /ST 06:00 /RU ROTZINGERAG\dmx.datahub /RP * /TR "powershell -NoProfile -ExecutionPolicy Bypass -File \"\\server\share\DMX-RAG\app\scripts\dmx.ps1\" pull -World projects"`
    A daily task runs launcher 8 (`permissions`, section 6) to refresh who may read what; launchers 8 and 9
    are safe unattended. Use UNC paths, as in section 6. `pull` pauses that world on the central server
@@ -439,7 +452,10 @@ Settings go in a `[central]` table of `config.toml` (all optional): `port` (8765
    `powershell -ExecutionPolicy Bypass -File dmx-relay.ps1 -WhoAmI -Url http://dmx-ws-vm01:8765/projects/mcp`
    The answer must show your `ROTZINGERAG\name` and a group count. On the VM,
    `dmx.ps1 check-ntlm` runs the same test against the server's own name (HTTPS when `certfile` is set).
-6. **The extensions.** `python scripts\build_extensions.py --config config.toml --out dist` writes
+6. **The extensions.** Run `scripts\build_extensions.py` with the python of the environment
+   (`C:\dmx-rag\venv\Scripts\python.exe`, or `%DMX_RAG_LOCAL%\venv\Scripts\python.exe` where `DMX_RAG_LOCAL` is set,
+   e.g. `J:\chatwithdmx\venv\Scripts\python.exe` on the VM):
+   `<that python> scripts\build_extensions.py --config config.toml --out dist` writes
    `dist\dmx-<world>.mcpb`, one per world (open a file in Claude Desktop to install it). Each asks for
    the server address (default `http://dmx-ws-vm01:8765`) and for `allowed_hosts`, the file servers a
    document may be opened from. Enter them exactly as they appear in the document paths
@@ -447,6 +463,7 @@ Settings go in a `[central]` table of `config.toml` (all optional): `port` (8765
 
 Things to know:
 
+* **One message at a time.** The relay handles one message at a time, so a slow call delays the next one of the same user.
 * **Domain accounts only.** Only `ROTZINGERAG` domain accounts can sign in. A local account of the VM is refused.
 * **No reverse proxy** in front of the server. NTLM ties the sign-in to one TCP connection, which a proxy breaks.
 * **NTLMv2 only.** Check with IT that the VM and the PCs use NTLMv2 only (`LmCompatibilityLevel` 5).

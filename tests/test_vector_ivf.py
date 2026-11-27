@@ -177,3 +177,34 @@ def test_ivf_query_in_progress_keeps_its_own_snapshot(ivf_world):
     assert len(snap.ids) == N and snap.ivf.ntotal == N  # the old one stays consistent
     assert [c for c, _ in vi.query(q, 10)] == _exact(vecs[:2500], q, 10)
     assert before == _exact(vecs, q, 10)
+
+
+@pytest.mark.parametrize("error", [ImportError("no faiss"), OSError("DLL load failed")])
+def test_without_usable_faiss_a_large_world_keeps_float16_and_the_block_search(tmp_path, make_cfg, monkeypatch, caplog, error):
+    import builtins
+    import logging
+
+    real_import = builtins.__import__
+
+    def failing_import(name, *args, **kwargs):
+        if name == "faiss":
+            raise error
+        return real_import(name, *args, **kwargs)
+
+    rng = np.random.default_rng(1)
+    vecs = rng.normal(size=(N, DIM)).astype(np.float32)
+    vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
+    cfg = make_cfg(tmp_path / "docs", ivf_min_rows=1000, ivf_lists=8, ivf_nprobe=8)
+    con = store.connect(cfg.db_path)
+    _fill(con, vecs)
+    monkeypatch.setattr(builtins, "__import__", failing_import)
+    caplog.set_level(logging.WARNING)
+    vi = VectorIndex(cfg)
+    assert vi.ensure(con)
+    monkeypatch.undo()
+    assert not vi.uses_ivf
+    assert vi.mat.dtype == np.float16            # N >= ivf_min_rows: never converted to float32
+    assert "faiss is not usable" in caplog.text
+    for q in _queries(vecs):
+        assert [c for c, _ in vi.query(q, 10)] == _exact(vecs, q, 10)   # block search, same answer
+    con.close()

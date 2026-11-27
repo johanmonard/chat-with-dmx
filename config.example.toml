@@ -144,6 +144,24 @@ max_read_chars = 40000
 # admins = ['EXAMPLEDOM\admin-account']
 # domain_sid = 'S-1-5-21-1111111111-2222222222-3333333333'
 
+# The central server (`dmx.ps1 serve-all`, launcher 9, on the VM): every world with access = "acl" in one
+# process, signed in with Windows. Every setting is optional; the values below are the defaults.
+# [central]
+# port = 8765                  # the signed-in listener: https://<machine>:<port>/<world>/mcp
+# admin_port = 8766            # pause/resume of a world for its update: 127.0.0.1 only, plain HTTP
+# workers = 4                  # tool calls running at once, all worlds together
+# busy_seconds = 30            # a call waiting longer than this for a worker gets "busy"
+# caller_cache_seconds = 300   # signed-in callers and their per-world access are kept this long
+# certfile = 'C:\dmx-rag\server.pem'   # HTTPS when both are set (relative paths: next to config.toml)
+# keyfile = 'C:\dmx-rag\server.key'
+
+# Vector search in very large worlds: from ivf_min_rows vectors a faiss IVF index is used instead of the
+# exact search (the values below are the defaults). Without faiss the exact search goes on.
+# [search]
+# ivf_min_rows = 200000
+# ivf_lists = 2048
+# ivf_nprobe = 64
+
 # OCR of scanned PDF pages (`dmx-docs ocr`, part of launcher 7). Uses the Tesseract engine built
 # into PyMuPDF; only the language files are needed (tessdata_best from
 # github.com/tesseract-ocr, e.g. fra.traineddata). 'fra' also reads English, German and Spanish

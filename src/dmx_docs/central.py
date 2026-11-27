@@ -370,6 +370,19 @@ def build_admin_app(served: dict[str, World]) -> Starlette:
                              Route("/_admin/{world}/resume", admin, methods=["POST"])])
 
 
+class RefuseOrigin:
+    """ASGI middleware: 403 for any HTTP request that carries an Origin header (browsers send it; the relay does not)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and any(name == b"origin" for name, _ in scope.get("headers") or []):
+            await JSONResponse({"error": "Browser requests are not accepted."}, status_code=403)(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
 def build_app(config_path: Path, worlds: list[str] | None = None, auth: bool = True,
               admin_port: int | None = None) -> Starlette:
     """Every world of the config (or those named) at /<world>/mcp, and GET /_whoami, behind the NTLM
@@ -426,7 +439,9 @@ def build_app(config_path: Path, worlds: list[str] | None = None, auth: bool = T
                 stack.push_async_callback((await _start_admin(build_admin_app(served), admin_port)))
             yield
 
-    middleware = []
+    # The relay never sends an Origin header: one that carries it is a web page in a browser (it would get the
+    # sign-in challenge and the user's Windows identity). Refused before the NTLM sign-in.
+    middleware = [Middleware(RefuseOrigin)]
     if auth:
         middleware.append(Middleware(NtlmAuth, make_caller=functools.partial(_caller_from_token, first.access_admins),
                                      cache_seconds=first.central_caller_cache_seconds,

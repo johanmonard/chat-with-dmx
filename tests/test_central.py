@@ -553,6 +553,17 @@ def test_the_main_app_does_not_serve_the_admin_routes_and_signs_in_first(two_wor
         assert client.post("/_admin/projects/pause").status_code == 404
 
 
+def test_the_main_listener_refuses_a_browser_origin_before_the_sign_in(two_worlds):
+    app = central.build_app(two_worlds, auth=True)
+    with TestClient(app) as client:
+        r = client.get("/_whoami", headers={"Origin": "http://evil.example"})
+        assert r.status_code == 403 and "www-authenticate" not in r.headers   # no challenge for a browser
+        r = client.post("/projects/mcp", headers={"Origin": "http://evil.example"}, content="{}")
+        assert r.status_code == 403 and "www-authenticate" not in r.headers
+        assert client.get("/_whoami").status_code == 401   # the relay (no Origin) still gets the sign-in
+        assert "www-authenticate" in client.get("/_whoami").headers
+
+
 def test_the_admin_listener_runs_in_the_server_on_loopback_only(two_worlds):
     import socket
 

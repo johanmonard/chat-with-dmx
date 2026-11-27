@@ -160,8 +160,22 @@ function Install-Env {
     Say 'Environment ready.'
 }
 
+function Test-CentralRunning {
+    # True when the central server (serve-all) of this machine runs from this environment's python or settings.
+    $found = Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+        Where-Object { $_.CommandLine -match 'dmx_docs\.cli' -and $_.CommandLine -match ' serve-all(\s|$)' -and
+                       ($_.CommandLine -match [regex]::Escape($Py) -or $_.CommandLine -match [regex]::Escape($LocalConfig)) }
+    [bool]$found
+}
+
 function Assert-Env {
-    if (-not (Test-Path $Py) -or -not (Test-Path $Stamp) -or (Get-Content $Stamp) -ne (Get-CodeStamp)) { Install-Env }
+    if ((Test-Path $Py) -and (Test-Path $Stamp) -and (Get-Content $Stamp) -eq (Get-CodeStamp)) { return }
+    if ((Test-Path $Py) -and (Test-CentralRunning)) {
+        # Reinstalling the packages under the running server breaks it: the stamp stays, so the next run tries again.
+        Say 'The central server is running: the code was not updated. Restart the central server (scheduled task) to update it.'
+        return
+    }
+    Install-Env
 }
 
 function Sync-Models {
@@ -271,12 +285,11 @@ function Stop-LocalServers([string]$world) {
 }
 
 function Get-CentralAdminPort {
-    # The admin port of the central server (serve-all) on this machine, from the [central] table of the shared
-    # config (default 8766); $null when the config has no [central] table.
+    # The admin port of the central server (serve-all) on this machine: admin_port of the [central] table of the
+    # shared config, 8766 when the table or the setting is missing (every [central] setting is optional).
     $text = Get-Content $SharedConfig -Raw
     $table = [regex]::Match($text, '(?ms)^\s*\[central\](.*?)(?=^\s*\[|\z)')
-    if (-not $table.Success) { return $null }
-    if ($table.Groups[1].Value -match '(?m)^\s*admin_port\s*=\s*(\d+)') { [int]$Matches[1] } else { 8766 }
+    if ($table.Success -and $table.Groups[1].Value -match '(?m)^\s*admin_port\s*=\s*(\d+)') { [int]$Matches[1] } else { 8766 }
 }
 
 function Get-CentralSetting([string]$name) {
@@ -302,9 +315,8 @@ function Invoke-CentralAdmin([int]$port, [string]$action) {
 function Suspend-CentralWorld {
     # The central server stops answering for this world and lets go of its files; the other worlds go on.
     # Returns the admin port when Resume-CentralWorld must follow (also after a pause that was not confirmed,
-    # the resume is harmless), $null when no central server is configured or none runs here.
+    # the resume is harmless), $null when no central server runs here (the loopback connection is refused at once).
     $port = Get-CentralAdminPort
-    if (-not $port) { return $null }
     $r = Invoke-CentralAdmin $port 'pause'
     if ($r.Status -eq 'down') { return $null }
     if ($r.Status -eq 'ok' -and $r.Answer.paused) { Say "The central server is paused for '$World' (calls still running: $($r.Answer.running))." }

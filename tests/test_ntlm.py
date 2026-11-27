@@ -86,6 +86,16 @@ def test_no_header_gets_401_ntlm():
     assert app.calls == 0
 
 
+def test_the_first_leg_without_a_header_is_logged_at_debug_other_refusals_at_info(caplog):
+    client = _client(NtlmAuth(EchoApp(), CountingMaker()), 1111)
+    with caplog.at_level("DEBUG", logger="dmx_docs.ntlm"):
+        client.get("/projects/mcp")
+        client.get("/projects/mcp", headers={"Authorization": "Basic dXNlcjpwYXNz"})
+    records = [(r.levelname, r.getMessage()) for r in caplog.records if "refused" in r.getMessage()]
+    assert [lvl for lvl, m in records if "no Authorization header" in m] == ["DEBUG"]
+    assert [lvl for lvl, m in records if "not an NTLM Authorization header" in m] == ["INFO"]
+
+
 def test_other_schemes_get_401_ntlm():
     app = EchoApp()
     client = _client(NtlmAuth(app, CountingMaker()), 1111)

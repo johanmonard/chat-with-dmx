@@ -549,7 +549,7 @@ def test_pull_mirrors_verified_folder(ready):
 # --- pull and the central server (serve-all) ----------------------------------------------------------
 
 @contextlib.contextmanager
-def admin_stub(answers=None):
+def admin_stub(answers=None, port=0):
     """A stand-in for the central server's admin routes on 127.0.0.1: records (method, path) in order."""
     import http.server
     import json
@@ -576,7 +576,7 @@ def admin_stub(answers=None):
         def log_message(self, *a):
             pass
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    server = http.server.HTTPServer(("127.0.0.1", port), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -645,11 +645,52 @@ def test_pull_without_a_central_server_just_pulls(ready):
     assert (local / "data" / "projects" / "index.sqlite3").read_bytes() == (shared / "worlds" / "projects" / "index.sqlite3").read_bytes()
 
 
-def test_pull_without_a_central_table_does_not_call_it(ready):
-    shared, local, env = ready
-    with admin_stub(ANSWERS) as (port, seen):
+def test_pull_without_a_central_table_still_pauses_on_the_default_port(ready):
+    shared, local, env = ready   # every [central] setting is optional: a server with the defaults listens on 8766
+    try:
+        stub = admin_stub(ANSWERS, port=8766)
+        port, seen = stub.__enter__()
+    except OSError:
+        pytest.skip("port 8766 is in use on this machine")
+    try:
         r = run(shared, local, "pull", "-World", "projects", env=env)
-    assert r.returncode == 0 and seen == []
+    finally:
+        stub.__exit__(None, None, None)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert seen == [("POST", "/_admin/projects/pause"), ("POST", "/_admin/projects/resume")]
+
+
+def test_pull_on_a_machine_without_a_central_table_or_server_just_pulls(ready):
+    shared, local, env = ready   # nothing listens on 8766: the refused connection is quiet and instant
+    r = run(shared, local, "pull", "-World", "projects", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "paused" not in r.stdout and "again" not in r.stdout and "WARNING" not in r.stdout
+    assert (local / "data" / "projects" / "index.sqlite3").read_bytes() == (shared / "worlds" / "projects" / "index.sqlite3").read_bytes()
+
+
+def test_a_stale_environment_is_not_reinstalled_under_a_running_serve_all(ready):
+    shared, local, env = ready
+    (local / "installed.txt").write_text("stale", encoding="ascii")   # the code changed: Assert-Env would reinstall
+    config = str(local / "config.toml")
+    everyone = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", "dmx_docs.cli", "--config", config, "serve-all"])
+    try:
+        import time
+        time.sleep(1)
+        r = run(shared, local, "status", "-World", "projects", env=env)
+    finally:
+        everyone.kill()
+        everyone.wait()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "The central server is running: the code was not updated. Restart the central server (scheduled task) to update it." in text(r)
+    assert (local / "installed.txt").read_text(encoding="ascii") == "stale"   # unchanged: the next run tries again
+    assert "uv.exe not found" not in text(r)
+
+
+def test_a_stale_environment_is_reinstalled_when_no_serve_all_runs(ready):
+    shared, local, env = ready
+    (local / "installed.txt").write_text("stale", encoding="ascii")
+    r = run(shared, local, "status", "-World", "projects", env=env)
+    assert "uv.exe not found" in text(r)   # the install was tried (this fake share has no uv.exe)
 
 
 def test_stop_local_servers_leaves_serve_all_running(ready):

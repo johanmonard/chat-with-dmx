@@ -40,6 +40,10 @@ class _Refused(Exception):
     """The request is not signed in; the text says why (for the log, never a token)."""
 
 
+class _NoHeader(_Refused):
+    """No Authorization header: the normal first leg of every call, logged at DEBUG only."""
+
+
 def _message_type(blob: bytes) -> int:
     if len(blob) < 12 or blob[:8] != _SIGNATURE:
         raise _Refused("not an NTLM message")
@@ -147,7 +151,8 @@ class NtlmAuth:
         try:
             caller, challenge = await self._sign_in(scope)
         except _Refused as e:
-            log.info("NTLM sign-in refused for %s: %s", self._who(scope), e)
+            log.log(logging.DEBUG if isinstance(e, _NoHeader) else logging.INFO,
+                    "NTLM sign-in refused for %s: %s", self._who(scope), e)
             await self._unauthorized(send, None)
             return
         except Exception as e:  # never let a failed sign-in become a 500 or reach the app
@@ -185,7 +190,7 @@ class NtlmAuth:
         key = (str(client[0]), int(client[1]))
         values = [v for k, v in scope.get("headers") or [] if k.lower() == b"authorization"]
         if not values:
-            raise _Refused("no Authorization header")
+            raise _NoHeader("no Authorization header")
         if len(values) > 1:
             raise _Refused("several Authorization headers")
         if len(values[0]) > MAX_HEADER:

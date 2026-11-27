@@ -115,6 +115,14 @@ def test_request_and_response_pass_through_unchanged(stub):
     assert req["headers"]["Accept"] == "application/json, text/event-stream"
 
 
+def test_requests_bypass_the_system_proxy(stub):
+    assert "$req.Proxy = $null" in RELAY.read_text(encoding="ascii")   # direct LAN connection, no proxy in between
+    msg = {"jsonrpc": "2.0", "id": 8, "method": "tools/list", "params": {}}
+    out, err = run_relay(stub.url, [msg])   # and a request still works against the stub
+    assert out_lines(out) == [{"jsonrpc": "2.0", "id": 8, "result": {"echo": msg}}]
+    assert err == b""
+
+
 def test_french_text_round_trips(stub):
     text = "pr\u00e9henseur \u00e0 ventouses \u00ab \u00e7 \u00bb"
     msg = {"jsonrpc": "2.0", "id": "a", "method": "tools/call", "params": {"arguments": {"query": text}}}

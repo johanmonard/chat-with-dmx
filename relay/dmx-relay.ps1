@@ -42,6 +42,7 @@ $cache.Add((New-Object System.Uri($uri.GetLeftPart([System.UriPartial]::Authorit
 function Send-Http([string]$target, [string]$method, [string]$body) {
     $req = [System.Net.HttpWebRequest]::Create($target)
     $req.Method = $method
+    $req.Proxy = $null   # direct connection on the LAN: never through a system or browser proxy
     $req.Credentials = $cache
     $req.PreAuthenticate = $false
     $req.AllowAutoRedirect = $false
