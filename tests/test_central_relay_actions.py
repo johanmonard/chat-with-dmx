@@ -177,3 +177,21 @@ def test_offer_verify_refuses_a_revision_the_caller_cannot_read(verifying):
     assert out.startswith("Verified:"), out
     users = [json.loads(p.read_text(encoding="utf-8"))["user"] for p in shared.glob("*.json")]
     assert users == ["DMX\\sales"]
+
+
+def test_central_export_refuses_a_picture_over_the_size_limit(two_worlds, client, monkeypatch):
+    from dmx_docs import server
+    monkeypatch.setattr(server, "RELAY_EXPORT_MAX_BYTES", 1024)  # the real limit is 8 MB
+    is_error, text = call(client, "projects", "export_image", {"path": offre_a(two_worlds)}, caller="sales")
+    assert is_error and "too large to send through the server" in text and "open_document" in text
+    assert not text.startswith(MARKER) and "Offre" not in text  # no data, no path
+    monkeypatch.setattr(server, "RELAY_EXPORT_MAX_BYTES", 8 * 1024 * 1024)
+    assert call(client, "projects", "export_image", {"path": offre_a(two_worlds)}, caller="sales")[1].startswith(MARKER)
+
+
+def test_local_export_has_no_size_limit(tools, tmp_path, monkeypatch):
+    from dmx_docs import server
+    monkeypatch.setattr(server, "RELAY_EXPORT_MAX_BYTES", 1)
+    t, root = tools
+    t.cfg.export_dir = str(tmp_path / "exports")
+    assert t.export_image(str(root / "THOR" / "Schema.pdf")).startswith("Saved")

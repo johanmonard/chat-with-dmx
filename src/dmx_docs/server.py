@@ -19,6 +19,11 @@ try:
 except Exception:  # pragma: no cover
     READ_ONLY = None
 
+try:  # the text of a ToolError reaches the caller as it is (it holds no argument)
+    from mcp.server.mcpserver.exceptions import ToolError
+except ImportError:  # mcp 1.x
+    from mcp.server.fastmcp.exceptions import ToolError
+
 from .config import Config
 from .access import Caller
 from . import sources
@@ -259,6 +264,7 @@ code) from a description.
 """
 
 
+RELAY_EXPORT_MAX_BYTES = 8 * 1024 * 1024  # a picture sent through the server to the relay (central export only)
 RELAY_MARKER = "DMX-RELAY "  # a tool result that starts with it is an action for the relay on the person's PC
 
 
@@ -508,6 +514,11 @@ def build_server(cfg: Config, caller: Caller | None = None, central: bool = Fals
         """
         if central:  # nothing is written here: the relay on the user's PC saves the picture
             data, out_ext, default, what = tools.export_image_data(path, page=page, region=region, image=image)
+            if len(data) > RELAY_EXPORT_MAX_BYTES:
+                raise ToolError(f"This picture is too large to send through the server "
+                                f"({len(data) / 1024 / 1024:.1f} MB, the limit is "
+                                f"{RELAY_EXPORT_MAX_BYTES // 1024 // 1024} MB). "
+                                "Open the document with open_document instead.")
             return relay_marker({"action": "save", "file": (_safe_name(name) if name else default) + out_ext,
                                  "what": what, "source": sources.clean_path(path),
                                  "data": base64.b64encode(data).decode("ascii")})
