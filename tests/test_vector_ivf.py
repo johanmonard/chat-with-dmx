@@ -7,7 +7,7 @@ import pytest
 from dmx_docs import store
 from dmx_docs.search import VectorIndex
 
-N, DIM = 3000, 32
+N, DIM = 3000, 256  # 256: the width of the test embedder (hash:256)
 
 
 def _fill(con, vecs, first_id=1):
@@ -101,3 +101,79 @@ def test_small_world_keeps_exact_search(tmp_path, make_cfg):
     assert not list(cfg.world_dir.glob("vec_ivf.*"))
     assert [c for c, _ in vi.query(vecs[0], 3)][0] == 1
     con.close()
+
+
+def test_ivf_ignores_a_corrupt_or_stale_index_file_and_rebuilds_it(ivf_world):
+    import faiss
+    cfg, con, vi, vecs = ivf_world
+    path = next(cfg.world_dir.glob("vec_ivf.*.faiss"))
+    q = _queries(vecs)[0]
+    path.write_bytes(b"not a faiss file")
+    broken = VectorIndex(cfg)
+    assert broken.ensure(con) and broken.uses_ivf
+    assert faiss.read_index(str(path)).ntotal == N  # replaced by a good file
+    assert [c for c, _ in broken.query(q, 10)] == _exact(vecs, q, 10)
+    # a readable file with the wrong number of rows is stale too
+    stale = faiss.read_index(str(path))
+    stale.remove_ids(faiss.IDSelectorRange(0, 100))
+    faiss.write_index(stale, str(path))
+    again = VectorIndex(cfg)
+    assert again.ensure(con) and again.ivf.ntotal == N
+    assert faiss.read_index(str(path)).ntotal == N
+    assert [c for c, _ in again.query(q, 10)] == _exact(vecs, q, 10)
+
+
+def test_ivf_search_path_with_no_readable_rows_is_empty(ivf_world):
+    from dmx_docs.search import Searcher
+    cfg, con, vi, vecs = ivf_world
+    searcher = Searcher(cfg)
+    none = np.zeros(N, dtype=bool)
+    assert searcher.semantic(con, "pompe", 10, none)[0] == []
+    assert searcher.search(con, "pompe", mode="semantic", row_mask=none) == []
+    assert searcher.vectors.uses_ivf
+    assert len(searcher.semantic(con, "pompe", 10)[0]) == 10  # not masked: results
+
+
+def test_ivf_similarity_reads_the_float16_rows(ivf_world):
+    cfg, con, vi, vecs = ivf_world
+    assert vi.uses_ivf and vi.mat.dtype == np.float16
+    q = _queries(vecs)[0]
+    ids = [1, 7, 2999, 3000, 99999]  # the last one does not exist
+    got = vi.similarity(q, ids)
+    assert set(got) == {1, 7, 2999, 3000}
+    for c, sim in got.items():
+        assert sim == pytest.approx(float(vecs[c - 1] @ q), abs=1e-2)
+    assert vi.mat.dtype == np.float16  # still not converted by similarity()
+
+
+class _NoSearch:
+    """A faiss index stand-in that must never be searched."""
+    def __init__(self, ntotal):
+        self.ntotal = ntotal
+
+    def search(self, *a, **kw):
+        raise AssertionError("faiss search must not be called")
+
+
+def test_ivf_mask_or_index_of_another_size_returns_nothing_without_searching(ivf_world):
+    from dataclasses import replace
+    cfg, con, vi, vecs = ivf_world
+    q = _queries(vecs)[0]
+    vi._snap = replace(vi._snap, ivf=_NoSearch(N))
+    assert vi.query(q, 10, np.ones(N - 1, dtype=bool)) == []  # mask of another length
+    vi._snap = replace(vi._snap, ivf=_NoSearch(N - 5))
+    assert vi.query(q, 10, np.ones(N, dtype=bool)) == []  # index of another size than the ids
+    assert vi.query(q, 10) == []
+
+
+def test_ivf_query_in_progress_keeps_its_own_snapshot(ivf_world):
+    cfg, con, vi, vecs = ivf_world
+    q = _queries(vecs)[0]
+    before = [c for c, _ in vi.query(q, 10)]
+    snap = vi._snap
+    _fill(con, vecs[:2500])
+    assert vi.ensure(con)  # reload replaces the snapshot as a whole
+    assert vi._snap is not snap and len(vi.ids) == 2500
+    assert len(snap.ids) == N and snap.ivf.ntotal == N  # the old one stays consistent
+    assert [c for c, _ in vi.query(q, 10)] == _exact(vecs[:2500], q, 10)
+    assert before == _exact(vecs, q, 10)

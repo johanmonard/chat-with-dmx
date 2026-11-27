@@ -7,7 +7,7 @@ import os
 import re
 import threading
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 import numpy as np
@@ -137,17 +137,49 @@ def parse_date(value: str | None) -> float | None:
     raise ValueError(f"Invalid date '{value}', use YYYY, YYYY-MM or YYYY-MM-DD")
 
 
+@dataclass(frozen=True)
+class _Snapshot:
+    """ids, vectors and faiss index of one vector version, replaced as a whole (never changed in place)."""
+    version: str
+    ids: np.ndarray
+    mat: np.ndarray
+    ivf: object = None  # faiss IVF index (worlds of ivf_min_rows+ vectors), None for exact search
+
+
 class VectorIndex:
     """All chunk vectors in memory (memory-mapped .npy cache, rebuilt when the index changes)."""
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.version: str | None = None
-        self.ids: np.ndarray | None = None
-        self.mat: np.ndarray | None = None
-        self.ivf = None  # faiss IVF index (worlds of ivf_min_rows+ vectors), None for exact search
+        # One snapshot, replaced in a single assignment: a query reads it once, so a reload running
+        # at the same time can never pair an index with the ids or mask of another version.
+        self._snap: _Snapshot | None = None
         self.lock = threading.Lock()
         self._rule_rows: tuple | None = None  # ((vector version, access version), int32 array)
+
+    @property
+    def version(self) -> str | None:
+        return self._snap.version if self._snap else None
+
+    @property
+    def ids(self) -> np.ndarray | None:
+        return self._snap.ids if self._snap else None
+
+    @ids.setter
+    def ids(self, value) -> None:
+        self._snap = None if value is None or self._snap is None else replace(self._snap, ids=value)
+
+    @property
+    def mat(self) -> np.ndarray | None:
+        return self._snap.mat if self._snap else None
+
+    @mat.setter
+    def mat(self, value) -> None:
+        self._snap = None if value is None or self._snap is None else replace(self._snap, mat=value)
+
+    @property
+    def ivf(self):
+        return self._snap.ivf if self._snap else None
 
     def _cache_paths(self, version: str):
         # One file pair per vector version: a new cache never has to replace a file that
@@ -176,27 +208,29 @@ class VectorIndex:
     def ensure(self, con) -> bool:
         version = store.get_meta(con, "vec_version", "0")
         with self.lock:
-            if version == self.version and self.mat is not None:
-                return len(self.ids) > 0
+            snap = self._snap
+            if snap is not None and snap.version == version:
+                return len(snap.ids) > 0
             ids_p, mat_p = self._cache_paths(version)
+            ids = mat = None
             try:
                 if ids_p.exists() and mat_p.exists():
-                    self.ids = np.load(ids_p, mmap_mode="r")
-                    self.mat = np.load(mat_p, mmap_mode="r")
-                    self.version = version
+                    ids = np.load(ids_p, mmap_mode="r")
+                    mat = np.load(mat_p, mmap_mode="r")
             except (OSError, ValueError):
-                pass
-            if self.version != version or self.mat is None:
-                self._load_from_db(con, version)
+                ids = mat = None
+            if ids is None or mat is None:
+                ids, mat = self._load_from_db(con, version)
             self._cleanup_old_caches(version)
-            self.ivf = None
-            if len(self.ids) >= self.cfg.ivf_min_rows:
-                self.ivf = self._load_ivf(version)
-            if self.ivf is None and self.mat.nbytes * 2 <= FLOAT32_MAX_BYTES:
-                self.mat = np.asarray(self.mat, dtype=np.float32)
-            return len(self.ids) > 0
+            ivf = None
+            if len(ids) >= self.cfg.ivf_min_rows:
+                ivf = self._load_ivf(version, mat)
+            if ivf is None and mat.nbytes * 2 <= FLOAT32_MAX_BYTES:
+                mat = np.asarray(mat, dtype=np.float32)
+            self._snap = _Snapshot(version, ids, mat, ivf)
+            return len(ids) > 0
 
-    def _load_ivf(self, version: str):
+    def _load_ivf(self, version: str, mat: np.ndarray):
         """The faiss IVF index of the current vectors: read from its cache file, else built and saved.
         None when faiss is unavailable (exact search is used then)."""
         try:
@@ -205,7 +239,7 @@ class VectorIndex:
             log.warning("faiss is not installed: exact vector search on a large world")
             return None
         path = self._ivf_path(version)
-        n, dim = self.mat.shape
+        n, dim = mat.shape
         if path.exists():
             try:
                 index = faiss.read_index(str(path))
@@ -217,9 +251,9 @@ class VectorIndex:
         index = faiss.IndexIVFScalarQuantizer(faiss.IndexFlatIP(dim), dim, nlist,
                                               faiss.ScalarQuantizer.QT_fp16, faiss.METRIC_INNER_PRODUCT)
         sample = np.sort(np.random.default_rng(0).choice(n, size=min(n, IVF_TRAIN_ROWS), replace=False))
-        index.train(np.asarray(self.mat[sample], dtype=np.float32))
+        index.train(np.asarray(mat[sample], dtype=np.float32))
         for start in range(0, n, IVF_ADD_ROWS):
-            index.add(np.asarray(self.mat[start:start + IVF_ADD_ROWS], dtype=np.float32))
+            index.add(np.asarray(mat[start:start + IVF_ADD_ROWS], dtype=np.float32))
         try:
             tmp = path.with_name(path.stem + f".{os.getpid()}.tmp")
             faiss.write_index(index, str(tmp))
@@ -228,7 +262,7 @@ class VectorIndex:
             log.warning("could not write vector index file: %s", e)
         return index
 
-    def _load_from_db(self, con, version: str) -> None:
+    def _load_from_db(self, con, version: str) -> tuple[np.ndarray, np.ndarray]:
         n = con.execute("SELECT count(*) FROM vectors").fetchone()[0]
         first = con.execute("SELECT vec FROM vectors LIMIT 1").fetchone()
         dim = len(first[0]) // 2 if first else 0
@@ -241,22 +275,24 @@ class VectorIndex:
             ids[i] = row[0]
             mat[i] = np.frombuffer(row[1], dtype=np.float16)
             i += 1
-        self.ids, self.mat, self.version = ids[:i], mat[:i], version
+        ids, mat = ids[:i], mat[:i]
         ids_p, mat_p = self._cache_paths(version)
         try:
             # ids last: a cache counts as complete only when both files exist.
-            for p, arr in ((mat_p, self.mat), (ids_p, self.ids)):
+            for p, arr in ((mat_p, mat), (ids_p, ids)):
                 tmp = p.with_name(p.stem + f".{os.getpid()}.tmp")
                 with open(tmp, "wb") as f:
                     np.save(f, arr)
                 os.replace(tmp, p)
         except OSError as e:
             log.warning("could not write vector cache: %s", e)
+        return ids, mat
 
     def rule_rows(self, con, folder_rule: dict[str, int], version: str) -> np.ndarray:
         """Rule id of each vector row's document folder (-1: no rule), cached per versions."""
         with self.lock:
-            ids, vec_version = self.ids, self.version
+            snap = self._snap
+        ids, vec_version = snap.ids, snap.version
         key = (vec_version, version)
         cached = self._rule_rows
         if cached is not None and cached[0] == key and len(cached[1]) == len(ids):
@@ -279,19 +315,21 @@ class VectorIndex:
         return out
 
     def query(self, qvec: np.ndarray, k: int, mask: np.ndarray | None = None) -> list[tuple[int, float]]:
-        n = len(self.ids)
-        if n == 0:
+        snap = self._snap  # read once: a reload may replace it while this query runs
+        if snap is None or len(snap.ids) == 0:
             return []
+        ids, mat = snap.ids, snap.mat
+        n = len(ids)
         if mask is not None and len(mask) != n:
             # index replaced under the mask: show nothing rather than the wrong rows
             log.warning("semantic search skipped: access mask has %d rows, vector index %d", len(mask), n)
             return []
-        if self.ivf is not None:
-            return self._query_ivf(qvec, k, mask)
+        if snap.ivf is not None:
+            return self._query_ivf(snap, qvec, k, mask)
         q = qvec.astype(np.float32)
         scores = np.empty(n, dtype=np.float32)
         for start in range(0, n, BLOCK_ROWS):
-            block = np.asarray(self.mat[start:start + BLOCK_ROWS], dtype=np.float32)
+            block = np.asarray(mat[start:start + BLOCK_ROWS], dtype=np.float32)
             scores[start:start + len(block)] = block @ q
         if mask is not None:
             scores[~mask] = -np.inf
@@ -301,11 +339,15 @@ class VectorIndex:
         k = min(k, n)
         top = np.argpartition(-scores, k - 1)[:k]
         top = top[np.argsort(-scores[top])]
-        return [(int(self.ids[i]), float(scores[i])) for i in top]
+        return [(int(ids[i]), float(scores[i])) for i in top]
 
-    def _query_ivf(self, qvec: np.ndarray, k: int, mask: np.ndarray | None) -> list[tuple[int, float]]:
+    def _query_ivf(self, snap: _Snapshot, qvec: np.ndarray, k: int, mask: np.ndarray | None) -> list[tuple[int, float]]:
         import faiss
-        n = len(self.ids)
+        n = len(snap.ids)
+        if snap.ivf.ntotal != n or (mask is not None and len(mask) != n):
+            log.warning("vector index skipped: %d rows in faiss, %d ids, mask %s", snap.ivf.ntotal, n,
+                        None if mask is None else len(mask))
+            return []
         bitmap = None  # faiss does not own it: kept alive until the search returns
         if mask is not None:
             n = int(mask.sum())
@@ -315,19 +357,21 @@ class VectorIndex:
         k = min(k, n)
         params = faiss.SearchParametersIVF(sel=faiss.IDSelectorBitmap(bitmap) if bitmap is not None else None,
                                            nprobe=self.cfg.ivf_nprobe)
-        scores, rows = self.ivf.search(qvec.astype(np.float32)[None, :], k, params=params)
-        return [(int(self.ids[r]), float(sc)) for sc, r in zip(scores[0], rows[0]) if r != -1]
+        scores, rows = snap.ivf.search(qvec.astype(np.float32)[None, :], k, params=params)
+        return [(int(snap.ids[r]), float(sc)) for sc, r in zip(scores[0], rows[0]) if r != -1]
 
     def similarity(self, qvec: np.ndarray, chunk_ids: list[int]) -> dict[int, float]:
         """Cosine similarity between the query and the given chunks (vectors are normalized)."""
-        if self.ids is None or len(self.ids) == 0 or not chunk_ids:
+        snap = self._snap
+        if snap is None or len(snap.ids) == 0 or not chunk_ids:
             return {}
-        wanted = np.asarray(chunk_ids, dtype=self.ids.dtype)
-        pos = np.searchsorted(self.ids, wanted)  # ids are sorted (loaded by chunk_id)
-        pos = np.clip(pos, 0, len(self.ids) - 1)
-        found = self.ids[pos] == wanted
+        ids, mat = snap.ids, snap.mat
+        wanted = np.asarray(chunk_ids, dtype=ids.dtype)
+        pos = np.searchsorted(ids, wanted)  # ids are sorted (loaded by chunk_id)
+        pos = np.clip(pos, 0, len(ids) - 1)
+        found = ids[pos] == wanted
         q = qvec.astype(np.float32)
-        return {int(c): float(np.asarray(self.mat[p], dtype=np.float32) @ q)
+        return {int(c): float(np.asarray(mat[p], dtype=np.float32) @ q)
                 for c, p, ok in zip(chunk_ids, pos, found) if ok}
 
 
