@@ -204,7 +204,8 @@ How it works and how it is used:
   which is fast for them. My call.
 - **The cluster count to search** (`nprobe`) is a setting, default 64.
 - **New dependency:** `faiss-cpu` (MIT license, on PyPI, about 15 MB). It is added to pyproject.toml.
-  On Johan's laptop and WS032 nothing changes unless a world crosses 200,000 vectors.
+  The same search runs everywhere, so Johan's laptop also uses it for projects and offers (half the
+  RAM). My call.
 
 ## What IT has to provide
 
