@@ -230,6 +230,14 @@ class VectorIndex:
             self._snap = _Snapshot(version, ids, mat, ivf)
             return len(ids) > 0
 
+    def release(self) -> None:
+        """Let go of the vectors: the memory-mapped cache files and the faiss index are closed once no query
+        uses them any more (a query that already read the snapshot finishes on it), so the files can be
+        replaced. The next ensure() loads the current ones."""
+        with self.lock:
+            self._snap = None
+            self._rule_rows = None
+
     def _load_ivf(self, version: str, mat: np.ndarray):
         """The faiss IVF index of the current vectors: read from its cache file, else built and saved.
         None when faiss is unavailable (exact search is used then)."""

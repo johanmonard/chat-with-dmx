@@ -256,11 +256,43 @@ function Get-ServedWorld([string]$commandLine) {
 
 function Stop-LocalServers([string]$world) {
     # Claude Desktop's server of that world keeps its local index open; Claude Desktop restarts it by itself.
+    # Never the central server (serve-all, every world): it is paused for the world instead (Suspend-CentralWorld).
     Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-        Where-Object { $_.CommandLine -match 'dmx_docs\.cli' -and $_.CommandLine -match ' serve' -and
+        Where-Object { $_.CommandLine -match 'dmx_docs\.cli' -and $_.CommandLine -match ' serve(\s|$)' -and
                        $_.CommandLine -match [regex]::Escape($LocalConfig) -and
                        (Get-ServedWorld $_.CommandLine) -eq $world } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
+
+function Get-CentralPort {
+    # The port of the central server (serve-all) from the [central] table of the shared config; $null without one.
+    $text = Get-Content $SharedConfig -Raw
+    $table = [regex]::Match($text, '(?ms)^\s*\[central\](.*?)(?=^\s*\[|\z)')
+    if ($table.Success -and $table.Groups[1].Value -match '(?m)^\s*port\s*=\s*(\d+)') { [int]$Matches[1] } else { $null }
+}
+
+function Invoke-CentralAdmin([string]$action) {
+    # POST /_admin/<world>/<action> of the central server on this machine; $null when it does not answer.
+    $port = Get-CentralPort
+    if (-not $port) { return $null }
+    try {
+        # A pause waits up to 120 s for the running calls of the world.
+        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/_admin/$World/$action" -TimeoutSec 180 -UseBasicParsing
+    } catch { $null }
+}
+
+function Suspend-CentralWorld {
+    # The central server stops answering for this world and lets go of its files; the other worlds go on.
+    # True when it did (then Resume-CentralWorld must follow); False when no central server runs here.
+    $answer = Invoke-CentralAdmin 'pause'
+    if ($answer -and $answer.paused) { Say "The central server is paused for '$World' (calls still running: $($answer.running))."; return $true }
+    return $false
+}
+
+function Resume-CentralWorld {
+    $answer = Invoke-CentralAdmin 'resume'
+    if ($answer -and $answer.paused -eq $false) { Say "The central server answers for '$World' again." }
+    else { Say "WARNING: the central server did not confirm the reopening of '$World': restart it (dmx-docs serve-all) if the world stays 'being updated'." }
 }
 
 function New-Move([string]$from, [string]$to) { [pscustomobject]@{ From = $from; To = $to } }
@@ -608,6 +640,8 @@ try {
             if ($held -and $held.Split('|')[0] -eq $env:COMPUTERNAME) { throw "This machine holds the lock of '$World' with unsaved work ($held): run the interrupted command again first." }
             if ($held) { Say "Note: $($held.Split('|')[0]) is working on '$World' right now; you get the last saved version." }
             if (-not (Test-Path $Master)) { throw "World '$World' has no index in the shared folder yet (index it first: launcher 3 or 7), or you have no access to it (ask for the AD group that can read it)." }
+            $paused = Suspend-CentralWorld
+            try {
             Copy-MasterToLocal
             $access = Join-Path $SharedWorld 'access.sqlite3'   # per-person access (worlds with access = "acl"): never copied over in place
             if (Test-Path $access) {
@@ -646,6 +680,9 @@ try {
             Say 'Preparing the search cache (about 30-60 s) ...'
             Invoke-Native $Py @('-c', "from dmx_docs.config import load_config; from dmx_docs.tools import DocTools; DocTools(load_config(r'$LocalConfig', world='$World')).search('warm-up', limit=1)") -AllowFail
             Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $LocalConfig) + $WorldArgs + @('status')) -AllowFail
+            } finally {
+                if ($paused) { Resume-CentralWorld }   # also when the copy failed: the world must not stay closed
+            }
             $name = "dmx-$World"   # dmx-projects, dmx-marketing... (the projects entry was called dmx-docs before)
             $serverArgs = @('-m', 'dmx_docs.cli', '--config', $LocalConfig) + $WorldArgs + @('serve')
             $entry = @{ command = $Py; args = $serverArgs }

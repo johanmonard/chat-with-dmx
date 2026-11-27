@@ -374,3 +374,135 @@ def test_cli_serve_all_serves_https_with_a_certificate(two_worlds, monkeypatch, 
     assert kw["ssl_keyfile"] == str(two_worlds.parent / "vm.key")
     assert kw["port"] == 9443 and kw["host"] == "127.0.0.1" and kw["proxy_headers"] is False
     assert "HTTP without a certificate" not in caplog.text
+
+
+# --- pause and resume of one world (its nightly update) ---------------------------------------------
+
+LOOPBACK = ("127.0.0.1", 50000)
+UPDATING = "This world is being updated, try again in a few minutes."
+
+
+def admin_client(config_path, worlds=None, peer=LOOPBACK):
+    app = central.build_app(config_path, worlds, auth=False)
+    client = TestClient(inject(app), client=peer)
+    client.worlds = app.state.worlds
+    return client
+
+
+def test_pause_lets_the_running_call_finish_then_refuses_new_ones(two_worlds, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    real_search = DocTools.search
+
+    def blocked_search(self, *a, **k):
+        entered.set()
+        assert release.wait(10)
+        return real_search(self, *a, **k)
+
+    monkeypatch.setattr(DocTools, "search", blocked_search)
+    with admin_client(two_worlds) as client:
+        first: list = []
+        t = threading.Thread(target=lambda: first.append(
+            call(client, "projects", "search", {"query": "prix", "mode": "keyword"}, "sales")))
+        t.start()
+        answer: list = []
+        pauser = None
+        try:
+            assert entered.wait(10)
+            pauser = threading.Thread(target=lambda: answer.append(client.post("/_admin/projects/pause")))
+            pauser.start()
+            time.sleep(0.5)
+            assert not answer, "pause answered while a call was still running"
+            # new calls are refused already: the world is closing
+            err, text = call(client, "projects", "list_folder", {}, "sales")
+            assert err and UPDATING in text
+        finally:
+            release.set()
+            t.join(10)
+            if pauser:
+                pauser.join(10)
+        assert first and not first[0][0] and _sees(first[0][1]) == {"Offre A"}   # the running call finished
+        assert answer[0].status_code == 200 and answer[0].json() == {"paused": True, "running": 0}
+
+
+def test_pause_really_releases_the_vector_files(two_worlds):
+    with admin_client(two_worlds) as client:
+        world = client.worlds["projects"]
+        vectors = world.tools.searcher.vectors
+        assert vectors.ids is not None
+        assert client.post("/_admin/projects/pause").json()["paused"] is True
+        assert vectors.ids is None and vectors.mat is None and vectors.ivf is None
+        # Windows: a memory-mapped file cannot be deleted or replaced
+        for p in list(world.cfg.world_dir.glob("vec_*")):
+            p.unlink()
+
+
+def test_pause_gives_up_waiting_after_the_limit(two_worlds, monkeypatch):
+    monkeypatch.setattr(central, "PAUSE_WAIT_SECONDS", 0.3)
+    entered, release = threading.Event(), threading.Event()
+    real_search = DocTools.search
+
+    def blocked_search(self, *a, **k):
+        entered.set()
+        assert release.wait(10)
+        return real_search(self, *a, **k)
+
+    monkeypatch.setattr(DocTools, "search", blocked_search)
+    with admin_client(two_worlds) as client:
+        t = threading.Thread(target=lambda: call(client, "projects", "search", {"query": "prix", "mode": "keyword"}, "sales"))
+        t.start()
+        try:
+            assert entered.wait(10)
+            r = client.post("/_admin/projects/pause")
+        finally:
+            release.set()
+            t.join(10)
+        assert r.json() == {"paused": True, "running": 1}
+
+
+def test_other_worlds_answer_while_one_is_paused(two_worlds):
+    with admin_client(two_worlds) as client:
+        assert client.post("/_admin/projects/pause").status_code == 200
+        err, text = call(client, "projects", "search", {"query": "prix", "mode": "keyword"}, "sales")
+        assert err and UPDATING in text and "Offre" not in text
+        err, text = call(client, "marketing", "search", {"query": "palette", "mode": "keyword"}, "eng")
+        assert not err and _sees(text) == {"Paloma brochure"}
+
+
+def test_resume_reloads_the_world(two_worlds):
+    with admin_client(two_worlds) as client:
+        world = client.worlds["projects"]
+        assert client.post("/_admin/projects/pause").status_code == 200
+        assert world.tools.searcher.vectors.ids is None
+        r = client.post("/_admin/projects/resume")
+        assert r.status_code == 200 and r.json() == {"paused": False}
+        assert world.tools.searcher.vectors.ids is not None          # reloaded at once, not at the first search
+        err, text = call(client, "projects", "search", {"query": "prix palette"}, "sales")
+        assert not err and _sees(text) == {"Offre A"}
+
+
+def test_resume_picks_up_new_files(two_worlds):
+    with admin_client(two_worlds) as client:
+        world = client.worlds["projects"]
+        old = world.tools.searcher.vectors.version
+        client.post("/_admin/projects/pause")
+        con = __import__("sqlite3").connect(world.cfg.db_path)
+        con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('vec_version', 'newversion')")
+        con.commit()
+        con.close()
+        client.post("/_admin/projects/resume")
+        assert world.tools.searcher.vectors.version == "newversion" != old
+
+
+def test_admin_from_another_address_is_refused(two_worlds):
+    with admin_client(two_worlds, peer=("10.0.0.5", 50000)) as client:
+        assert client.post("/_admin/projects/pause").status_code == 403
+        assert client.post("/_admin/projects/resume").status_code == 403
+        err, text = call(client, "projects", "search", {"query": "prix", "mode": "keyword"}, "sales")
+        assert not err   # the refused pause changed nothing
+    with admin_client(two_worlds, peer=("::1", 50000)) as client:
+        assert client.post("/_admin/projects/pause").status_code == 200
+
+
+def test_admin_unknown_world_is_404(two_worlds):
+    with admin_client(two_worlds) as client:
+        assert client.post("/_admin/nothing/pause").status_code == 404

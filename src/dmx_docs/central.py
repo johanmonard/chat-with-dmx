@@ -53,6 +53,9 @@ log = logging.getLogger("dmx_docs.central")
 NOT_SIGNED_IN = "Not signed in."
 BUSY = "The server is busy, try again in a minute."
 NO_MEMORY = "not enough memory"
+UPDATING = "This world is being updated, try again in a few minutes."
+PAUSE_WAIT_SECONDS = 120.0   # how long a pause waits for the running calls of the world
+LOOPBACK = ("127.0.0.1", "::1")
 HTTP_WARNING = "HTTP without a certificate: logins cross the LAN unencrypted."
 GB = 1024 ** 3
 
@@ -136,6 +139,8 @@ class World:
         self.gate = gate or Gate(cfg.central_workers, cfg.central_busy_seconds)
         self.not_served = not_served if not_served is not None else {}  # world -> reason, every world's
         self.refusal = refusal
+        self.paused = False   # the nightly update is replacing the world's files
+        self.running = 0      # calls of this world past the checks, not yet finished (event loop only)
         self.tools = DocTools(cfg, NO_RIGHTS)
 
     def load_vectors(self) -> None:
@@ -150,6 +155,26 @@ class World:
                 con.close()
         except Exception as e:  # loaded at the first search instead
             log.warning("World %s: vectors not loaded at start: %s", self.name, type(e).__name__)
+
+    async def pause(self, wait: float | None = None) -> int:
+        """Stop answering: new calls are refused at once, the running ones get up to `wait` seconds
+        (PAUSE_WAIT_SECONDS) to finish, then the vector files are released so the update can replace them.
+        Returns how many calls were still running. No await between a call's check of `paused` and its
+        count in `running`, so a call is either refused or waited for."""
+        self.paused = True
+        deadline = time.monotonic() + (PAUSE_WAIT_SECONDS if wait is None else wait)
+        while self.running > 0 and time.monotonic() < deadline:
+            await anyio.sleep(0.05)
+        await anyio.to_thread.run_sync(self.tools.searcher.vectors.release)
+        log.info("World %s paused (%d calls still running)", self.name, self.running)
+        return self.running
+
+    async def resume(self) -> None:
+        """Answer again, from the files the update put in place (vectors loaded now, as at start-up)."""
+        if self.refusal is None:
+            await anyio.to_thread.run_sync(self.load_vectors)
+        self.paused = False
+        log.info("World %s resumed", self.name)
 
     def registrar(self, mcp):
         """mcp.tool, with each tool function wrapped by `wrap` before it is registered."""
@@ -187,6 +212,10 @@ class World:
             if self.refusal:
                 outcome = "not served"
                 raise ToolError(self.refusal)
+            if self.paused:
+                outcome = "paused"
+                raise ToolError(UPDATING)
+            self.running += 1
             try:
                 result = await self.gate.run(functools.partial(self._run, caller, fn, kwargs))
             except Busy:
@@ -195,6 +224,8 @@ class World:
             except Exception as e:  # the type only: the text can hold the arguments
                 outcome = f"error {type(e).__name__}"
                 raise
+            finally:
+                self.running -= 1
             if name == "index_status" and self.not_served and isinstance(result, str):
                 result = result + "\n\n" + not_served_text(self.not_served)
             outcome = "ok"
@@ -310,6 +341,18 @@ def build_app(config_path: Path, worlds: list[str] | None = None, auth: bool = T
         return JSONResponse({"caller": caller.label, "admin": caller.admin, "groups": len(caller.sids),
                              "not_served": dict(not_served)})
 
+    async def admin(request):
+        """POST /_admin/<world>/pause | resume: the nightly update (dmx.ps1 pull) on this machine only."""
+        if not request.client or request.client.host not in LOOPBACK:
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+        world = served.get(request.path_params["world"])
+        if world is None:
+            return JSONResponse({"error": "Unknown world"}, status_code=404)
+        if request.url.path.endswith("/pause"):
+            return JSONResponse({"paused": True, "running": await world.pause()})
+        await world.resume()
+        return JSONResponse({"paused": False})
+
     @asynccontextmanager
     async def lifespan(_app):
         async with AsyncExitStack() as stack:
@@ -322,7 +365,9 @@ def build_app(config_path: Path, worlds: list[str] | None = None, auth: bool = T
         middleware.append(Middleware(NtlmAuth, make_caller=functools.partial(_caller_from_token, first.access_admins),
                                      cache_seconds=first.central_caller_cache_seconds,
                                      domain_sid=first.access_domain_sid))
-    app = Starlette(routes=[Route("/_whoami", whoami, methods=["GET"]), *routes], middleware=middleware,
+    app = Starlette(routes=[Route("/_whoami", whoami, methods=["GET"]),
+                           Route("/_admin/{world}/pause", admin, methods=["POST"], name="pause"),
+                           Route("/_admin/{world}/resume", admin, methods=["POST"], name="resume"), *routes], middleware=middleware,
                     lifespan=lifespan)
     app.state.worlds = served  # world name -> World
     return app

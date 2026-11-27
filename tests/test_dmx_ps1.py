@@ -541,3 +541,104 @@ def test_pull_mirrors_verified_folder(ready):
     r = run(shared, local, "pull", "-World", "projects", env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     assert not (local / "data" / "projects" / "verified").exists()
+
+
+# --- pull and the central server (serve-all) ----------------------------------------------------------
+
+@contextlib.contextmanager
+def admin_stub(answers=None):
+    """A stand-in for the central server's admin routes on 127.0.0.1: records (method, path) in order."""
+    import http.server
+    import json
+    import threading
+
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen.append((self.command, self.path))
+            body = json.dumps((answers or {}).get(self.path.rsplit("/", 1)[1], {})).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1], seen
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def with_central(shared, port):
+    cfg = shared / "config.toml"
+    cfg.write_text(cfg.read_text(encoding="utf-8") + f"\n[central]\nport = {port}\n", encoding="utf-8")
+
+
+ANSWERS = {"pause": {"paused": True, "running": 0}, "resume": {"paused": False}}
+
+
+def test_pull_pauses_and_resumes_the_central_world(ready):
+    shared, local, env = ready
+    with admin_stub(ANSWERS) as (port, seen):
+        with_central(shared, port)
+        r = run(shared, local, "pull", "-World", "projects", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert seen == [("POST", "/_admin/projects/pause"), ("POST", "/_admin/projects/resume")]
+    out = r.stdout
+    assert out.index("paused for 'projects'") < out.index("Copying the 'projects' index") < out.index("answers for 'projects' again")
+    assert (local / "data" / "projects" / "index.sqlite3").read_bytes() == (shared / "worlds" / "projects" / "index.sqlite3").read_bytes()
+
+
+def test_pull_resumes_even_when_the_copy_fails(ready):
+    shared, local, env = ready
+    with admin_stub(ANSWERS) as (port, seen):
+        with_central(shared, port)
+        r = run(shared, local, "pull", "-World", "projects", env=dict(env, **_space(shared, local, -6)))
+    assert r.returncode != 0 and "Not enough free space" in text(r)
+    assert seen == [("POST", "/_admin/projects/pause"), ("POST", "/_admin/projects/resume")]
+
+
+def test_pull_without_a_central_server_just_pulls(ready):
+    shared, local, env = ready
+    with admin_stub(ANSWERS) as (port, seen):
+        pass   # the port is closed again: nothing answers there
+    with_central(shared, port)
+    r = run(shared, local, "pull", "-World", "projects", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "paused" not in r.stdout and "again" not in r.stdout and "WARNING" not in r.stdout
+    assert (local / "data" / "projects" / "index.sqlite3").read_bytes() == (shared / "worlds" / "projects" / "index.sqlite3").read_bytes()
+
+
+def test_pull_without_a_central_table_does_not_call_it(ready):
+    shared, local, env = ready
+    with admin_stub(ANSWERS) as (port, seen):
+        r = run(shared, local, "pull", "-World", "projects", env=env)
+    assert r.returncode == 0 and seen == []
+
+
+def test_stop_local_servers_leaves_serve_all_running(ready):
+    shared, local, env = ready
+    sleeper = "import time; time.sleep(120)"
+    config = str(local / "config.toml")
+    one = subprocess.Popen([sys.executable, "-c", sleeper, "dmx_docs.cli", "--config", config, "serve", "--world", "projects"])
+    everyone = subprocess.Popen([sys.executable, "-c", sleeper, "dmx_docs.cli", "--config", config, "serve-all"])
+    try:
+        import time
+        time.sleep(1)
+        r = run(shared, local, "pull", "-World", "projects", env=env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        time.sleep(1)
+        assert one.poll() is not None, "the per-world server should have been stopped"
+        assert everyone.poll() is None, "serve-all must keep running"
+    finally:
+        for p in (one, everyone):
+            p.kill()
+            p.wait()
