@@ -201,6 +201,9 @@ from pathlib import Path
 # FAKE_DMX_LOG (a file) receives the step names. The offers step reports the corrections.csv it finds
 # in the local copy of the world and, with --review, writes a review.csv there.
 log = os.environ.get("FAKE_DMX_LOG")
+if os.environ.get("FAKE_DMX_ARGV"):   # the whole command line and the data folder this process was given
+    with open(os.environ["FAKE_DMX_ARGV"], "a", encoding="utf-8") as f:
+        f.write(" ".join(sys.argv[1:]) + "|" + os.environ.get("DMX_DOCS_DATA_DIR", "") + "\\n")
 if "--world" in sys.argv:
     world = sys.argv[sys.argv.index("--world") + 1]
     step = sys.argv[sys.argv.index("--world") + 2]
@@ -667,3 +670,74 @@ def test_stop_local_servers_leaves_serve_all_running(ready):
         for p in (one, everyone):
             p.kill()
             p.wait()
+
+
+def test_serve_all_runs_the_cli_with_the_local_config(ready, tmp_path):
+    shared, local, env = ready
+    argv = tmp_path / "argv.txt"
+    r = run(shared, local, "serve-all", env=dict(env, FAKE_DMX_ARGV=str(argv)))
+    assert r.returncode == 0, r.stdout + r.stderr
+    line = argv.read_text(encoding="utf-8").strip()
+    assert f"--config {local / 'config.toml'} serve-all" in line
+    assert "--world" not in line                       # every world, not one
+    assert line.endswith("|" + str(local / "data"))   # DMX_DOCS_DATA_DIR as for the other commands
+
+
+def test_serve_all_passes_its_options_on(ready, tmp_path):
+    shared, local, env = ready
+    argv = tmp_path / "argv.txt"
+    r = run(shared, local, "serve-all", "--worlds", "projects", "--port", "9000", env=dict(env, FAKE_DMX_ARGV=str(argv)))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "serve-all --worlds projects --port 9000" in argv.read_text(encoding="utf-8")
+
+
+def test_serve_all_without_a_local_copy_says_to_pull_first(ready):
+    shared, local, env = ready
+    (local / "config.toml").unlink()
+    r = run(shared, local, "serve-all", env=env)
+    assert r.returncode != 0 and "pull" in text(r)
+
+
+def _relay_stub(shared, exit_code):
+    relay = shared / "app" / "relay"
+    relay.mkdir()
+    (relay / "dmx-relay.ps1").write_text(
+        f"Write-Output ('relay args: ' + ($args -join ' '))\nexit {exit_code}\n", encoding="ascii")
+
+
+def _with_acl(shared, central=""):
+    cfg = shared / "config.toml"
+    cfg.write_text(cfg.read_text(encoding="utf-8").replace("[worlds.marketing]\n", "[worlds.marketing]\naccess = 'acl'\n") + central,
+                   encoding="utf-8")
+
+
+def test_check_ntlm_runs_the_relay_against_this_machine(ready):
+    shared, local, env = ready
+    _relay_stub(shared, 0)
+    _with_acl(shared)
+    r = run(shared, local, "check-ntlm", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    host = os.environ["COMPUTERNAME"]
+    assert f"-WhoAmI -Url http://{host}:8765/marketing/mcp" in text(r)   # the first world served: access = "acl"
+
+
+def test_check_ntlm_uses_https_and_the_port_of_the_central_table(ready):
+    shared, local, env = ready
+    _relay_stub(shared, 0)
+    _with_acl(shared, "\n[central]\nport = 9443\ncertfile = 'c.pem'\nkeyfile = 'k.pem'\n")
+    r = run(shared, local, "check-ntlm", env=env)
+    assert f"-Url https://{os.environ['COMPUTERNAME']}:9443/marketing/mcp" in text(r)
+
+
+def test_check_ntlm_without_an_acl_world_tries_projects(ready):
+    shared, local, env = ready
+    _relay_stub(shared, 0)
+    r = run(shared, local, "check-ntlm", env=env)
+    assert "/projects/mcp" in text(r)
+
+
+def test_check_ntlm_fails_when_the_relay_fails(ready):
+    shared, local, env = ready
+    _relay_stub(shared, 1)
+    r = run(shared, local, "check-ntlm", env=env)
+    assert r.returncode == 1, r.stdout + r.stderr

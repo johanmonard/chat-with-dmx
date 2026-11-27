@@ -46,12 +46,19 @@ first argument; otherwise the script asks (Enter = projects).
                  access.sqlite3 to <shared>\worlds\<world> then to the local world folder (no lock; report in
                  <shared>\worlds\<world>\acl-survey). update ends with it; pull copies the shared file down.
                  Run it under the account that may read the folders' permissions (the VM's daily task, launcher 8)
+  serve-all [--host H] [--port P] [--worlds a,b]
+                 the central server (the VM, launcher 9): every world with access = "acl" at https://<this machine>:<port>/<world>/mcp
+                 (http without [central] certfile and keyfile), signed in with Windows (NTLM). Runs from the local copy
+                 of the settings and the worlds (pull first). Needs no world and no lock; runs until it is stopped
+  check-ntlm     the five-minute test of the sign-in: runs relay\dmx-relay.ps1 -WhoAmI against this machine's own server
+                 and prints what the server answers (your DOMAIN
+ame and a group count). Exit code 1 when it fails
   unlock -Force  remove a stale lock left by a machine that crashed (also one of the old layout)
   migrate        one-time move from the single-index layout (every command but unlock does it first)
 #>
 param(
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet('setup', 'web', 'index', 'embed', 'ocr', 'describe', 'offers', 'update', 'pull', 'status', 'map', 'search', 'acl-survey', 'permissions', 'unlock', 'migrate')]
+    [ValidateSet('setup', 'web', 'index', 'embed', 'ocr', 'describe', 'offers', 'update', 'pull', 'status', 'map', 'search', 'acl-survey', 'permissions', 'serve-all', 'check-ntlm', 'unlock', 'migrate')]
     [string]$Command,
     [string]$World,
     [switch]$Force,
@@ -271,6 +278,13 @@ function Get-CentralAdminPort {
     $table = [regex]::Match($text, '(?ms)^\s*\[central\](.*?)(?=^\s*\[|\z)')
     if (-not $table.Success) { return $null }
     if ($table.Groups[1].Value -match '(?m)^\s*admin_port\s*=\s*(\d+)') { [int]$Matches[1] } else { 8766 }
+}
+
+function Get-CentralSetting([string]$name) {
+    # A value of the [central] table of the shared config ('' when the table or the setting is missing).
+    $text = Get-Content $SharedConfig -Raw
+    $table = [regex]::Match($text, '(?ms)^\s*\[central\](.*?)(?=^\s*\[|\z)')
+    if ($table.Success -and $table.Groups[1].Value -match ('(?m)^\s*' + $name + '\s*=\s*[''"]?([^''"#\s]+)')) { $Matches[1] } else { '' }
 }
 
 function Invoke-CentralAdmin([int]$port, [string]$action) {
@@ -607,7 +621,7 @@ function Invoke-Locked([string]$what, [object[]]$steps) {
 # -------------------------------------------------------------------- main
 
 if (-not (Test-Path $SharedConfig)) { throw "Settings not found: $SharedConfig" }
-$needsWorld = $Command -notin 'setup', 'migrate'
+$needsWorld = $Command -notin 'setup', 'migrate', 'serve-all', 'check-ntlm'
 if ($needsWorld) { Resolve-World; Set-World }
 if ($needsWorld -and (Get-WorldProfile $World) -eq 'offers') {
     # Offers carry prices and lost deals: their transcripts stay behind the world's own permission.
@@ -717,6 +731,24 @@ try {
             $outs = @('--out', (Join-Path $SharedWorld 'access.sqlite3'), '--out', (Join-Path $LocalWorld 'access.sqlite3'))
             Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $WorldArgs + @('permissions') + $outs + @('--report-dir', (Join-Path $SharedWorld 'acl-survey')) + $Rest) -AllowFail
             if ($LASTEXITCODE -ne 0) { $script:ExitCode = $LASTEXITCODE }
+        }
+        'serve-all' {
+            Assert-Env
+            if (-not (Test-Path $LocalConfig)) { throw "No local settings in ${Local}: run 'pull' (launcher 5) first." }
+            Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $LocalConfig, 'serve-all') + $Rest) -AllowFail
+            if ($LASTEXITCODE -ne 0) { $script:ExitCode = $LASTEXITCODE }
+        }
+        'check-ntlm' {
+            $relay = Join-Path $App 'relay\dmx-relay.ps1'
+            if (-not (Test-Path $relay)) { throw "Relay not found: $relay" }
+            $acl = @(Get-Worlds | Where-Object { (Get-WorldAccess $_) -eq 'acl' })
+            $served = if ($acl.Count -gt 0) { $acl[0] } else { 'projects' }
+            $port = Get-CentralSetting 'port'; if (-not $port) { $port = '8765' }
+            $scheme = if (Get-CentralSetting 'certfile') { 'https' } else { 'http' }
+            $url = "${scheme}://$($env:COMPUTERNAME):$port/$served/mcp"
+            Say "Asking $url who this account is ..."
+            Invoke-Native 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $relay, '-WhoAmI', '-Url', $url) -AllowFail
+            if ($LASTEXITCODE -ne 0) { $script:ExitCode = $LASTEXITCODE; Say 'The sign-in test failed (see above).' }
         }
         'unlock' {
             $held = Get-LockInfo

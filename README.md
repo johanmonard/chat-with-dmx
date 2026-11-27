@@ -242,6 +242,7 @@ U:\DMX-RAG\
   5 - Update Claude Desktop copy.cmd   local copy for Claude Desktop + the configuration to paste
   7 - Update a world (index + embeddings).cmd   unattended: index, OCR of scanned pages, offers (register), picture descriptions, embeddings, then permissions (worlds with access = "acl")
   8 - Refresh permissions.cmd          unattended: access.sqlite3 of every world with access = "acl" (reading rules of the indexed folders)
+  9 - Central server.cmd               the central server of section 7 (every world with access = "acl"; runs until stopped)
   Unlock after a crash.cmd
   config.toml      settings for all machines (data_dir = 'C:\dmx-rag\data') + [worlds.<name>]
   thesaurus.toml   search vocabulary shared by every world
@@ -399,6 +400,60 @@ with "No access to the 'offers' world in the shared folder" and exit code 5, wit
 the other worlds; the account of the machine that builds the world must be in the group too.
 The world's text, prices and mails never go into `knowledge\`, the maps or the skill, and the
 launchers' logs of the world stay in `worlds\offers\logs\` (not in the shared `logs\`).
+
+## 7. Central server (VM)
+
+On the VM (`dmx-ws-vm01`) one process, `dmx-docs serve-all`, answers for every world with
+`access = "acl"` at `http://dmx-ws-vm01:8765/<world>/mcp`. Each person signs in with their own
+Windows account (NTLM) and sees only what the file server lets them read (section "Per-person
+access"). Employees do not install Python or an index: they install one extension per world in
+Claude Desktop, and the extension (`relay\dmx-relay.ps1`) talks to the server.
+
+Settings go in a `[central]` table of `config.toml` (all optional): `port` (8765), `admin_port` (8766),
+`workers` (4), `certfile` and `keyfile` (HTTPS when both are set).
+
+1. **Machine environment variable.** The VM keeps the index on its data disk, not on `C:`:
+   `setx DMX_RAG_LOCAL J:\chatwithdmx /M` (an administrator prompt; start new sessions afterwards).
+   Run launcher 1, then launcher 5 for each world, so that the local copies exist.
+2. **Start at boot.** A scheduled task "at startup" runs launcher 9 under the domain account
+   `ROTZINGERAG\dmx.datahub`, whether it is logged on or not (it asks for the password):
+   `schtasks /Create /TN "DMX central" /SC ONSTART /RU ROTZINGERAG\dmx.datahub /RP * /TR "\"\server\share\DMX-RAG\9 - Central server.cmd\""`
+   Use the UNC path of the shared folder: such a task has no mapped drives. Options go through,
+   e.g. `--worlds projects`.
+3. **Firewall.** Open the server's port, for the domain network only:
+   `New-NetFirewallRule -DisplayName "dmx central" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow -Profile Domain`
+   Only 8765 is opened. The admin listener (`127.0.0.1:8766`, pause and resume of a world while it is
+   updated) listens on the VM itself only and needs no rule.
+4. **Nightly updates.** A GPU machine updates the worlds with launcher 7 (section 6). On the VM, one task per
+   world runs launcher 5 with the world's name (`"5 - Update Claude Desktop copy.cmd" projects`) after that,
+   and a daily task runs launcher 8 (`permissions`, section 6) to refresh who may read what. Use UNC paths, as
+   in section 6. `pull` pauses that world on the central server (the others keep answering; this one says
+   it is being updated), copies the new index, then reopens it.
+5. **The five-minute sign-in test.** From a PC (not the VM), as yourself:
+   `powershell -ExecutionPolicy Bypass -File dmx-relay.ps1 -WhoAmI -Url http://dmx-ws-vm01:8765/projects/mcp`
+   The answer must show your `ROTZINGERAG\name` and a group count. On the VM,
+   `dmx.ps1 check-ntlm` runs the same test against the server's own name (HTTPS when `certfile` is set).
+6. **The extensions.** `python scripts\build_extensions.py --config config.toml --out dist` writes
+   `dist\dmx-<world>.mcpb`, one per world (open a file in Claude Desktop to install it). Each asks for
+   the server address (default `http://dmx-ws-vm01:8765`) and for `allowed_hosts`, the file servers a
+   document may be opened from. Enter them exactly as they appear in the document paths
+   (`\NAME\share`), e.g. `DMX-FS01,DMX-FS01.rotzingerag.local`; any other server is refused.
+
+Things to know:
+
+* **Domain accounts only.** Only `ROTZINGERAG` domain accounts can sign in. A local account of the VM is refused.
+* **No reverse proxy** in front of the server. NTLM ties the sign-in to one TCP connection, which a proxy breaks.
+* **NTLMv2 only.** Check with IT that the VM and the PCs use NTLMv2 only (`LmCompatibilityLevel` 5).
+* **HTTP on the LAN.** Without `certfile` and `keyfile` the server runs on plain HTTP and says so at start-up:
+  logins and answers cross the LAN unencrypted. Until IT provides a certificate this must be IT's
+  accepted choice.
+
+Still to check once on a real PC (these could not be tested during development):
+
+* Install one `.mcpb` in Claude Desktop and confirm it starts. A `.ps1` as the entry point of an extension
+  of type "binary" is not verified.
+* Run the `-WhoAmI` test of step 5 from a colleague's PC.
+* Through the relay, open a PDF at a given page and export a picture.
 
 ## Reference
 
