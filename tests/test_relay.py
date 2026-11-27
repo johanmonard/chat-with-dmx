@@ -152,10 +152,10 @@ def test_other_http_error_gives_the_code():
     assert out_lines(out)[0]["error"]["message"] == "dmx server error 503."
 
 
-def marker_reply(marker_text):
+def marker_reply(marker_text, is_error=False):
     def reply(req):
         out = {"jsonrpc": "2.0", "id": req["id"],
-               "result": {"content": [{"type": "text", "text": marker_text}], "isError": False}}
+               "result": {"content": [{"type": "text", "text": marker_text}], "isError": is_error}}
         return 200, json.dumps(out).encode("utf-8")
     return reply
 
@@ -164,13 +164,33 @@ def marker(payload):
     return "DMX-RELAY " + json.dumps(payload, ensure_ascii=True)
 
 
+def tool_call(name, id=5):
+    return {"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": name, "arguments": {}}}
+
+
+def save_payload(file="Plan_p2.png", data=b"x", what="page 2", source="A/Plan.pdf"):
+    return {"action": "save", "file": file, "what": what, "source": source,
+            "data": base64.b64encode(data).decode()}
+
+
+def run_marker(payload, call, tmp_path, *extra, is_error=False):
+    s = Stub(marker_reply(marker(payload), is_error))
+    try:
+        out, err = run_relay(s.url, [call], "-ExportDir", str(tmp_path / "exp"), *extra)
+    finally:
+        s.close()
+    return out, err
+
+
+def first_text(out):
+    return out_lines(out)[0]["result"]["content"][0]["text"]
+
+
 def test_save_marker_writes_the_file_and_rewrites_the_text(tmp_path):
     data = b"\x89PNG fake image bytes " * 100
-    payload = {"action": "save", "file": "Plan_p2.png", "what": "page 2", "source": "A/Plan.pdf",
-               "data": base64.b64encode(data).decode()}
-    s = Stub(marker_reply(marker(payload)))
+    s = Stub(marker_reply(marker(save_payload(data=data))))
     exports = tmp_path / "exp"
-    call = {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "export_image"}}
+    call = tool_call("export_image")
     try:
         out1, err = run_relay(s.url, [call], "-ExportDir", str(exports))
         out2, _ = run_relay(s.url, [call], "-ExportDir", str(exports))
@@ -178,63 +198,165 @@ def test_save_marker_writes_the_file_and_rewrites_the_text(tmp_path):
         s.close()
     assert (exports / "Plan_p2.png").read_bytes() == data
     assert (exports / "Plan_p2_2.png").read_bytes() == data  # never overwrites
-    text = out_lines(out1)[0]["result"]["content"][0]["text"]
-    assert text == (f"Saved page 2 of A/Plan.pdf to {exports / 'Plan_p2.png'} ({len(data) // 1024} KB), in the "
-                    f"local export folder {exports} on the user's PC. If you work in a sandboxed workspace "
-                    "that cannot see this folder, ask the user to add it to the workspace.")
-    assert "Plan_p2_2.png" in out_lines(out2)[0]["result"]["content"][0]["text"]
+    assert first_text(out1) == (
+        f"Saved page 2 of A/Plan.pdf to {exports / 'Plan_p2.png'} ({len(data) // 1024} KB), in the "
+        f"local export folder {exports} on the user's PC. If you work in a sandboxed workspace "
+        "that cannot see this folder, ask the user to add it to the workspace.")
+    assert "Plan_p2_2.png" in first_text(out2)
     assert err == b""
 
 
 def test_save_marker_never_writes_outside_the_export_folder(tmp_path):
-    payload = {"action": "save", "file": "..\\..\\evil.png", "what": "page 1", "source": "x",
-               "data": base64.b64encode(b"x").decode()}
-    s = Stub(marker_reply(marker(payload)))
-    exports = tmp_path / "a" / "b"
+    run_marker(save_payload(file="..\\..\\evil.png"), tool_call("export_image"), tmp_path)
+    assert (tmp_path / "exp" / "evil.png").exists() and not (tmp_path / "evil.png").exists()
+
+
+def test_save_marker_only_writes_image_files(tmp_path):
+    out, _ = run_marker(save_payload(file="evil.xlsm"), tool_call("export_image"), tmp_path)
+    r = out_lines(out)[0]["result"]
+    assert r["isError"] is True and "image" in r["content"][0]["text"]
+    assert not (tmp_path / "exp" / "evil.xlsm").exists()
+
+
+def test_save_marker_caps_the_size(tmp_path):
+    out, _ = run_marker(save_payload(data=b"\0" * (12 * 1024 * 1024 + 1)), tool_call("export_image"), tmp_path)
+    assert out_lines(out)[0]["result"]["isError"] is True
+    assert not (tmp_path / "exp" / "Plan_p2.png").exists()
+
+
+def test_save_marker_with_french_names_round_trips(tmp_path):
+    name = "Pr\u00e9hension_\u00e0_\u00e7.png"
+    source = "A/Plan \u00ab pr\u00e9 \u00bb.pdf"
+    out, _ = run_marker(save_payload(file=name, source=source, data=b"abc"), tool_call("export_image"), tmp_path)
+    assert (tmp_path / "exp" / name).read_bytes() == b"abc"
+    text = first_text(out)
+    assert source in text and name in text
+    assert source.encode("utf-8") in out and name.encode("utf-8") in out
+
+
+@pytest.mark.parametrize("tool,payload", [
+    ("search", save_payload()),                       # a marker in the answer to any other tool
+    ("open_document", save_payload()),                # the wrong action for the tool
+    ("export_image", {"action": "open", "path": "C:\\x.pdf", "ext": ".pdf", "page": None}),
+])
+def test_a_marker_is_only_obeyed_for_the_matching_tool(tmp_path, tool, payload):
+    out, _ = run_marker(payload, tool_call(tool), tmp_path)
+    assert first_text(out) == marker(payload)  # plain text, unchanged
+    assert not (tmp_path / "exp").exists()
+
+
+def test_a_marker_in_an_error_result_is_not_obeyed(tmp_path):
+    out, _ = run_marker(save_payload(), tool_call("export_image"), tmp_path, is_error=True)
+    assert first_text(out).startswith("DMX-RELAY ")
+    assert not (tmp_path / "exp").exists()
+
+
+def test_a_marker_without_a_pending_request_is_not_obeyed(tmp_path):
+    """An answer whose id is not that of a forwarded export_image/open_document request."""
+    def reply(req):
+        out = {"jsonrpc": "2.0", "id": 999, "result": {"content": [{"type": "text", "text": marker(save_payload())}]}}
+        return 200, json.dumps(out).encode("utf-8")
+    s = Stub(reply)
     try:
-        run_relay(s.url, [{"jsonrpc": "2.0", "id": 1, "method": "tools/call"}], "-ExportDir", str(exports))
+        run_relay(s.url, [tool_call("export_image")], "-ExportDir", str(tmp_path / "exp"))
     finally:
         s.close()
-    assert (exports / "evil.png").exists() and not (tmp_path / "evil.png").exists()
+    assert not (tmp_path / "exp").exists()
+
+
+def test_a_redirect_is_an_error_not_followed():
+    s = Stub(lambda req: (302, b""))
+    try:
+        out, _ = run_relay(s.url, [{"jsonrpc": "2.0", "id": 1, "method": "ping"}])
+    finally:
+        s.close()
+    assert out_lines(out)[0]["error"]["message"] == "dmx server error 302."
 
 
 def launcher(tmp_path):
-    """A .cmd that records its arguments, one per line, in record.txt."""
+    """A .ps1 that records its arguments, one per line (UTF-8), in record.txt."""
     rec = tmp_path / "record.txt"
-    cmd = tmp_path / "launch.cmd"
-    cmd.write_text('@echo off\r\n:loop\r\nif "%~1"=="" goto end\r\n>>"' + str(rec)
-                   + '" echo %~1\r\nshift\r\ngoto loop\r\n:end\r\n')
-    return cmd, rec
+    ps1 = tmp_path / "launch.ps1"
+    ps1.write_text("[System.IO.File]::AppendAllLines('" + str(rec) + "', [string[]]$args, "
+                   "(New-Object System.Text.UTF8Encoding($false)))\r\n", encoding="ascii")
+    return ps1, rec
 
 
-@pytest.mark.parametrize("ext,page", [(".pdf", 4), (".xlsx", None)])
-def test_open_marker_calls_the_launcher(tmp_path, ext, page):
+def open_payload(path, ext, page):
+    return {"action": "open", "path": str(path), "ext": ext, "page": page}
+
+
+def make_doc(tmp_path, folder="dir with space", name="Offre.pdf"):
+    f = tmp_path / folder / name
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(b"%PDF-1.4")
+    return f
+
+
+def run_open(tmp_path, payload, *extra):
     cmd, rec = launcher(tmp_path)
-    path = "\\\\srv\\share\\A\\Offre" + ext
-    s = Stub(marker_reply(marker({"action": "open", "path": path, "ext": ext, "page": page})))
+    s = Stub(marker_reply(marker(payload)))
     try:
-        out, err = run_relay(s.url, [{"jsonrpc": "2.0", "id": 9, "method": "tools/call"}], "-OpenWith", str(cmd))
+        out, err = run_relay(s.url, [tool_call("open_document", 9)], "-OpenWith", str(cmd), *extra)
     finally:
         s.close()
-    text = out_lines(out)[0]["result"]["content"][0]["text"]
-    assert text.startswith(f"Opened {path} ") and text.endswith(".")
-    assert "DMX-RELAY" not in text
-    lines = rec.read_text().splitlines()
-    assert path in lines
-    if page:
-        assert lines[1:4] == ["/A", "page", str(page)]  # Acrobat /A page=N (cmd.exe splits at "=")
+    return out, rec
+
+
+def test_open_marker_builds_a_quoted_acrobat_command_line_for_a_path_with_spaces(tmp_path):
+    f = make_doc(tmp_path)
+    out, rec = run_open(tmp_path, open_payload(f, ".pdf", 4))
+    assert first_text(out) == f"Opened {f} at page 4."
+    assert rec.read_text(encoding="utf-8").splitlines() == [f'acrobat.exe /A page=4 "{f}"']
+
+
+def test_open_marker_default_application_gets_the_plain_path(tmp_path):
+    f = make_doc(tmp_path, name="Liste.xlsx")
+    out, rec = run_open(tmp_path, open_payload(f, ".xlsx", None))
+    assert first_text(out) == f"Opened {f} ."
+    assert rec.read_text(encoding="utf-8").splitlines() == [str(f)]
+
+
+def test_open_marker_with_french_names_round_trips(tmp_path):
+    f = make_doc(tmp_path, folder="dossier \u00e9t\u00e9 \u00e7", name="Offre \u00ab a \u00bb.pdf")
+    out, rec = run_open(tmp_path, open_payload(f, ".pdf", 2))
+    assert "dossier été ç".encode("utf-8") in out and "Offre « a ».pdf".encode("utf-8") in out
+    assert first_text(out) == f"Opened {f} at page 2."
+    assert rec.read_text(encoding="utf-8").splitlines() == [f'acrobat.exe /A page=2 "{f}"']
+
+
+@pytest.mark.parametrize("bad", [
+    "https://evil.example/x?y=.pdf",
+    "search-ms:query=a&.pdf",
+    "file:///C:/Windows/x.pdf",
+    "C:\\a\\b\"/A x.pdf",
+    "C:\\nope\\missing.pdf",       # does not exist
+    "relative\\x.pdf",
+    "C:\\a\\b.pdf:stream.pdf",
+])
+def test_open_marker_refuses_anything_but_an_existing_local_or_unc_file(tmp_path, bad):
+    out, rec = run_open(tmp_path, open_payload(bad, ".pdf", 1))
+    r = out_lines(out)[0]["result"]
+    assert r["isError"] is True and "cannot be opened" in r["content"][0]["text"]
+    assert not rec.exists()
 
 
 def test_open_marker_refuses_a_program(tmp_path):
-    cmd, rec = launcher(tmp_path)
-    s = Stub(marker_reply(marker({"action": "open", "path": "C:\\x\\evil.exe", "ext": ".exe", "page": None})))
-    try:
-        out, _ = run_relay(s.url, [{"jsonrpc": "2.0", "id": 9, "method": "tools/call"}], "-OpenWith", str(cmd))
-    finally:
-        s.close()
+    f = make_doc(tmp_path, name="evil.exe")
+    out, rec = run_open(tmp_path, open_payload(f, ".exe", None))
     assert not rec.exists()
     r = out_lines(out)[0]["result"]
     assert r["isError"] is True and "cannot be opened" in r["content"][0]["text"]
+
+
+def test_open_marker_unc_host_allowlist(tmp_path):
+    """A UNC path of a host that is not allowed is refused before any file check; an allowed host's
+    reaches the existence check (no such server exists here)."""
+    unc = "\\\\fileserver.example\\share\\A\\Offre.pdf"
+    out, rec = run_open(tmp_path, open_payload(unc, ".pdf", 1), "-AllowedHosts", "other1, other2")
+    assert "host is not allowed" in first_text(out)
+    out, rec = run_open(tmp_path, open_payload(unc, ".pdf", 1), "-AllowedHosts", "FILESERVER.example")
+    assert "host is not allowed" not in first_text(out) and not rec.exists()
 
 
 def test_whoami_prints_the_answer(stub):
@@ -299,3 +421,14 @@ def test_relay_signs_in_with_ntlm_against_the_central_server(two_worlds):
     assert [a["id"] for a in answers] == [1, 2], (answers, err)
     assert all("search" in {x["name"] for x in a["result"]["tools"]} for a in answers)
     assert "caller" in json.loads(who.stdout.decode("utf-8"))
+
+
+def test_build_extensions_config_builds_every_world_of_the_config(tmp_path):
+    import os
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("[worlds.projects]\nprofile = 'projects'\n[worlds.offers]\nprofile = 'offers'\n", encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+    p = subprocess.run([sys.executable, str(ROOT / "scripts" / "build_extensions.py"), "--config", str(cfg),
+                        "--out", str(tmp_path / "out")], capture_output=True, text=True, env=env)
+    assert p.returncode == 0, p.stderr
+    assert sorted(x.name for x in (tmp_path / "out").iterdir()) == ["dmx-offers.mcpb", "dmx-projects.mcpb"]

@@ -6,6 +6,7 @@ param(
     [string]$Url,
     [string]$ExportDir = 'C:\dmx-rag\exports',
     [string]$OpenWith = '',
+    [string]$AllowedHosts = $env:DMX_ALLOWED_HOSTS,   # UNC hosts a document may be opened from (empty = any)
     [switch]$WhoAmI
 )
 
@@ -17,7 +18,14 @@ $json.MaxJsonLength = [int]::MaxValue
 $json.RecursionLimit = 200
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 
-$OPENABLE = @('.pdf', '.docx', '.doc', '.pptx', '.ppt', '.md', '.txt', '.xlsx', '.xlsm', '.xls', '.one',
+Add-Type -Namespace Dmx -Name Assoc -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("shlwapi.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern uint AssocQueryString(uint flags, uint str, string assoc, string extra, System.Text.StringBuilder pszOut, ref uint pcchOut);
+'@
+
+$IMAGE_EXTS = @('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tif', '.tiff', '.webp', '.emf', '.wmf')
+$MAX_IMAGE_BYTES = 12 * 1024 * 1024
+$OPENABLE =@('.pdf', '.docx', '.doc', '.pptx', '.ppt', '.md', '.txt', '.xlsx', '.xlsm', '.xls', '.one',
               '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tif', '.tiff', '.webp')
 
 function Write-Diag([string]$msg) {
@@ -36,6 +44,7 @@ function Send-Http([string]$target, [string]$method, [string]$body) {
     $req.Method = $method
     $req.Credentials = $cache
     $req.PreAuthenticate = $false
+    $req.AllowAutoRedirect = $false
     $req.KeepAlive = $true
     $req.UnsafeAuthenticatedConnectionSharing = $true
     $req.ConnectionGroupName = 'dmx-relay'
@@ -93,9 +102,13 @@ function New-ErrorLine($id, [string]$message) {
 function Save-Image($m) {
     $name = [System.IO.Path]::GetFileName([string]$m['file'])  # never a path from the server
     if (-not $name) { throw 'no file name' }
-    $ext = [System.IO.Path]::GetExtension($name)
+    $ext = [System.IO.Path]::GetExtension($name).ToLowerInvariant()
+    if ($IMAGE_EXTS -notcontains $ext) { throw 'Only an image file can be saved.' }
+    $b64 = [string]$m['data']
+    if ($b64.Length -gt ([int](($MAX_IMAGE_BYTES * 4) / 3) + 16)) { throw 'This picture is too large to save.' }
+    $data = [Convert]::FromBase64String($b64)
+    if ($data.Length -gt $MAX_IMAGE_BYTES) { throw 'This picture is too large to save.' }
     $base = [System.IO.Path]::GetFileNameWithoutExtension($name)
-    $data = [Convert]::FromBase64String([string]$m['data'])
     [void][System.IO.Directory]::CreateDirectory($ExportDir)
     $target = [System.IO.Path]::Combine($ExportDir, $base + $ext)
     $n = 2
@@ -109,17 +122,38 @@ function Save-Image($m) {
             "workspace that cannot see this folder, ask the user to add it to the workspace.")
 }
 
+# One argument of a command line: quoted when it holds white space; refuses a quote (it could inject
+# switches) and a trailing backslash (it would escape the closing quote).
+function ConvertTo-CmdArg([string]$a) {
+    if ($a.Contains('"') -or $a.EndsWith('\')) { throw 'This file cannot be opened: unsafe characters in its path.' }
+    if ($a.Length -eq 0 -or $a -match '\s') { return '"' + $a + '"' }
+    return $a
+}
+
+function Build-CommandLine([string[]]$parts) {
+    return (($parts | ForEach-Object { ConvertTo-CmdArg $_ }) -join ' ')
+}
+
 function Start-Launch([string[]]$arguments, [string]$path, [string]$verb) {
-    if ($OpenWith) {
-        $a = @()
-        if ($arguments) { $a += $arguments } else { $a += $path; if ($verb -ne 'open') { $a += $verb } }
-        & $OpenWith @a | Out-Null
-        return
-    }
     if ($arguments) {
         $exe = $arguments[0]
-        $rest = @($arguments | Select-Object -Skip 1)
-        Start-Process -FilePath $exe -ArgumentList $rest | Out-Null
+        $rest = Build-CommandLine @($arguments | Select-Object -Skip 1)
+        if ($OpenWith) {
+            # the test launcher receives the exact command line that would be started
+            & $OpenWith ((ConvertTo-CmdArg $exe) + ' ' + $rest) | Out-Null
+            return
+        }
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $exe
+        $psi.Arguments = $rest
+        $psi.UseShellExecute = $false
+        [void][System.Diagnostics.Process]::Start($psi)
+        return
+    }
+    if ($OpenWith) {
+        $a = @($path)
+        if ($verb -ne 'open') { $a += $verb }
+        & $OpenWith @a | Out-Null
     } elseif ($verb -eq 'open') {
         Start-Process -FilePath $path | Out-Null
     } else {
@@ -127,20 +161,38 @@ function Start-Launch([string[]]$arguments, [string]$path, [string]$verb) {
     }
 }
 
+# The program the user's file association (UserChoice included) names for an extension, like the local
+# tool (AssocQueryString ASSOCSTR_EXECUTABLE).
 function Get-DefaultApp([string]$ext) {
-    try {
-        $k = Get-ItemProperty -Path ('Registry::HKEY_CLASSES_ROOT\' + $ext) -ErrorAction Stop
-        $prog = $k.'(default)'
-        $c = Get-ItemProperty -Path ('Registry::HKEY_CLASSES_ROOT\' + $prog + '\shell\open\command') -ErrorAction Stop
-        $cmd = [string]$c.'(default)'
-        if ($cmd -match '^\s*"([^"]+)"') { return $Matches[1] }
-        if ($cmd -match '^\s*(\S+)') { return $Matches[1] }
-    } catch { }
-    return ''
+    $sb = New-Object System.Text.StringBuilder 1024
+    $len = [uint32]1024
+    if ([Dmx.Assoc]::AssocQueryString(0, 2, $ext, $null, $sb, [ref]$len) -ne 0) { return '' }
+    return $sb.ToString()
+}
+
+# Throws unless the path is an existing file on a drive letter or on an allowed UNC host: never a URL,
+# a protocol handler, a relative path, a stream or a path with a quote.
+function Assert-OpenablePath([string]$path) {
+    $refuse = 'This file cannot be opened'
+    if ($path.Contains('"') -or $path.Contains('/')) { throw ($refuse + ': unsafe characters in its path.') }
+    if ($path -match '^[A-Za-z]:\\') {
+        if ($path.IndexOf(':', 2) -ge 0) { throw ($refuse + ': unsafe characters in its path.') }
+    } elseif ($path -match '^\\\\([^\\/:]+)\\') {
+        if ($path.IndexOf(':') -ge 0) { throw ($refuse + ': unsafe characters in its path.') }
+        $hostName = $Matches[1]
+        $allowed = @($AllowedHosts -split '[,;\s]+' | Where-Object { $_ })
+        if ($allowed.Count -gt 0 -and -not ($allowed | Where-Object { $_ -ieq $hostName })) {
+            throw ($refuse + ': the server host is not allowed.')
+        }
+    } else {
+        throw ($refuse + ': it is not a drive or network path.')
+    }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw ($refuse + ': it was not found on this PC.') }
 }
 
 function Open-Local($m) {
     $path = [string]$m['path']
+    Assert-OpenablePath $path
     $ext = [System.IO.Path]::GetExtension($path).ToLowerInvariant()
     if ($OPENABLE -notcontains $ext) { throw 'This type of file cannot be opened.' }
     $page = $null
@@ -173,11 +225,13 @@ function Open-Local($m) {
     return "(go to page $page)"
 }
 
-# Carries out the action of a DMX-RELAY marker; returns the new first text, or $null when the answer is
-# not a marker (or the marker could not be understood: then it is passed through unchanged).
-function Convert-Marker($msg) {
+# Carries out the marker of a tool answer that is the answer to a forwarded export_image / open_document
+# request ($expected: 'save' / 'open'). Returns $true when the message was rewritten; $false (message left
+# as it is, plain text for Claude) when it is not such a marker, is the other action, or is an error result.
+function Convert-Marker($msg, [string]$expected) {
     $res = $msg['result']
     if ($null -eq $res -or $res -isnot [System.Collections.IDictionary]) { return $false }
+    if ($res['isError'] -eq $true) { return $false }
     $content = $res['content']
     if ($null -eq $content -or $content.Count -lt 1) { return $false }
     $first = $content[0]
@@ -186,11 +240,12 @@ function Convert-Marker($msg) {
     if ($text -isnot [string] -or -not $text.StartsWith('DMX-RELAY ')) { return $false }
     try {
         $m = $json.DeserializeObject($text.Substring(10))
-        if ($m['action'] -eq 'save') { $new = Save-Image $m }
-        elseif ($m['action'] -eq 'open') {
+        if ($m['action'] -ne $expected) { return $false }
+        if ($expected -eq 'save') { $new = Save-Image $m }
+        else {
             $how = Open-Local $m
             $new = ('Opened ' + $m['path'] + ' ' + $how + '.')
-        } else { throw 'unknown action' }
+        }
     } catch {
         Write-Diag ('could not carry out a relay action: ' + $_.Exception.GetType().Name)
         $new = 'The action could not be carried out on this PC: ' + $_.Exception.Message
@@ -200,15 +255,28 @@ function Convert-Marker($msg) {
     return $true
 }
 
+function Get-IdKey($id) { return ($id.GetType().Name + ':' + $id) }
+
+# Requests forwarded as export_image / open_document, waiting for their answer: id key -> expected action.
+$pending = @{}
+
 while ($true) {
     $line = $stdin.ReadLine()
     if ($null -eq $line) { break }
     if (-not $line.Trim()) { continue }
     $id = $null
     $hasId = $false
+    $key = $null
     try {
         $req = $json.DeserializeObject($line)
-        if ($req -is [System.Collections.IDictionary] -and $req.ContainsKey('id')) { $hasId = $true; $id = $req['id'] }
+        if ($req -is [System.Collections.IDictionary] -and $req.ContainsKey('id') -and $null -ne $req['id']) {
+            $hasId = $true; $id = $req['id']; $key = Get-IdKey $id
+            $p = $req['params']
+            if ($req['method'] -eq 'tools/call' -and $p -is [System.Collections.IDictionary]) {
+                if ($p['name'] -eq 'export_image') { $pending[$key] = 'save' }
+                elseif ($p['name'] -eq 'open_document') { $pending[$key] = 'open' }
+            }
+        }
     } catch {
         Write-Line (New-ErrorLine $null 'The relay received a message that is not valid JSON.')
         continue
@@ -219,6 +287,8 @@ while ($true) {
         Write-Diag ('request failed: ' + $_.Exception.GetType().Name)
         $r = @{ Status = 0; Body = '' }
     }
+    $expected = $null
+    if ($hasId -and $pending.ContainsKey($key)) { $expected = $pending[$key]; $pending.Remove($key) }
     if ($r.Status -eq 0) {
         if ($hasId) { Write-Line (New-ErrorLine $id ('The dmx server (' + $uri.Host + ') cannot be reached. Check the network or ask IT.')) }
         continue
@@ -227,16 +297,19 @@ while ($true) {
         if ($hasId) { Write-Line (New-ErrorLine $id 'Your Windows login was not accepted by the dmx server.') }
         continue
     }
-    if ($r.Status -ge 400) {
+    if ($r.Status -ge 300) {
         if ($hasId) { Write-Line (New-ErrorLine $id ('dmx server error ' + $r.Status + '.')) }
         continue
     }
     $body = $r.Body
     if ($r.Status -eq 202 -or -not $body.Trim()) { continue }
-    if ($body.Contains('DMX-RELAY ')) {
+    if ($expected -and $body.Contains('DMX-RELAY ')) {
         try {
             $msg = $json.DeserializeObject($body)
-            if (Convert-Marker $msg) { $body = $json.Serialize($msg) }
+            # only the answer to that very request (same id) is obeyed
+            if ($msg -is [System.Collections.IDictionary] -and $null -ne $msg['id'] -and (Get-IdKey $msg['id']) -eq $key) {
+                if (Convert-Marker $msg $expected) { $body = $json.Serialize($msg) }
+            }
         } catch {
             Write-Diag ('could not read the answer: ' + $_.Exception.GetType().Name)
         }

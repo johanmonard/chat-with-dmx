@@ -37,7 +37,7 @@ def main() -> None:
     a = ap.parse_args()
     worlds = list(a.worlds)
     if a.config:
-        from dmx_docs.config import world_names
+        from dmx_docs.central import world_names
         worlds += world_names(Path(a.config))
     if not worlds:
         sys.exit(__doc__)

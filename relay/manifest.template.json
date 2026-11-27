@@ -21,7 +21,9 @@
         "-Url",
         "${user_config.server_url}/@WORLD@/mcp"
       ],
-      "env": {}
+      "env": {
+        "DMX_ALLOWED_HOSTS": "${user_config.allowed_hosts}"
+      }
     }
   },
   "user_config": {
@@ -31,6 +33,13 @@
       "description": "Address of the central dmx server (leave the default unless IT says otherwise).",
       "default": "http://dmx-ws-vm01:8765",
       "required": true
+    },
+    "allowed_hosts": {
+      "type": "string",
+      "title": "Allowed file servers",
+      "description": "Optional, comma-separated names of the file servers documents may be opened from (empty = any). Set by IT.",
+      "default": "",
+      "required": false
     }
   }
 }
