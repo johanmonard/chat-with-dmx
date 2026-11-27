@@ -1,0 +1,36 @@
+{
+  "manifest_version": "0.3",
+  "name": "dmx-@WORLD@",
+  "display_name": "dmx @WORLD@",
+  "version": "@VERSION@",
+  "description": "Demaurex documentation, world @WORLD@: search and read the documents you are allowed to see, through the central dmx server.",
+  "author": {
+    "name": "Demaurex SA"
+  },
+  "server": {
+    "type": "binary",
+    "entry_point": "server/dmx-relay.ps1",
+    "mcp_config": {
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${__dirname}/server/dmx-relay.ps1",
+        "-Url",
+        "${user_config.server_url}/@WORLD@/mcp"
+      ],
+      "env": {}
+    }
+  },
+  "user_config": {
+    "server_url": {
+      "type": "string",
+      "title": "dmx server",
+      "description": "Address of the central dmx server (leave the default unless IT says otherwise).",
+      "default": "http://dmx-ws-vm01:8765",
+      "required": true
+    }
+  }
+}
