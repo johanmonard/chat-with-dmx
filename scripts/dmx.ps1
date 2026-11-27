@@ -51,8 +51,7 @@ first argument; otherwise the script asks (Enter = projects).
                  (http without [central] certfile and keyfile), signed in with Windows (NTLM). Runs from the local copy
                  of the settings and the worlds (pull first). Needs no world and no lock; runs until it is stopped
   check-ntlm     the five-minute test of the sign-in: runs relay\dmx-relay.ps1 -WhoAmI against this machine's own server
-                 and prints what the server answers (your DOMAIN
-ame and a group count). Exit code 1 when it fails
+                 and prints what the server answers (your DOMAIN\name and a group count). Exit code 1 when it fails
   unlock -Force  remove a stale lock left by a machine that crashed (also one of the old layout)
   migrate        one-time move from the single-index layout (every command but unlock does it first)
 #>

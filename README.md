@@ -413,11 +413,15 @@ Settings go in a `[central]` table of `config.toml` (all optional): `port` (8765
 `workers` (4), `certfile` and `keyfile` (HTTPS when both are set).
 
 1. **Machine environment variable.** The VM keeps the index on its data disk, not on `C:`:
-   `setx DMX_RAG_LOCAL J:\chatwithdmx /M` (an administrator prompt; start new sessions afterwards).
+   `setx DMX_RAG_LOCAL J:\chatwithdmx /M` (an administrator prompt). It must be a machine variable (`/M`) and
+   set before the tasks below are created: they run as another account that has no variable of its own, and
+   without it `dmx.ps1` uses `C:\dmx-rag`, which is nearly full on the VM. After `setx /M`, open a new session
+   or restart the VM.
    Run launcher 1, then launcher 5 for each world, so that the local copies exist.
 2. **Start at boot.** A scheduled task "at startup" runs launcher 9 under the domain account
-   `ROTZINGERAG\dmx.datahub`, whether it is logged on or not (it asks for the password):
-   `schtasks /Create /TN "DMX central" /SC ONSTART /RU ROTZINGERAG\dmx.datahub /RP * /TR "\"\server\share\DMX-RAG\9 - Central server.cmd\""`
+   `ROTZINGERAG\dmx.datahub`, whether it is logged on or not (it asks for the password). IT must give that
+   account the right "Log on as a batch job" on the VM, for this and the other tasks that run without a user logged on:
+   `schtasks /Create /TN "DMX central" /SC ONSTART /RU ROTZINGERAG\dmx.datahub /RP * /TR "\"\\server\share\DMX-RAG\9 - Central server.cmd\""`
    Use the UNC path of the shared folder: such a task has no mapped drives. Options go through,
    e.g. `--worlds projects`.
 3. **Firewall.** Open the server's port, for the domain network only:
@@ -425,10 +429,12 @@ Settings go in a `[central]` table of `config.toml` (all optional): `port` (8765
    Only 8765 is opened. The admin listener (`127.0.0.1:8766`, pause and resume of a world while it is
    updated) listens on the VM itself only and needs no rule.
 4. **Nightly updates.** A GPU machine updates the worlds with launcher 7 (section 6). On the VM, one task per
-   world runs launcher 5 with the world's name (`"5 - Update Claude Desktop copy.cmd" projects`) after that,
-   and a daily task runs launcher 8 (`permissions`, section 6) to refresh who may read what. Use UNC paths, as
-   in section 6. `pull` pauses that world on the central server (the others keep answering; this one says
-   it is being updated), copies the new index, then reopens it.
+   world copies the new index: it runs the script directly, not launcher 5 (launchers 5 and 7 end with `pause`,
+   which would keep an unattended task waiting for a key press for ever and block the following nights):
+   `schtasks /Create /TN "DMX pull projects" /SC DAILY /ST 06:00 /RU ROTZINGERAG\dmx.datahub /RP * /TR "powershell -NoProfile -ExecutionPolicy Bypass -File \"\\server\share\DMX-RAG\app\scripts\dmx.ps1\" pull -World projects"`
+   A daily task runs launcher 8 (`permissions`, section 6) to refresh who may read what; launchers 8 and 9
+   are safe unattended. Use UNC paths, as in section 6. `pull` pauses that world on the central server
+   (the others keep answering; this one says it is being updated), copies the new index, then reopens it.
 5. **The five-minute sign-in test.** From a PC (not the VM), as yourself:
    `powershell -ExecutionPolicy Bypass -File dmx-relay.ps1 -WhoAmI -Url http://dmx-ws-vm01:8765/projects/mcp`
    The answer must show your `ROTZINGERAG\name` and a group count. On the VM,
@@ -437,7 +443,7 @@ Settings go in a `[central]` table of `config.toml` (all optional): `port` (8765
    `dist\dmx-<world>.mcpb`, one per world (open a file in Claude Desktop to install it). Each asks for
    the server address (default `http://dmx-ws-vm01:8765`) and for `allowed_hosts`, the file servers a
    document may be opened from. Enter them exactly as they appear in the document paths
-   (`\NAME\share`), e.g. `DMX-FS01,DMX-FS01.rotzingerag.local`; any other server is refused.
+   (`\\NAME\share`), e.g. `DMX-FS01,DMX-FS01.rotzingerag.local`; any other server is refused.
 
 Things to know:
 
