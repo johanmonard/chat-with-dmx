@@ -17,7 +17,9 @@ import os
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from contextlib import closing
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -210,6 +212,15 @@ class Caller:
         import win32security
 
         token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+        return cls.from_token_handle(token, admins)
+
+    @classmethod
+    def from_token_handle(cls, token, admins: list[str]) -> "Caller":
+        """The identity of a Windows token (opened with TOKEN_QUERY): its user SID and its groups
+        (not deny-only). The process's token for a local server, a person's logon token for the
+        central one."""
+        import win32security
+
         user, prefix = _current_user_domain_prefix(win32security, token)
         raw = {user}
         for sid, attrs in win32security.GetTokenInformation(token, win32security.TokenGroups):
@@ -364,6 +375,40 @@ class Access:
                 while len(self._masks) > 8:
                     del self._masks[next(iter(self._masks))]
         return mask
+
+
+# The caller of the request being answered (central server: set around each tool call, in the
+# thread that runs it). None: a local server, answering with its own fixed caller.
+CURRENT_CALLER: ContextVar[Caller | None] = ContextVar("dmx_docs_current_caller", default=None)
+
+POOL_SIZE = 64
+
+
+class AccessPool:
+    """One Access per caller of a world, for a server answering many people: kept while used (dropped
+    after cache_seconds without a request, and the least recently used beyond POOL_SIZE callers).
+    Keyed by (sids, admin): what Access decides from, so two callers only share one when every
+    answer would be the same."""
+
+    def __init__(self, store: AccessStore, cache_seconds: float = 300, clock=time.monotonic):
+        self.store = store
+        self.cache_seconds = cache_seconds
+        self._clock = clock
+        self._entries: OrderedDict[tuple, tuple[float, Access]] = OrderedDict()  # key -> (last use, access)
+        self._lock = threading.Lock()
+
+    def for_caller(self, caller: Caller) -> Access:
+        key = (caller.sids, caller.admin)
+        now = self._clock()
+        with self._lock:
+            hit = self._entries.get(key)
+            access = hit[1] if hit is not None and now - hit[0] <= self.cache_seconds else Access(
+                self.store, caller, clock=self._clock)
+            self._entries[key] = (now, access)
+            self._entries.move_to_end(key)
+            while len(self._entries) > POOL_SIZE:
+                self._entries.popitem(last=False)
+        return access
 
 
 class Unrestricted:

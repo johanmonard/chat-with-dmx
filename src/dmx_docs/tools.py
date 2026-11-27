@@ -9,12 +9,13 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from datetime import datetime
 
 from . import facets, knowledge, machines, offer_tools, onenote, register, sources, store, verified, worldmap
-from .access import Access, AccessStore, Caller, Unrestricted, readable_clause
+from .access import CURRENT_CALLER, Access, AccessPool, AccessStore, Caller, Unrestricted, readable_clause
 from .config import Config
 from .extract import PICTURE_EXTS, docx_picture_names, extract_file
 from .search import Searcher, build_fts_query, fold, make_snippet
@@ -34,6 +35,8 @@ ONENOTE_NO_IMAGE = "OneNote pages cannot be shown as an image: open the section 
 CALIBRATED_MODEL = "intfloat/multilingual-e5-large"
 SIM_STRONG = 0.86
 SIM_MEDIUM = 0.83
+
+LISTED_CALLERS = 256  # offers world: callers whose "To verify" list is remembered
 
 
 _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
@@ -361,14 +364,32 @@ def _picture_pages(con, doc_id: int) -> list[int]:
 class DocTools:
     def __init__(self, cfg: Config, caller: Caller | None = None):
         self.cfg = cfg
-        # Per-person access: a world with access = "world" shows everything to everybody.
-        self.access = (Unrestricted() if cfg.access == "world" else
-                       Access(AccessStore(cfg.access_path), caller or Caller.from_token(cfg.access_admins)))
+        # Per-person access: a world with access = "world" shows everything to everybody. The fixed
+        # Access (the given caller, else the process's identity) answers when no request caller is
+        # set (a local server); a central server sets CURRENT_CALLER and gets that caller's Access.
+        if cfg.access == "world":
+            self._local_access, self._pool = Unrestricted(), None
+        else:
+            store_ = AccessStore(cfg.access_path)
+            self._local_access = Access(store_, caller or Caller.from_token(cfg.access_admins))
+            self._pool = AccessPool(store_)
         self.searcher = Searcher(cfg)
-        # world_map's live part, cached: (time, the caller's allowed set it was counted for, overview)
+        # world_map's live part, cached: (time, token of the readable folders it was counted for, overview)
         self._overview: tuple[float, object, worldmap.Overview] | None = None
         self.knowledge = knowledge.Knowledge(cfg.knowledge_path)  # written project cards
-        self._listed: dict[tuple, float] = {}  # offers world: revisions listed under "To verify" (identity -> time)
+        # offers world: revisions listed under "To verify", per caller (sids, None in local mode) ->
+        # (identity -> time): what one person was shown never hides a revision from another.
+        self._listed: dict[frozenset | None, dict[tuple, float]] = {}
+        self._listed_lock = threading.Lock()
+
+    @property
+    def access(self) -> Access | Unrestricted:
+        """What the caller of this request may read: the request's caller (CURRENT_CALLER) when one
+        is set, else the fixed caller of a local server."""
+        caller = CURRENT_CALLER.get()
+        if caller is None or self._pool is None:
+            return self._local_access
+        return self._pool.for_caller(caller)
 
     def allows(self, key: str) -> bool:
         """Is the document (or folder) with this path key inside the world and readable by the caller?"""
@@ -671,7 +692,15 @@ class DocTools:
     # _con() has loaded the current root and excluded folders).
     def _to_verify(self) -> dict:
         """The settings of the bounded "To verify" list: off when no shared folder is configured."""
-        return {"verify_limit": self.cfg.verify_per_request if self.cfg.verified_dir else 0, "listed": self._listed}
+        caller = CURRENT_CALLER.get()
+        who = None if caller is None else caller.sids
+        with self._listed_lock:
+            listed = self._listed.get(who)
+            if listed is None:
+                while len(self._listed) >= LISTED_CALLERS:  # bounded: the oldest caller's list goes first
+                    del self._listed[next(iter(self._listed))]
+                listed = self._listed[who] = {}
+        return {"verify_limit": self.cfg.verify_per_request if self.cfg.verified_dir else 0, "listed": listed}
 
     def _verified(self, con) -> verified.Loaded:
         return verified.load(self.cfg, con, self.allows)
@@ -699,13 +728,15 @@ class DocTools:
             return f"The shared folder {folder} cannot be reached (VPN?): nothing was stored."
         if (dispute or revoke) and not (reason or "").strip():
             return "Not stored: dispute and revoke need a reason."
+        caller = CURRENT_CALLER.get()  # the person of the request; a local server's own account
+        user = caller.label if caller is not None else os.environ.get("USERNAME", "")
         try:
             sub = verified.Submission(
                 offer=offer, revision=revision, variant=variant, path=path, pages=verified.parse_pages(pages),
                 lines=list(lines or []), totals=dict(totals or {}), date=date, country=country,
                 offer_type=offer_type, checked_on=checked_on, checked_by=checked_by,
                 not_prices=list(not_prices or []), not_price_pages=dict(not_price_pages or {}), note=note or "",
-                checked_at=datetime.now().replace(microsecond=0).isoformat(), user=os.environ.get("USERNAME", ""))
+                checked_at=datetime.now().replace(microsecond=0).isoformat(), user=user)
         except (ValueError, TypeError) as e:
             return f"Not stored: {e}"
         con = self._con()
@@ -1510,17 +1541,23 @@ class DocTools:
     # ------------------------------------------------------------ status
     def world_map(self) -> str:
         now = time.monotonic()
-        # Counted for the caller's allowed set: one caller's counts never serve another (None: reads everything).
-        restricted = self.access.folder_predicate() is not None
-        scope = (self.access.version, self.access.allowed_rules()) if restricted else None
-        if self._overview is None or now - self._overview[0] > worldmap.CACHE_S or self._overview[1] != scope:
+        # Counted for the caller: one caller's counts never serve another. The predicate's token
+        # names the readable folders of one snapshot of the rules; the counts are taken with that
+        # very predicate and kept under its token, so they only serve a caller reading the same
+        # folders (None: reads everything).
+        pred = self.access.folder_predicate()
+        scope = pred.token if pred is not None else None
+        allows = None if pred is None else (lambda k: self.cfg.allows(k) and pred(os.path.dirname(k)))
+        # Read once: another request (another caller) may replace the cache between check and use.
+        cached = self._overview
+        if cached is None or now - cached[0] > worldmap.CACHE_S or cached[1] != scope:
             con = self._con()
             try:
-                self._overview = (now, scope, worldmap.live_overview(con, self.cfg,
-                                                                     allows=self.allows if restricted else None))
+                cached = (now, scope, worldmap.live_overview(con, self.cfg, allows=allows))
             finally:
                 con.close()
-        return worldmap.compose(worldmap.load_map_text(self.cfg.map_path), self._overview[2])
+            self._overview = cached
+        return worldmap.compose(worldmap.load_map_text(self.cfg.map_path), cached[2])
 
     def index_status(self) -> str:
         con = self._con()
