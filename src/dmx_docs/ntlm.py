@@ -69,15 +69,37 @@ _AUTHENTICATED_USERS = "S-1-5-11"
 _GUESTS = "S-1-5-32-546"
 
 
-def _signed_in_user(token) -> str:
-    """The user SID of a completed login's token. NTLM also completes an anonymous login (a Type-3
-    with empty fields) and may map a failed one to Guest; neither is a sign-in here. Windows puts
-    Authenticated Users in every token except anonymous and Guest ones, so it is required."""
+def primary_domain_sid() -> str | None:
+    """SID of the AD domain this machine is joined to, from the local LSA (no domain controller needed);
+    None for a workgroup machine or when the LSA cannot be read."""
+    import win32security
+
+    try:
+        policy = win32security.LsaOpenPolicy(None, win32security.POLICY_VIEW_LOCAL_INFORMATION)
+        try:
+            _name, sid = win32security.LsaQueryInformationPolicy(
+                policy, win32security.PolicyPrimaryDomainInformation)
+        finally:
+            win32security.LsaClose(policy)
+    except Exception as e:
+        log.warning("cannot read this machine's AD domain: %s", type(e).__name__)
+        return None
+    return win32security.ConvertSidToStringSid(sid) if sid is not None else None
+
+
+def _signed_in_user(token, domain_sid: str) -> str:
+    """The user SID of a completed login's token. Only accounts of the machine's AD domain sign in:
+    a local account of this machine (or another domain's) cannot read the file server, so it must not
+    read here either. NTLM also completes an anonymous login (a Type-3 with empty fields) and may map
+    a failed one to Guest; neither is a sign-in here. Windows puts Authenticated Users in every token
+    except anonymous and Guest ones, so it is required."""
     import win32security
 
     sid = win32security.ConvertSidToStringSid(win32security.GetTokenInformation(token, win32security.TokenUser)[0])
     if sid == _ANONYMOUS:
         raise _Refused("anonymous login")
+    if not sid.startswith("S-1-5-21-") or sid.rpartition("-")[0] != domain_sid:
+        raise _Refused("not an account of the AD domain")
     if sid.startswith("S-1-5-21-") and sid.rpartition("-")[2] == "501":
         raise _Refused("guest login")
     groups = {win32security.ConvertSidToStringSid(g): attrs
@@ -96,8 +118,11 @@ class NtlmAuth:
 
     def __init__(self, app, make_caller: Callable[[object], object], cache_seconds: float = 300,
                  clock: Callable[[], float] = time.monotonic, max_pending: int = MAX_PENDING,
-                 pending_seconds: float = PENDING_SECONDS):
+                 pending_seconds: float = PENDING_SECONDS, domain_sid: str | None = None):
+        """domain_sid: the AD domain whose accounts may sign in; None reads this machine's primary
+        domain (primary_domain_sid) on the first sign-in. No domain known: every login is refused."""
         self.app = app
+        self._domain_sid = domain_sid
         self.make_caller = make_caller
         self.cache_seconds = cache_seconds
         self._clock = clock
@@ -221,7 +246,7 @@ class NtlmAuth:
                 raise _Refused("NTLM handshake not complete")
             token = server.ctxt.QuerySecurityContextToken()
             try:
-                sid = _signed_in_user(token)
+                sid = _signed_in_user(token, self._allowed_domain())
                 caller = self._cached_caller(sid)
                 if caller is None:
                     caller = self.make_caller(token)
@@ -234,6 +259,14 @@ class NtlmAuth:
             _dispose(server)
         log.debug("NTLM sign-in: %s", getattr(caller, "label", ""))
         return caller
+
+    def _allowed_domain(self) -> str:
+        """The AD domain SID whose accounts sign in, read once (a failed read is retried next time)."""
+        if self._domain_sid is None:
+            self._domain_sid = primary_domain_sid()
+        if not self._domain_sid:
+            raise _Refused("this machine's AD domain is unknown")
+        return self._domain_sid
 
     # -- pending contexts -----------------------------------------------------------------------------
 

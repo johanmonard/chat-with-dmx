@@ -223,6 +223,39 @@ def test_callers_are_cached_by_sid_for_cache_seconds():
     assert app.calls == 3
 
 
+def test_the_default_domain_is_this_machines_ad_domain():
+    """The machine's primary (AD) domain SID is the prefix of the test login's SID (a domain account)."""
+    from dmx_docs import ntlm
+    import win32api
+    import win32con
+    import win32security
+
+    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+    me = win32security.ConvertSidToStringSid(win32security.GetTokenInformation(token, win32security.TokenUser)[0])
+    assert ntlm.primary_domain_sid() == me.rpartition("-")[0]
+
+
+def test_a_login_outside_the_ad_domain_gets_401():
+    """A VM-local account (or any other domain's) is refused: here the allowed domain is a fake one,
+    so this machine's own domain login stands for the foreign account."""
+    app, maker = EchoApp(), CountingMaker()
+    r = _handshake(_client(NtlmAuth(app, maker, domain_sid="S-1-5-21-1-2-3"), 1111))
+    assert r.status_code == 401
+    assert r.headers.get_list("www-authenticate") == ["NTLM"]
+    assert app.calls == 0 and maker.calls == 0
+
+
+def test_no_ad_domain_known_gets_401(monkeypatch):
+    """A machine in a workgroup, or an LSA that cannot be read: nobody signs in."""
+    from dmx_docs import ntlm
+
+    monkeypatch.setattr(ntlm, "primary_domain_sid", lambda: None)
+    app, maker = EchoApp(), CountingMaker()
+    r = _handshake(_client(NtlmAuth(app, maker), 1111))
+    assert r.status_code == 401
+    assert app.calls == 0 and maker.calls == 0
+
+
 def test_concurrent_handshakes_on_their_own_connections():
     import threading
 
