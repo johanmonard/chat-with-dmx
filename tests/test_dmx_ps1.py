@@ -557,8 +557,14 @@ def admin_stub(answers=None):
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
             seen.append((self.command, self.path))
-            body = json.dumps((answers or {}).get(self.path.rsplit("/", 1)[1], {})).encode()
-            self.send_response(200)
+            action = self.path.rsplit("/", 1)[1]
+            if self.headers.get("X-DMX-Admin") != "1":
+                code, body = 403, b"{}"
+            elif isinstance((answers or {}).get(action), int):
+                code, body = answers[action], b"{}"
+            else:
+                code, body = 200, json.dumps((answers or {}).get(action, {})).encode()
+            self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -579,7 +585,7 @@ def admin_stub(answers=None):
 
 def with_central(shared, port):
     cfg = shared / "config.toml"
-    cfg.write_text(cfg.read_text(encoding="utf-8") + f"\n[central]\nport = {port}\n", encoding="utf-8")
+    cfg.write_text(cfg.read_text(encoding="utf-8") + f"\n[central]\nport = 1\nadmin_port = {port}\n", encoding="utf-8")
 
 
 ANSWERS = {"pause": {"paused": True, "running": 0}, "resume": {"paused": False}}
@@ -604,6 +610,25 @@ def test_pull_resumes_even_when_the_copy_fails(ready):
         r = run(shared, local, "pull", "-World", "projects", env=dict(env, **_space(shared, local, -6)))
     assert r.returncode != 0 and "Not enough free space" in text(r)
     assert seen == [("POST", "/_admin/projects/pause"), ("POST", "/_admin/projects/resume")]
+
+
+def test_pull_resumes_even_when_the_pause_failed(ready):
+    shared, local, env = ready
+    with admin_stub({"pause": 500, "resume": {"paused": False}}) as (port, seen):
+        with_central(shared, port)
+        r = run(shared, local, "pull", "-World", "projects", env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert seen == [("POST", "/_admin/projects/pause"), ("POST", "/_admin/projects/resume")]
+    assert "did not confirm the pause of 'projects'" in text(r) and "answers for 'projects' again" in text(r)
+
+
+def test_pull_uses_the_default_admin_port_when_central_has_no_port_lines(ready):
+    shared, local, env = ready
+    cfg = shared / "config.toml"
+    cfg.write_text(cfg.read_text(encoding="utf-8") + "\n[central]\nworkers = 2\n", encoding="utf-8")
+    r = run(shared, local, "pull", "-World", "projects", env=env)   # nothing listens on 8766: pulls quietly
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "WARNING" not in r.stdout and "paused" not in r.stdout
 
 
 def test_pull_without_a_central_server_just_pulls(ready):

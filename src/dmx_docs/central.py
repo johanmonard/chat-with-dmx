@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ctypes
 import functools
+import ipaddress
 import inspect
 import logging
 import os
@@ -55,7 +56,8 @@ BUSY = "The server is busy, try again in a minute."
 NO_MEMORY = "not enough memory"
 UPDATING = "This world is being updated, try again in a few minutes."
 PAUSE_WAIT_SECONDS = 120.0   # how long a pause waits for the running calls of the world
-LOOPBACK = ("127.0.0.1", "::1")
+MAX_PAUSE_SECONDS = 4 * 3600.0  # a world paused longer reopens by itself (an update that never resumed it)
+ADMIN_HEADER = "x-dmx-admin"   # a custom header: a browser cannot send it cross-origin without a preflight
 HTTP_WARNING = "HTTP without a certificate: logins cross the LAN unencrypted."
 GB = 1024 ** 3
 
@@ -140,6 +142,7 @@ class World:
         self.not_served = not_served if not_served is not None else {}  # world -> reason, every world's
         self.refusal = refusal
         self.paused = False   # the nightly update is replacing the world's files
+        self.paused_at = 0.0  # monotonic time of the pause
         self.running = 0      # calls of this world past the checks, not yet finished (event loop only)
         self.tools = DocTools(cfg, NO_RIGHTS)
 
@@ -162,6 +165,7 @@ class World:
         Returns how many calls were still running. No await between a call's check of `paused` and its
         count in `running`, so a call is either refused or waited for."""
         self.paused = True
+        self.paused_at = time.monotonic()
         deadline = time.monotonic() + (PAUSE_WAIT_SECONDS if wait is None else wait)
         while self.running > 0 and time.monotonic() < deadline:
             await anyio.sleep(0.05)
@@ -212,6 +216,10 @@ class World:
             if self.refusal:
                 outcome = "not served"
                 raise ToolError(self.refusal)
+            if self.paused and time.monotonic() - self.paused_at > MAX_PAUSE_SECONDS:
+                log.warning("World %s was paused for more than %g h: reopened by itself", self.name,
+                            MAX_PAUSE_SECONDS / 3600)
+                await self.resume()
             if self.paused:
                 outcome = "paused"
                 raise ToolError(UPDATING)
@@ -297,10 +305,78 @@ def _caller_from_token(admins: list[str], token) -> Caller:
     return Caller.from_token_handle(token, admins)
 
 
-def build_app(config_path: Path, worlds: list[str] | None = None, auth: bool = True) -> Starlette:
+async def _start_admin(app, port: int):
+    """The admin app on 127.0.0.1:port in this event loop. Returns the coroutine function that stops it.
+    Raises RuntimeError when the port cannot be taken: without it no update could pause the worlds."""
+    import asyncio
+
+    import uvicorn
+
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, proxy_headers=False,
+                                           lifespan="off", log_level="warning"))
+    server.install_signal_handlers = lambda: None   # the main server owns them
+    async def serve():
+        try:
+            await server.serve()
+        except SystemExit:   # uvicorn exits when it cannot bind; that must not end the loop
+            pass
+
+    task = asyncio.ensure_future(serve())
+    for _ in range(100):
+        if server.started or task.done():
+            break
+        await asyncio.sleep(0.05)
+    if not server.started:
+        task.cancel()
+        raise RuntimeError(f"The admin listener could not start on 127.0.0.1:{port} (port taken?).")
+    log.info("Admin listener on http://127.0.0.1:%d (pause/resume of a world)", port)
+
+    async def stop():
+        server.should_exit = True
+        await task
+    return stop
+
+
+def _is_loopback(host: str | None) -> bool:
+    try:
+        ip = ipaddress.ip_address(host or "")
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback
+
+
+def build_admin_app(served: dict[str, World]) -> Starlette:
+    """POST /<world>/pause and /<world>/resume (paths /_admin/<world>/...; build_app serves it on its own
+    loopback listener): the nightly update of one world (dmx.ps1 pull). Refused with 403 unless the
+    peer is this machine, the request carries X-DMX-Admin: 1 and has no Origin header (a web page in a
+    browser on this machine cannot send it cross-origin)."""
+
+    async def admin(request):
+        if not request.client or not _is_loopback(request.client.host):
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+        if request.headers.get(ADMIN_HEADER) != "1" or "origin" in request.headers:
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+        world = served.get(request.path_params["world"])
+        if world is None:
+            return JSONResponse({"error": "Unknown world"}, status_code=404)
+        if request.url.path.endswith("/pause"):
+            return JSONResponse({"paused": True, "running": await world.pause()})
+        await world.resume()
+        return JSONResponse({"paused": False})
+
+    return Starlette(routes=[Route("/_admin/{world}/pause", admin, methods=["POST"]),
+                             Route("/_admin/{world}/resume", admin, methods=["POST"])])
+
+
+def build_app(config_path: Path, worlds: list[str] | None = None, auth: bool = True,
+              admin_port: int | None = None) -> Starlette:
     """Every world of the config (or those named) at /<world>/mcp, and GET /_whoami, behind the NTLM
     sign-in when `auth` (auth=False: tests, which put the caller in the request state themselves).
-    Raises ValueError, naming them, when a world does not have access = "acl"."""
+    Raises ValueError, naming them, when a world does not have access = "acl".
+    admin_port: also serve the admin routes (build_admin_app) on 127.0.0.1:<port>, plain HTTP, in this
+    process and event loop, for as long as the app runs; the app does not start without that listener."""
     config_path = Path(config_path)
     quiet_mcp_tool_logs()
     cfgs = [load_config(config_path, world=name) for name in (worlds or world_names(config_path))]
@@ -341,23 +417,13 @@ def build_app(config_path: Path, worlds: list[str] | None = None, auth: bool = T
         return JSONResponse({"caller": caller.label, "admin": caller.admin, "groups": len(caller.sids),
                              "not_served": dict(not_served)})
 
-    async def admin(request):
-        """POST /_admin/<world>/pause | resume: the nightly update (dmx.ps1 pull) on this machine only."""
-        if not request.client or request.client.host not in LOOPBACK:
-            return JSONResponse({"error": "Forbidden"}, status_code=403)
-        world = served.get(request.path_params["world"])
-        if world is None:
-            return JSONResponse({"error": "Unknown world"}, status_code=404)
-        if request.url.path.endswith("/pause"):
-            return JSONResponse({"paused": True, "running": await world.pause()})
-        await world.resume()
-        return JSONResponse({"paused": False})
-
     @asynccontextmanager
     async def lifespan(_app):
         async with AsyncExitStack() as stack:
             for mcp in servers:
                 await stack.enter_async_context(mcp.session_manager.run())
+            if admin_port:
+                stack.push_async_callback((await _start_admin(build_admin_app(served), admin_port)))
             yield
 
     middleware = []
@@ -365,9 +431,8 @@ def build_app(config_path: Path, worlds: list[str] | None = None, auth: bool = T
         middleware.append(Middleware(NtlmAuth, make_caller=functools.partial(_caller_from_token, first.access_admins),
                                      cache_seconds=first.central_caller_cache_seconds,
                                      domain_sid=first.access_domain_sid))
-    app = Starlette(routes=[Route("/_whoami", whoami, methods=["GET"]),
-                           Route("/_admin/{world}/pause", admin, methods=["POST"], name="pause"),
-                           Route("/_admin/{world}/resume", admin, methods=["POST"], name="resume"), *routes], middleware=middleware,
+    app = Starlette(routes=[Route("/_whoami", whoami, methods=["GET"]), *routes], middleware=middleware,
                     lifespan=lifespan)
     app.state.worlds = served  # world name -> World
+    app.state.admin_app = build_admin_app(served)
     return app

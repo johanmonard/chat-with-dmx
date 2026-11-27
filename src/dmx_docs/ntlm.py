@@ -8,8 +8,7 @@ completed login is not remembered for the connection.
 
 Fail closed: a missing or foreign Authorization header, a malformed or refused message, a Type-3
 without its pending context, an error while building the caller - all give 401 and the app is not
-called. Paths under /_admin/ are passed through without a caller (the admin endpoints check that the
-request comes from this machine themselves).
+called. Every path is signed in, /_admin/ included (the admin routes are on their own listener, central.py).
 
 Logs name the client address and the outcome, never header values or tokens.
 """
@@ -35,7 +34,6 @@ MAX_HEADER = 16384        # longest Authorization header accepted (NTLM messages
 
 _SIGNATURE = b"NTLMSSP\x00"
 _NEGOTIATE, _CHALLENGE, _AUTHENTICATE = 1, 2, 3
-_ADMIN_PREFIX = "/_admin/"
 
 
 class _Refused(Exception):
@@ -146,10 +144,6 @@ class NtlmAuth:
             return
         state = dict(scope.get("state") or {})
         state.pop("dmx_caller", None)       # only this middleware puts a caller there
-        path = scope.get("path") or ""
-        if path.startswith(_ADMIN_PREFIX):
-            await self.app({**scope, "state": state}, receive, send)
-            return
         try:
             caller, challenge = await self._sign_in(scope)
         except _Refused as e:

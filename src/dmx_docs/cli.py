@@ -68,7 +68,7 @@ def _serve_all(args, config_path: Path, parser) -> None:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     try:
-        app = central.build_app(config_path, worlds, auth=True)
+        app = central.build_app(config_path, worlds, auth=True, admin_port=cfg.central_admin_port)
     except ValueError as e:
         print(f"serve-all not started: {e}", file=sys.stderr)
         sys.exit(2)

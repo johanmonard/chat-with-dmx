@@ -264,35 +264,45 @@ function Stop-LocalServers([string]$world) {
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
-function Get-CentralPort {
-    # The port of the central server (serve-all) from the [central] table of the shared config; $null without one.
+function Get-CentralAdminPort {
+    # The admin port of the central server (serve-all) on this machine, from the [central] table of the shared
+    # config (default 8766); $null when the config has no [central] table.
     $text = Get-Content $SharedConfig -Raw
     $table = [regex]::Match($text, '(?ms)^\s*\[central\](.*?)(?=^\s*\[|\z)')
-    if ($table.Success -and $table.Groups[1].Value -match '(?m)^\s*port\s*=\s*(\d+)') { [int]$Matches[1] } else { $null }
+    if (-not $table.Success) { return $null }
+    if ($table.Groups[1].Value -match '(?m)^\s*admin_port\s*=\s*(\d+)') { [int]$Matches[1] } else { 8766 }
 }
 
-function Invoke-CentralAdmin([string]$action) {
-    # POST /_admin/<world>/<action> of the central server on this machine; $null when it does not answer.
-    $port = Get-CentralPort
-    if (-not $port) { return $null }
+function Invoke-CentralAdmin([int]$port, [string]$action) {
+    # POST /_admin/<world>/<action> on the plain-HTTP loopback listener of the central server (it answers
+    # whether or not the main listener has a certificate). Status: 'ok', 'down' (nothing listens there), 'failed'.
     try {
         # A pause waits up to 120 s for the running calls of the world.
-        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/_admin/$World/$action" -TimeoutSec 180 -UseBasicParsing
-    } catch { $null }
+        $answer = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/_admin/$World/$action" -Headers @{ 'X-DMX-Admin' = '1' } -TimeoutSec 180 -UseBasicParsing
+        [pscustomobject]@{ Status = 'ok'; Answer = $answer }
+    } catch {
+        $status = if ($_.Exception -is [System.Net.WebException] -and $_.Exception.Status -eq 'ConnectFailure') { 'down' } else { 'failed' }
+        [pscustomobject]@{ Status = $status; Answer = $null }
+    }
 }
 
 function Suspend-CentralWorld {
     # The central server stops answering for this world and lets go of its files; the other worlds go on.
-    # True when it did (then Resume-CentralWorld must follow); False when no central server runs here.
-    $answer = Invoke-CentralAdmin 'pause'
-    if ($answer -and $answer.paused) { Say "The central server is paused for '$World' (calls still running: $($answer.running))."; return $true }
-    return $false
+    # Returns the admin port when Resume-CentralWorld must follow (also after a pause that was not confirmed,
+    # the resume is harmless), $null when no central server is configured or none runs here.
+    $port = Get-CentralAdminPort
+    if (-not $port) { return $null }
+    $r = Invoke-CentralAdmin $port 'pause'
+    if ($r.Status -eq 'down') { return $null }
+    if ($r.Status -eq 'ok' -and $r.Answer.paused) { Say "The central server is paused for '$World' (calls still running: $($r.Answer.running))." }
+    else { Say "WARNING: the central server did not confirm the pause of '$World': the update goes on, the server is reopened at the end." }
+    return $port
 }
 
-function Resume-CentralWorld {
-    $answer = Invoke-CentralAdmin 'resume'
-    if ($answer -and $answer.paused -eq $false) { Say "The central server answers for '$World' again." }
-    else { Say "WARNING: the central server did not confirm the reopening of '$World': restart it (dmx-docs serve-all) if the world stays 'being updated'." }
+function Resume-CentralWorld([int]$port) {
+    $r = Invoke-CentralAdmin $port 'resume'
+    if ($r.Status -eq 'ok' -and $r.Answer.paused -eq $false) { Say "The central server answers for '$World' again." }
+    else { Say "WARNING: the central server did not confirm the reopening of '$World': restart it (dmx-docs serve-all) if the world stays 'being updated' (it reopens by itself after 4 hours)." }
 }
 
 function New-Move([string]$from, [string]$to) { [pscustomobject]@{ From = $from; To = $to } }
@@ -681,7 +691,7 @@ try {
             Invoke-Native $Py @('-c', "from dmx_docs.config import load_config; from dmx_docs.tools import DocTools; DocTools(load_config(r'$LocalConfig', world='$World')).search('warm-up', limit=1)") -AllowFail
             Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $LocalConfig) + $WorldArgs + @('status')) -AllowFail
             } finally {
-                if ($paused) { Resume-CentralWorld }   # also when the copy failed: the world must not stay closed
+                if ($paused) { Resume-CentralWorld $paused }   # also when the copy failed: the world must not stay closed
             }
             $name = "dmx-$World"   # dmx-projects, dmx-marketing... (the projects entry was called dmx-docs before)
             $serverArgs = @('-m', 'dmx_docs.cli', '--config', $LocalConfig) + $WorldArgs + @('serve')

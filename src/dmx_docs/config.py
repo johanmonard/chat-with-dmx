@@ -88,6 +88,7 @@ class Config:
     access_domain_sid: str | None = None                      # AD domain SID prefix (else the running account's)
     # The central server (serve-all, central.py): one HTTP process for every world. [central] in config.toml.
     central_port: int = 8765
+    central_admin_port: int = 8766            # pause/resume of a world for its update: 127.0.0.1 only, plain HTTP
     central_workers: int = 4                  # tool calls running at once, all worlds together
     central_busy_seconds: float = 30          # a call waiting longer for a worker gets "busy"
     central_caller_cache_seconds: float = 300  # signed-in callers and their per-world Access kept this long
@@ -304,7 +305,7 @@ def load_config(path: str | os.PathLike, world: str | None = None) -> Config:
             raise ValueError(f"World '{name}': unknown access '{w['access']}' (use \"world\" or \"acl\")")
         kwargs["access"] = w["access"]
     cen = raw.get("central", {})
-    for key, attr, kind in (("port", "central_port", int), ("workers", "central_workers", int),
+    for key, attr, kind in (("port", "central_port", int), ("admin_port", "central_admin_port", int), ("workers", "central_workers", int),
                             ("busy_seconds", "central_busy_seconds", float),
                             ("caller_cache_seconds", "central_caller_cache_seconds", float)):
         if key in cen:

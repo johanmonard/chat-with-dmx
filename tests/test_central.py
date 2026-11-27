@@ -349,7 +349,7 @@ def test_cli_serve_all_runs_uvicorn_without_proxy_headers(two_worlds, monkeypatc
     import uvicorn
 
     runs = []
-    monkeypatch.setattr(central, "build_app", lambda path, worlds=None, auth=True: ("app", path, worlds, auth))
+    monkeypatch.setattr(central, "build_app", lambda path, worlds=None, auth=True, admin_port=None: ("app", path, worlds, auth))
     monkeypatch.setattr(uvicorn, "run", lambda app, **kw: runs.append((app, kw)))
     caplog.set_level(logging.WARNING)
     cli.main(["--config", str(two_worlds), "serve-all", "--worlds", "projects,marketing"])
@@ -365,7 +365,7 @@ def test_cli_serve_all_serves_https_with_a_certificate(two_worlds, monkeypatch, 
 
     write_config(two_worlds.parent, "port = 9443\ncertfile = 'vm.crt'\nkeyfile = 'vm.key'")
     runs = []
-    monkeypatch.setattr(central, "build_app", lambda path, worlds=None, auth=True: "app")
+    monkeypatch.setattr(central, "build_app", lambda path, worlds=None, auth=True, admin_port=None: "app")
     monkeypatch.setattr(uvicorn, "run", lambda app, **kw: runs.append(kw))
     caplog.set_level(logging.WARNING)
     cli.main(["--config", str(two_worlds), "serve-all", "--host", "127.0.0.1"])
@@ -382,9 +382,19 @@ LOOPBACK = ("127.0.0.1", 50000)
 UPDATING = "This world is being updated, try again in a few minutes."
 
 
-def admin_client(config_path, worlds=None, peer=LOOPBACK):
+def admin_client(config_path, worlds=None, peer=LOOPBACK, headers=None):
+    """One client for the MCP routes and the admin routes, as the real server splits them over two
+    listeners: /_admin goes to the admin app, in the same event loop as the worlds."""
     app = central.build_app(config_path, worlds, auth=False)
-    client = TestClient(inject(app), client=peer)
+    main, admin = inject(app), app.state.admin_app
+
+    async def both(scope, receive, send):
+        if scope["type"] == "http" and scope["path"].startswith("/_admin/"):
+            await admin(scope, receive, send)
+        else:
+            await main(scope, receive, send)
+
+    client = TestClient(both, client=peer, headers={"X-DMX-Admin": "1", **(headers or {})})
     client.worlds = app.state.worlds
     return client
 
@@ -501,6 +511,92 @@ def test_admin_from_another_address_is_refused(two_worlds):
         assert not err   # the refused pause changed nothing
     with admin_client(two_worlds, peer=("::1", 50000)) as client:
         assert client.post("/_admin/projects/pause").status_code == 200
+    with admin_client(two_worlds, peer=("::ffff:127.0.0.1", 50000)) as client:   # IPv4-mapped loopback
+        assert client.post("/_admin/projects/pause").status_code == 200
+    with admin_client(two_worlds, peer=("::ffff:10.0.0.5", 50000)) as client:
+        assert client.post("/_admin/projects/pause").status_code == 403
+
+
+def test_admin_needs_the_custom_header_and_refuses_a_browser_origin(two_worlds):
+    with admin_client(two_worlds) as client:
+        for headers in ({"X-DMX-Admin": "0"}, {"Origin": "http://evil.example"}):
+            for action in ("pause", "resume"):
+                r = client.post(f"/_admin/projects/{action}", headers=headers)
+                assert r.status_code == 403, headers
+        r = client.post("/_admin/projects/pause", headers={"X-DMX-Admin": ""})
+        assert r.status_code == 403
+        assert not call(client, "projects", "search", {"query": "prix", "mode": "keyword"}, "sales")[0]  # still open
+    with admin_client(two_worlds, headers={"X-DMX-Admin": ""}) as client:
+        assert client.post("/_admin/projects/pause", headers={"X-DMX-Admin": ""}).status_code == 403
+
+
+def test_a_world_paused_too_long_reopens_by_itself(two_worlds, monkeypatch, caplog):
+    monkeypatch.setattr(central, "MAX_PAUSE_SECONDS", 0.3)
+    caplog.set_level(logging.WARNING)
+    with admin_client(two_worlds) as client:
+        client.post("/_admin/projects/pause")
+        err, text = call(client, "projects", "search", {"query": "prix", "mode": "keyword"}, "sales")
+        assert err and UPDATING in text
+        time.sleep(0.4)
+        err, text = call(client, "projects", "search", {"query": "prix", "mode": "keyword"}, "sales")
+        assert not err and _sees(text) == {"Offre A"}
+    assert "reopened by itself" in caplog.text
+
+
+def test_the_main_app_does_not_serve_the_admin_routes_and_signs_in_first(two_worlds):
+    app = central.build_app(two_worlds, auth=True)
+    with TestClient(app, client=LOOPBACK, headers={"X-DMX-Admin": "1"}) as client:
+        r = client.post("/_admin/projects/pause")
+        assert r.status_code == 401        # NTLM first; and there is no such route behind it
+    open_app = central.build_app(two_worlds, auth=False)
+    with TestClient(open_app, client=LOOPBACK, headers={"X-DMX-Admin": "1"}) as client:
+        assert client.post("/_admin/projects/pause").status_code == 404
+
+
+def test_the_admin_listener_runs_in_the_server_on_loopback_only(two_worlds):
+    import socket
+
+    import httpx
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    app = central.build_app(two_worlds, auth=False, admin_port=port)
+    with TestClient(app):
+        base = f"http://127.0.0.1:{port}"
+        assert httpx.post(f"{base}/_admin/projects/pause").status_code == 403           # no header
+        r = httpx.post(f"{base}/_admin/projects/pause", headers={"X-DMX-Admin": "1"})
+        assert r.status_code == 200 and r.json() == {"paused": True, "running": 0}
+        assert app.state.worlds["projects"].paused
+        r = httpx.post(f"{base}/_admin/projects/resume", headers={"X-DMX-Admin": "1"})
+        assert r.json() == {"paused": False} and not app.state.worlds["projects"].paused
+    with pytest.raises(Exception):
+        httpx.post(f"{base}/_admin/projects/pause", headers={"X-DMX-Admin": "1"})      # stopped with the app
+
+
+def test_the_server_does_not_start_when_the_admin_port_is_taken(two_worlds):
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        s.listen()
+        app = central.build_app(two_worlds, auth=False, admin_port=s.getsockname()[1])
+        with pytest.raises(BaseException) as e:
+            with TestClient(app):
+                pass
+        assert "admin listener" in repr(e.value) or any("admin listener" in str(x) for x in getattr(e.value, "exceptions", []))
+
+
+def test_cli_serve_all_passes_the_admin_port(two_worlds, monkeypatch):
+    import uvicorn
+
+    seen = []
+    monkeypatch.setattr(central, "build_app", lambda path, worlds=None, auth=True, admin_port=None: seen.append(admin_port) or "app")
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: None)
+    cli.main(["--config", str(two_worlds), "serve-all"])
+    write_config(two_worlds.parent, "admin_port = 9000")
+    cli.main(["--config", str(two_worlds), "serve-all"])
+    assert seen == [8766, 9000]
 
 
 def test_admin_unknown_world_is_404(two_worlds):

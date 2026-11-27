@@ -299,21 +299,19 @@ def test_client_state_caller_is_never_trusted():
 
     client = _client(outer, 1111)
     assert client.get("/projects/mcp").status_code == 401
-    assert client.get("/_admin/status").text == "-"
+    assert client.get("/_admin/status").status_code == 401
     assert _handshake(client).text == _me()
 
 
-def test_admin_paths_bypass_ntlm():
+def test_admin_paths_need_a_sign_in_like_any_other():
+    """The admin routes live on their own loopback listener: on the signed-in one /_admin is refused."""
     app = EchoApp()
     client = _client(NtlmAuth(app, CountingMaker()), 1111)
-    r = client.get("/_admin/x")
-    assert r.status_code == 200
-    assert r.text == "-"
-    assert app.calls == 1
-    # only the /_admin/ prefix, not a look-alike
+    assert client.get("/_admin/x").status_code == 401
+    assert client.post("/_admin/projects/pause").status_code == 401
     assert client.get("/_adminx").status_code == 401
     assert client.get("/projects/_admin/x").status_code == 401
-    assert app.calls == 1
+    assert app.calls == 0
 
 
 def test_logs_never_contain_tokens(caplog):
