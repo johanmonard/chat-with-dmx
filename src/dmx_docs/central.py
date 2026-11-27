@@ -8,7 +8,9 @@ Fail closed: a tool call without a signed-in caller is refused ("Not signed in."
 are built with a caller that reads nothing, never with the service account's identity. Only worlds with
 access = "acl" are served.
 
-Logs: one line per tool call with world, tool, caller and duration; never the arguments.
+Logs: one line per tool call with world, tool, caller, duration and outcome; never the arguments. The
+MCP library's own log of a failing tool (its error text and traceback, which can hold a path or words
+asked for) is silenced.
 """
 
 from __future__ import annotations
@@ -61,6 +63,27 @@ NO_RIGHTS = Caller(frozenset(), False, "nobody")
 # The DNS-rebinding check of the MCP transport only accepts Host: localhost; colleagues reach the VM by
 # its name. Every request is signed in by NTLM before it gets here.
 NO_HOST_CHECK = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+
+MCP_SERVER_LOGGER = "mcp.server.mcpserver.server"
+
+
+class _NoToolDetails(logging.Filter):
+    """On the MCP library's server logger: drops its records about a failing tool ("Tool %r failed: %r",
+    "Tool %r raised an unexpected exception" with the traceback), whose text can carry the call's
+    arguments, and strips the traceback from its other records. World.call logs each call's outcome."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if str(record.msg).startswith("Tool "):
+            return False
+        record.exc_info, record.exc_text = None, None
+        return True
+
+
+def quiet_mcp_tool_logs() -> None:
+    logger = logging.getLogger(MCP_SERVER_LOGGER)
+    if not any(isinstance(f, _NoToolDetails) for f in logger.filters):
+        logger.addFilter(_NoToolDetails())
 
 
 class Busy(ToolError):
@@ -169,6 +192,9 @@ class World:
             except Busy:
                 outcome = "busy"
                 raise
+            except Exception as e:  # the type only: the text can hold the arguments
+                outcome = f"error {type(e).__name__}"
+                raise
             if name == "index_status" and self.not_served and isinstance(result, str):
                 result = result + "\n\n" + not_served_text(self.not_served)
             outcome = "ok"
@@ -245,6 +271,7 @@ def build_app(config_path: Path, worlds: list[str] | None = None, auth: bool = T
     sign-in when `auth` (auth=False: tests, which put the caller in the request state themselves).
     Raises ValueError, naming them, when a world does not have access = "acl"."""
     config_path = Path(config_path)
+    quiet_mcp_tool_logs()
     cfgs = [load_config(config_path, world=name) for name in (worlds or world_names(config_path))]
     refused = [cfg.world for cfg in cfgs if cfg.access != "acl"]
     if refused:

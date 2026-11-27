@@ -219,6 +219,32 @@ def test_log_line_has_world_tool_caller_and_no_arguments(two_worlds, caplog):
     assert not any("secretword" in r.getMessage() or "keyword" in r.getMessage() for r in caplog.records)
 
 
+def test_a_failing_call_logs_no_argument_and_answers_as_in_local_mode(two_worlds, caplog):
+    from mcp import Client
+
+    from dmx_docs.server import build_server
+
+    caplog.set_level(logging.DEBUG)   # every logger, the MCP library's too
+    args = {"path": "C:\\secretword\\offre.pdf"}   # outside the indexed folders: the tool raises
+    with client_for(two_worlds) as client:
+        err, text = call(client, "projects", "read_document", args, "sales")
+    assert err
+    for record in caplog.records:
+        assert "secretword" not in record.getMessage(), record.name
+        assert not record.exc_info or "secretword" not in logging.Formatter().formatException(record.exc_info)
+        assert "secretword" not in (record.exc_text or "")
+    lines = [r.getMessage() for r in caplog.records if r.name == "dmx_docs.central"
+             and "read_document" in r.getMessage()]
+    assert len(lines) == 1 and re.match(r"projects read_document DMX\\sales \d+\.\d+ s error \w+$", lines[0])
+
+    async def local():
+        cfg = load_config(two_worlds, world="projects")
+        async with Client(build_server(cfg, SALES_CALLER)) as c:
+            return await c.call_tool("read_document", args)
+
+    assert text == asyncio.run(local()).content[0].text   # the answer is the local server's
+
+
 def test_tool_schemas_are_unchanged_in_central_mode(tmp_path):
     from mcp import Client
 

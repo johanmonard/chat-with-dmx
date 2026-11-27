@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -150,23 +151,33 @@ def load_vocabulary(path: str) -> Vocabulary:
 
 class Knowledge:
     """The cards of one knowledge folder, kept in memory; each call re-reads the files whose
-    modification time changed, so an edited card is served without a restart."""
+    modification time changed, so an edited card is served without a restart. Calls may run in several
+    threads at once (central server): a refresh builds a new dict and replaces the old one in one
+    assignment, so a reader never sees one being changed."""
 
     def __init__(self, root: str | None):
         self.root = root
         self._files: dict[str, tuple[float, Card | None, str | None]] = {}  # name -> (mtime, card, error)
         self._vocab: tuple[float, Vocabulary] = (-1.0, Vocabulary())
+        self._lock = threading.Lock()  # one refresh at a time
 
     @property
     def available(self) -> bool:
         return bool(self.root) and os.path.isdir(self.root)
 
-    def _refresh(self) -> None:
+    def _refresh(self) -> dict[str, tuple[float, Card | None, str | None]]:
+        """The current cards by file name (a dict that is never changed afterwards)."""
+        with self._lock:
+            self._refresh_locked()
+            return self._files
+
+    def _refresh_locked(self) -> None:
         if not self.available:
             self._files = {}
             return
         folder = os.path.join(self.root, "projects")
         seen = {}
+        files = dict(self._files)
         try:
             entries = [e for e in os.scandir(folder) if e.is_file() and e.name.lower().endswith(".md")]
         except OSError:
@@ -174,7 +185,7 @@ class Knowledge:
         for e in entries:
             mtime = e.stat().st_mtime
             seen[e.name] = mtime
-            old = self._files.get(e.name)
+            old = files.get(e.name)
             if old and old[0] == mtime:
                 continue
             try:
@@ -183,9 +194,10 @@ class Knowledge:
                 card, err = None, str(ex)
             except (OSError, UnicodeDecodeError) as ex:
                 card, err = None, f"cannot read the file ({ex})"
-            self._files[e.name] = (mtime, card, err)
-        for name in set(self._files) - set(seen):
-            del self._files[name]
+            files[e.name] = (mtime, card, err)
+        for name in set(files) - set(seen):
+            del files[name]
+        self._files = files
         vpath = os.path.join(self.root, "vocabulary.md")
         try:
             vtime = os.path.getmtime(vpath)
@@ -195,12 +207,12 @@ class Knowledge:
             self._vocab = (vtime, load_vocabulary(vpath) if vtime else Vocabulary())
 
     def cards(self) -> list[Card]:
-        self._refresh()
-        return sorted((c for _, c, _ in self._files.values() if c), key=lambda c: fold(c.project))
+        files = self._refresh()
+        return sorted((c for _, c, _ in files.values() if c), key=lambda c: fold(c.project))
 
     def errors(self) -> dict[str, str]:
-        self._refresh()
-        return {name: err for name, (_, _, err) in sorted(self._files.items()) if err}
+        files = self._refresh()
+        return {name: err for name, (_, _, err) in sorted(files.items()) if err}
 
     @property
     def vocabulary(self) -> Vocabulary:

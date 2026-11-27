@@ -593,20 +593,21 @@ class DocTools:
             row_mask = None
             if mode != "keyword" and self.cfg.embeddings_enabled and self.searcher.vectors.ensure(con):
                 row_mask = self.access.row_mask(self.searcher.vectors, con)
+            expanded: list = []  # this call's thesaurus expansions (the Searcher is shared by every caller)
             hits = self.searcher.search(con, query, limit=limit, folder=folder, file_type=file_type,
                                         modified_after=modified_after, mode=mode,
                                         allowed=self.allows, row_mask=row_mask,
                                         folder_ok=self.access.folder_predicate(), facets=facet_filter, expand=expand,
-                                        pictures_only=bool(pictures), profile=self.cfg.profile)
+                                        pictures_only=bool(pictures), profile=self.cfg.profile, expanded=expanded)
             doc_facets = self._facets(con, {h.doc_id for h in hits})
             ocr_pages = _ocr_text_pages(con, {h.doc_id for h in hits})
             picture_hits = _picture_chunks(con, [h.chunk_id for h in hits])
         finally:
             con.close()
         notes = ["(only passages written from pictures)"] if pictures else []
-        if self.searcher.last_expanded:
+        if expanded:
             notes.append("(keyword search widened with the thesaurus: " + "; ".join(
-                f"{term} → {', '.join(eq[:6])}" for term, eq in self.searcher.last_expanded) + ")")
+                f"{term} → {', '.join(eq[:6])}" for term, eq in expanded) + ")")
         if any(facet_filter.values()):
             notes.append("(filtered by " + ", ".join(f"{k}={v}" for k, v in facet_filter.items() if v)
                          + ": documents whose facet is unknown are not included - search again without "

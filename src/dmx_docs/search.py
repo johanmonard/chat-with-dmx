@@ -399,7 +399,6 @@ class Searcher:
         self.embedder_error: str | None = None
         self._thesaurus = None
         self._thesaurus_mtime = None
-        self.last_expanded: list = []  # expansions used by the last keyword query
 
     def thesaurus(self):
         """The thesaurus file, reloaded when it changes (it is edited by hand)."""
@@ -510,10 +509,12 @@ class Searcher:
             params.append(ts)
         return clauses, params
 
-    def keyword(self, con, query: str, limit: int, clauses, params, expand: bool = False) -> list[int]:
-        self.last_expanded = []
+    def keyword(self, con, query: str, limit: int, clauses, params, expand: bool = False,
+                expanded: list | None = None) -> list[int]:
+        """Chunk ids matching the words. With expand, the thesaurus widens them; the expansions used are
+        appended to `expanded` (the caller's own list: one Searcher answers several people at once)."""
         fts = build_fts_query(query, thesaurus=self.thesaurus() if expand else None,
-                              expanded=self.last_expanded)
+                              expanded=expanded if expanded is not None else [])
         if not fts:
             return []
         where = " AND ".join(["chunks_fts MATCH ?"] + clauses)
@@ -538,7 +539,10 @@ class Searcher:
     def search(self, con, query: str, limit: int = 10, folder: str | None = None,
                file_type: str | None = None, modified_after: str | None = None,
                mode: str = "hybrid", allowed=None, row_mask=None, folder_ok=None, facets: dict | None = None,
-               expand: bool | None = None, pictures_only: bool = False, profile: str = "projects") -> list[Hit]:
+               expand: bool | None = None, pictures_only: bool = False, profile: str = "projects",
+               expanded: list | None = None) -> list[Hit]:
+        """The best passages. `expanded`, when given, receives the thesaurus expansions the keyword
+        part used ((term, equivalents) pairs)."""
         offer_register = profile != "projects" and store.has_table(con, "offers")
         readable = readable_clause(con, folder_ok)  # hidden documents must not take keyword slots
         clauses, params = self._filters(folder, file_type, modified_after, facets, profile, offer_register,
@@ -550,15 +554,15 @@ class Searcher:
             clauses.append(readable)
         ranked: dict[str, list[int]] = {}
         qvec = None
-        self.last_expanded = []
+        used = expanded if expanded is not None else []  # this search's own, never shared
         if mode in ("hybrid", "keyword"):
             ranked["keyword"] = self.keyword(con, query, 100, clauses, params)
             if self.cfg.expand_synonyms if expand is None else expand:
                 # The user's own words keep their ranking; the thesaurus only adds a second,
                 # lower-weighted list (equal-weight synonyms diluted the query in tests).
-                expanded = self.keyword(con, query, 100, clauses, params, expand=True)
-                if self.last_expanded:
-                    ranked["thesaurus"] = expanded
+                widened = self.keyword(con, query, 100, clauses, params, expand=True, expanded=used)
+                if used:
+                    ranked["thesaurus"] = widened
         if mode in ("hybrid", "semantic"):
             ranked["semantic"], qvec = self.semantic(con, query, 2000 if filtered else 100, row_mask)
 
