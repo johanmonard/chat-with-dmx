@@ -6,8 +6,11 @@ import hashlib
 import logging
 import os
 import re
+import threading
 import time
 import unicodedata
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -60,47 +63,74 @@ def _cuda_available(device: str) -> bool:
     return True
 
 
+_models: dict[tuple, object] = {}
+_models_lock = threading.Lock()
+
+
+def shared_model(key: tuple, factory: Callable[[], object]) -> object:
+    """One loaded model per key for the whole process: the worlds of a central server share it."""
+    with _models_lock:
+        if key not in _models:
+            _models[key] = factory()
+        return _models[key]
+
+
+@dataclass
+class _Loaded:
+    model: object
+    fast: bool
+    device: str = "cpu"
+    batch_size: int = 0
+    fallback_reason: str | None = None
+
+
+def _load(cfg: Config) -> _Loaded:
+    model = cfg.embedding_model
+    if model.startswith("hash:"):
+        return _Loaded(HashEmbedder(int(model.split(":", 1)[1] or 256)), fast=False,
+                       batch_size=cfg.embed_batch_size)
+    # Windows without Developer Mode has no symlinks; the HF cache copies files instead.
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+    from fastembed import TextEmbedding
+
+    cfg.models_dir.mkdir(parents=True, exist_ok=True)
+    loaded = _Loaded(None, fast=True, batch_size=cfg.embed_batch_size)
+    if _cuda_available(cfg.embed_device):
+        try:
+            gpu_model = TextEmbedding(model_name=model, cache_dir=str(cfg.models_dir),
+                                      providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+            # onnxruntime may silently fall back to the CPU (missing CUDA DLLs, old driver).
+            session = getattr(getattr(gpu_model, "model", None), "model", None)
+            providers = session.get_providers() if session is not None else ["CUDAExecutionProvider"]
+            if "CUDAExecutionProvider" not in providers:
+                raise RuntimeError(f"onnxruntime fell back to {providers}")
+            # Out-of-memory may only show at the first run: try one full batch of max length.
+            list(gpu_model.embed(["passage: " + "mot " * 600] * cfg.embed_gpu_batch_size,
+                                 batch_size=cfg.embed_gpu_batch_size))
+            loaded.model = gpu_model
+            loaded.device = "cuda"
+            loaded.batch_size = cfg.embed_gpu_batch_size
+        except Exception as e:  # noqa: BLE001 - e.g. a 2 GB vGPU slice cannot hold a 2.2 GB model
+            if cfg.embed_device == "cuda":
+                raise
+            loaded.fallback_reason = f"GPU not usable ({type(e).__name__}: {str(e)[:200]})"
+            log.warning("%s, using the CPU", loaded.fallback_reason)
+    if loaded.model is None:
+        loaded.model = TextEmbedding(model_name=model, cache_dir=str(cfg.models_dir),
+                                     threads=cfg.embed_threads, providers=["CPUExecutionProvider"])
+    return loaded
+
+
 class Embedder:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.device = "cpu"
-        self.batch_size = cfg.embed_batch_size
-        self.fallback_reason: str | None = None
-        model = cfg.embedding_model
-        if model.startswith("hash:"):
-            self._model = HashEmbedder(int(model.split(":", 1)[1] or 256))
-            self._fast = False
-        else:
-            # Windows without Developer Mode has no symlinks; the HF cache copies files instead.
-            os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-            from fastembed import TextEmbedding
-
-            cfg.models_dir.mkdir(parents=True, exist_ok=True)
-            self._model = None
-            if _cuda_available(cfg.embed_device):
-                try:
-                    gpu_model = TextEmbedding(model_name=model, cache_dir=str(cfg.models_dir),
-                                              providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
-                    # onnxruntime may silently fall back to the CPU (missing CUDA DLLs, old driver).
-                    session = getattr(getattr(gpu_model, "model", None), "model", None)
-                    providers = session.get_providers() if session is not None else ["CUDAExecutionProvider"]
-                    if "CUDAExecutionProvider" not in providers:
-                        raise RuntimeError(f"onnxruntime fell back to {providers}")
-                    # Out-of-memory may only show at the first run: try one full batch of max length.
-                    list(gpu_model.embed(["passage: " + "mot " * 600] * cfg.embed_gpu_batch_size,
-                                         batch_size=cfg.embed_gpu_batch_size))
-                    self._model = gpu_model
-                    self.device = "cuda"
-                    self.batch_size = cfg.embed_gpu_batch_size
-                except Exception as e:  # noqa: BLE001 - e.g. a 2 GB vGPU slice cannot hold a 2.2 GB model
-                    if cfg.embed_device == "cuda":
-                        raise
-                    self.fallback_reason = f"GPU not usable ({type(e).__name__}: {str(e)[:200]})"
-                    log.warning("%s, using the CPU", self.fallback_reason)
-            if self._model is None:
-                self._model = TextEmbedding(model_name=model, cache_dir=str(cfg.models_dir),
-                                            threads=cfg.embed_threads, providers=["CPUExecutionProvider"])
-            self._fast = True
+        key = (cfg.embedding_model, cfg.embed_device, str(cfg.models_dir), cfg.embed_threads)
+        loaded = shared_model(key, lambda: _load(cfg))
+        self._model = loaded.model
+        self._fast = loaded.fast
+        self.device = loaded.device
+        self.batch_size = loaded.batch_size
+        self.fallback_reason = loaded.fallback_reason
 
     def _embed(self, texts: list[str]) -> np.ndarray:
         if not self._fast:
