@@ -283,6 +283,40 @@ def test_pull_prints_the_claude_desktop_entry_named_after_the_world(ready):
     assert '"dmx-projects"' in r.stdout and '"dmx-docs"' not in r.stdout
 
 
+def _space(shared, local, free_delta):
+    """DMX_RAG_FREE_BYTES set to (new index + vector cache estimate) + free_delta, margin 0."""
+    need = (shared / "worlds" / "projects" / "index.sqlite3").stat().st_size
+    need += sum(p.stat().st_size for p in (local / "data" / "projects").glob("vec_*.npy"))
+    return {"DMX_RAG_FREE_BYTES": str(need + free_delta), "DMX_RAG_SPACE_MARGIN": "0"}
+
+
+def test_pull_without_room_for_two_copies_removes_the_old_copy_first(ready):
+    shared, local, env = ready
+    old = local / "data" / "projects" / "index.sqlite3"
+    assert old.read_bytes() == b"local" and old.stat().st_size == 5
+    r = run(shared, local, "pull", "-World", "projects", env=dict(env, **_space(shared, local, -3)))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "removed first" in text(r)
+    assert old.read_bytes() == (shared / "worlds" / "projects" / "index.sqlite3").read_bytes()
+
+
+def test_pull_without_room_even_after_removing_the_old_copy_refuses_and_keeps_it(ready):
+    shared, local, env = ready
+    old = local / "data" / "projects" / "index.sqlite3"
+    r = run(shared, local, "pull", "-World", "projects", env=dict(env, **_space(shared, local, -6)))
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "Not enough free space" in text(r) and "left as it was" in text(r)
+    assert old.read_bytes() == b"local"
+    assert not (local / "data" / "projects" / "index.sqlite3.new").exists()
+
+
+def test_pull_with_room_for_two_copies_says_nothing_about_space(ready):
+    shared, local, env = ready
+    r = run(shared, local, "pull", "-World", "projects", env=dict(env, **_space(shared, local, 0)))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "removed first" not in text(r) and "Not enough free space" not in text(r)
+
+
 def test_pull_warns_about_a_register_left_in_the_shared_folder(ready):
     shared, local, env = ready
     first = run(shared, local, "pull", "-World", "projects", env=env)

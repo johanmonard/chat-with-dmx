@@ -195,7 +195,9 @@ def load_config(path: str | os.PathLike, world: str | None = None) -> Config:
         raise ValueError(f"World '{name}': groups are no longer used; write the folders in roots")
 
     roots = idx.get("roots") or []
-    data_dir = Path(idx.get("data_dir", "data"))
+    # DMX_DOCS_DATA_DIR: a machine whose working copies are not where the shared config says (the VM:
+    # its C: is full, its data disk is J:). dmx.ps1 sets it from DMX_RAG_LOCAL for every command it runs.
+    data_dir = Path(os.environ.get("DMX_DOCS_DATA_DIR") or idx.get("data_dir", "data"))
     if not data_dir.is_absolute():
         data_dir = (path.parent / data_dir).resolve()
 

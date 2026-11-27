@@ -17,6 +17,13 @@ SPEC_PAGES = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _no_machine_data_dir(monkeypatch):
+    """A machine that keeps its working copies elsewhere (the VM sets DMX_DOCS_DATA_DIR) must not move
+    the tests' indexes there."""
+    monkeypatch.delenv("DMX_DOCS_DATA_DIR", raising=False)
+
+
 def make_pdf(path, pages):
     doc = pymupdf.open()
     for text in pages:

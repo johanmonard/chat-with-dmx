@@ -57,6 +57,14 @@ def test_world_from_environment(config_file, monkeypatch):
     assert load_config(config_file, world="projects").world == "projects"  # the option wins
 
 
+def test_data_dir_from_environment(config_file, monkeypatch, tmp_path):
+    # The VM keeps its working copies on its data disk, not in the shared config's C:\dmx-rag\data.
+    monkeypatch.setenv("DMX_DOCS_DATA_DIR", str(tmp_path / "J" / "data"))
+    cfg = load_config(config_file, world="marketing")
+    assert cfg.db_path == tmp_path / "J" / "data" / "marketing" / "index.sqlite3"
+    assert cfg.models_dir == tmp_path / "J" / "data" / "models"
+
+
 def test_unknown_world_lists_the_configured_ones(config_file):
     with pytest.raises(ValueError, match="Configured worlds .*: projects, marketing"):
         load_config(config_file, world="documentation")

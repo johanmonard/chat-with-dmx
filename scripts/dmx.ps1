@@ -68,9 +68,12 @@ $SharedTessdata = Join-Path $Shared 'tools\tessdata'
 $Logs = Join-Path $Shared 'logs'
 $Uv = Join-Path $Shared 'tools\uv.exe'
 
-# DMX_RAG_LOCAL: the tests run this script against a temporary folder instead of C:\dmx-rag.
+# DMX_RAG_LOCAL: this machine's folder instead of C:\dmx-rag (the VM: its data disk, a machine-wide
+# environment variable), or a temporary folder in the tests.
 $Local = if ($env:DMX_RAG_LOCAL) { $env:DMX_RAG_LOCAL } else { 'C:\dmx-rag' }
 $LocalData = Join-Path $Local 'data'
+# dmx-docs reads its data_dir from the shared config (C:\dmx-rag\data): elsewhere, tell it where.
+if ($env:DMX_RAG_LOCAL) { $env:DMX_DOCS_DATA_DIR = $LocalData }
 $LocalModels = Join-Path $LocalData 'models'
 $LocalTessdata = Join-Path $Local 'tessdata'
 $LocalConfig = Join-Path $Local 'config.toml'
@@ -412,10 +415,45 @@ function Remove-LocalDb {
     return $true
 }
 
+function Get-FreeBytes([string]$path) {
+    # DMX_RAG_FREE_BYTES: the tests pretend a nearly full disk.
+    if ($env:DMX_RAG_FREE_BYTES) { return [int64]$env:DMX_RAG_FREE_BYTES }
+    ([IO.DriveInfo]::new([IO.Path]::GetPathRoot([IO.Path]::GetFullPath($path)))).AvailableFreeSpace
+}
+
+function Get-SizeOf([object[]]$items) {
+    [int64](($items | Where-Object { $_ } | Measure-Object -Property Length -Sum).Sum)
+}
+
+function Test-RoomForMaster {
+    # Is there room for the new copy next to the old one? If not, is there once the old one is removed?
+    # The vector cache built after the copy is counted at the size of the current one.
+    # Returns 'beside', 'replace' or throws (the local copy is then left as it was).
+    if (-not (Test-Path $Master)) { return 'beside' }
+    $margin = if ($env:DMX_RAG_SPACE_MARGIN) { [int64]$env:DMX_RAG_SPACE_MARGIN } else { 1GB }
+    $vec = Get-SizeOf @(Get-ChildItem $LocalWorld -Filter 'vec_*.npy' -File -ErrorAction SilentlyContinue)
+    $need = (Get-Item $Master).Length + $vec + $margin
+    $free = Get-FreeBytes $LocalWorld
+    if ($free -ge $need) { return 'beside' }
+    $old = Get-SizeOf @(Get-Item $LocalDb, "$LocalDb-wal" -ErrorAction SilentlyContinue)
+    if ($free + $old -ge $need) { return 'replace' }
+    $gb = { param($b) '{0:N1} GB' -f ($b / 1GB) }
+    throw ("Not enough free space on $([IO.Path]::GetPathRoot([IO.Path]::GetFullPath($LocalWorld))) for the '$World' index: " +
+           "$(& $gb $need) needed, $(& $gb $free) free ($(& $gb ($free + $old)) with the old copy removed). " +
+           "The local copy was left as it was.")
+}
+
 function Copy-MasterToLocal {
     # Never copy over the local index in place: a copy interrupted by a reader corrupts it.
     New-Item -ItemType Directory -Force $LocalWorld | Out-Null
     $new = "$LocalDb.new"
+    if ((Test-RoomForMaster) -eq 'replace') {
+        # A small disk (the VM): the old copy goes first, its server stays stopped until the new one is in.
+        Say "Not enough room for two copies of '$World': the old local copy is removed first (its server stops meanwhile)."
+        if (-not (Remove-LocalDb)) {
+            throw "The local '$World' index is in use (Claude Desktop?). Quit Claude Desktop completely and run this again. The current local copy was left as it was."
+        }
+    }
     if (Test-Path $Master) {
         Say "Copying the '$World' index from the shared folder ..."
         Copy-Item $Master $new -Force
@@ -610,7 +648,9 @@ try {
             Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $LocalConfig) + $WorldArgs + @('status')) -AllowFail
             $name = "dmx-$World"   # dmx-projects, dmx-marketing... (the projects entry was called dmx-docs before)
             $serverArgs = @('-m', 'dmx_docs.cli', '--config', $LocalConfig) + $WorldArgs + @('serve')
-            $snippet = @{ mcpServers = @{ $name = @{ command = $Py; args = $serverArgs } } } | ConvertTo-Json -Depth 5
+            $entry = @{ command = $Py; args = $serverArgs }
+            if ($env:DMX_RAG_LOCAL) { $entry.env = @{ DMX_DOCS_DATA_DIR = $LocalData } }   # not in C:\dmx-rag
+            $snippet = @{ mcpServers = @{ $name = $entry } } | ConvertTo-Json -Depth 5
             Say "Claude Desktop configuration for this machine:`n$snippet"
         }
         'status' { Assert-Env; Invoke-Native $Py (@('-m', 'dmx_docs.cli', '--config', $SharedConfig) + $WorldArgs + @('status')) -AllowFail }
