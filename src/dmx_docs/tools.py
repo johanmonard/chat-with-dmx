@@ -133,7 +133,19 @@ def _launch(args=None, path: str | None = None, verb: str = "open") -> None:
         subprocess.Popen(["xdg-open", path])
 
 
+RELAY_REFUSAL = ("A request of a person is being answered: this server never starts a program or writes a file "
+                 "for it. The action belongs to the relay on the person's PC.")
+
+
+def _refuse_on_the_server() -> None:
+    """Defence in depth: a launch or an export file on this machine, while a request caller is set (a
+    central server), is a wiring mistake - the relay does it on the caller's PC."""
+    if CURRENT_CALLER.get() is not None:
+        raise RuntimeError(RELAY_REFUSAL)
+
+
 def _open_file(path: str, ext: str, page: int | None) -> str:
+    _refuse_on_the_server()
     if ext == ".pdf" and page and page > 1:
         app = _default_app(".pdf") or ""
         name = os.path.basename(app).lower()
@@ -861,10 +873,10 @@ class DocTools:
                          "pictures in .docx, PowerPoint and Markdown files, and picture files).")
 
     # -------------------------------------------------------- export_image
-    def export_image(self, path: str, page: int = 1, region: str | None = None,
-                     image: int | None = None, name: str | None = None) -> str:
-        """Save a PDF page/region rendering or a .docx or PowerPoint picture as an image file in the export
-        folder (default C:\\dmx-rag\\exports), e.g. to put it on slides."""
+    def export_image_data(self, path: str, page: int = 1, region: str | None = None,
+                          image: int | None = None) -> tuple[bytes, str, str, str]:
+        """The picture an export would save: (bytes, extension with dot, default file name without
+        extension, what it shows). Checks the access like every tool; writes nothing."""
         self._con().close()  # loads the root/excluded folders that _resolve checks against
         path, key = self._resolve(path)
         fs = store.fs_path(path)
@@ -897,6 +909,15 @@ class DocTools:
         else:
             raise ValueError(f"Images can only be exported from PDF pages, pictures in .docx, "
                              f"PowerPoint and Markdown files, and picture files, not {ext}")
+        return data, out_ext, default, what
+
+    def export_image(self, path: str, page: int = 1, region: str | None = None,
+                     image: int | None = None, name: str | None = None) -> str:
+        """Save a PDF page/region rendering or a .docx or PowerPoint picture as an image file in the export
+        folder (default C:\\dmx-rag\\exports), e.g. to put it on slides."""
+        _refuse_on_the_server()  # before anything is rendered or written
+        data, out_ext, default, what = self.export_image_data(path, page, region, image)
+        path = sources.clean_path(path)
         folder = self.cfg.export_dir or default_export_dir(self.cfg)
         os.makedirs(folder, exist_ok=True)
         base = _safe_name(name) if name else default
@@ -912,8 +933,9 @@ class DocTools:
                 "cannot see this folder, ask the user to add it to the workspace.")
 
     # ------------------------------------------------------- open_document
-    def open_document(self, path: str, page: int | None = None) -> str:
-        """Open a document on this PC in its usual application (for the user, not for Claude)."""
+    def open_document_target(self, path: str, page: int | None = None) -> tuple[str, str, int | None]:
+        """(path, extension, page) of a document that may be opened: the checks of open_document,
+        without launching anything."""
         self._con().close()  # loads the root/excluded folders that _resolve checks against
         path, key = self._resolve(path)
         ext = os.path.splitext(path)[1].lower()
@@ -921,6 +943,12 @@ class DocTools:
             raise ValueError(f"Only {', '.join(TYPE_LABEL)} files can be opened")
         if not self._is_file(path, key):
             raise FileNotFoundError(f"File not reachable now: {path}")
+        return path, ext, page
+
+    def open_document(self, path: str, page: int | None = None) -> str:
+        """Open a document on this PC in its usual application (for the user, not for Claude)."""
+        _refuse_on_the_server()
+        path, ext, page = self.open_document_target(path, page)
         how = _open_file(path, ext, page)
         return f"Opened {path} {how}."
 

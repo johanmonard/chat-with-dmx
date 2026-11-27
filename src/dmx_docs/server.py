@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import sys
 
@@ -19,7 +21,8 @@ except Exception:  # pragma: no cover
 
 from .config import Config
 from .access import Caller
-from .tools import DocTools
+from . import sources
+from .tools import DocTools, _safe_name
 
 WORLD_MAP_LINE = ("Call world_map first when you do not know where a kind of information is kept or whether "
                   "this world holds it at all: it lists what is here, where, and what is missing.")
@@ -254,6 +257,14 @@ export_image - and to answer questions about what pictures show. To find a pictu
 pictures=true. Look at the picture with view_page before quoting a precise value (number, label,
 code) from a description.
 """
+
+
+RELAY_MARKER = "DMX-RELAY "  # a tool result that starts with it is an action for the relay on the person's PC
+
+
+def relay_marker(action: dict) -> str:
+    """One line: the marker and a JSON object (ASCII only, so it never holds a line break)."""
+    return RELAY_MARKER + json.dumps(action, ensure_ascii=True, separators=(", ", ": "))
 
 
 def instructions_for(cfg: Config) -> str:
@@ -495,6 +506,11 @@ def build_server(cfg: Config, caller: Caller | None = None, central: bool = Fals
                 [Image N] marker in the text.
             name: Optional file name (without extension), e.g. "DUOMO_preheneur_SS".
         """
+        if central:  # nothing is written here: the relay on the user's PC saves the picture
+            data, out_ext, default, what = tools.export_image_data(path, page=page, region=region, image=image)
+            return relay_marker({"action": "save", "file": (_safe_name(name) if name else default) + out_ext,
+                                 "what": what, "source": sources.clean_path(path),
+                                 "data": base64.b64encode(data).decode("ascii")})
         return tools.export_image(path, page=page, region=region, image=image, name=name)
 
     @tool(**kw)
@@ -508,6 +524,9 @@ def build_server(cfg: Config, caller: Caller | None = None, central: bool = Fals
             path: Full file path (as shown in search results).
             page: Optional page to open the PDF at.
         """
+        if central:  # nothing is launched here: the relay on the user's PC opens the document
+            target, ext, page = tools.open_document_target(path, page=page)
+            return relay_marker({"action": "open", "path": target, "ext": ext, "page": page})
         return tools.open_document(path, page=page)
 
     @tool(**kw)
