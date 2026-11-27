@@ -172,13 +172,39 @@ with the VM.
 | Windows and server | about 3 GB |
 
 - With compact vectors the total is about 10.5 GB.
-- Measured on 2026-11-27: compact vectors expanded block by block in numpy take 2.6-4 s per search,
-  against 0.26 s for float32. Compact vectors therefore need a library that compares them directly:
-  faiss-cpu (download pending Johan's OK), to be measured first.
-- If that fails, float32 needs about 15.4 GB of the 16 GB, which leaves too little for Windows to keep
-  index pages in memory.
-- If the vectors do not fit, the server opens only the worlds that fit, in the config's order, and names
-  the ones it left out in its log and in `index_status`. My call.
+
+#### Vector search: faiss cluster index (decided 2026-11-27, measured)
+
+Measured on Johan's laptop on 2026-11-27, with the real projects vectors (1,845,025 × 1024), the exact
+float32 search of today as the reference, and 30 queries:
+
+| Method | RAM | Per search | Exact top-50 found |
+|---|---|---|---|
+| Today, float32, all vectors | 7.56 GB | 0.25 s | 100% |
+| numpy, float16 expanded block by block | 3.78 GB | 4.0 s | 100% |
+| faiss, all vectors, fp16 / int8 | 3.78 / 1.89 GB | 2.7-3.5 / 1.7 s | - |
+| **faiss IVF2048 fp16, 64 clusters** | **3.78 GB** | **0.24 s** | **98.5% (min 80%)** |
+| faiss IVF2048 fp16, 128 clusters | 3.78 GB | 0.40 s | 99.4% (min 86%) |
+| faiss IVF2048 int8, 64 clusters | 1.89 GB | 0.21 s | 92.7%, some queries 0% |
+
+How it works and how it is used:
+- **Chosen: `faiss-cpu` with `IndexIVFScalarQuantizer`** (2048 clusters, fp16 codes, inner product),
+  searching the 64 clusters closest to the question.
+- **Speed and size:** same speed as today with half the RAM. It misses about 1.5% of the exact top 50.
+  These are passages close to the question but in a cluster that was not searched.
+- **Building the index:** it is built from the vector cache when the vectors change (139 s on the
+  laptop, longer on the VM), during the pull and before the server reopens the world. It is saved next
+  to the vector cache, one file per vector version.
+- **Per-person filtering:** the filter is passed to faiss as a selection of allowed rows
+  (`IDSelectorBitmap`), so the top 50 are taken among what the caller may read. A half-world filter is
+  faster, not slower.
+- **`similarity()` for given chunks** reads those rows from the float16 cache file on disk. It is not
+  kept in RAM.
+- **Small worlds** (under 200,000 vectors: documentation, marketing, engineering) keep the exact search,
+  which is fast for them. My call.
+- **The cluster count to search** (`nprobe`) is a setting, default 64.
+- **New dependency:** `faiss-cpu` (MIT license, on PyPI, about 15 MB). It is added to pyproject.toml.
+  On Johan's laptop and WS032 nothing changes unless a world crosses 200,000 vectors.
 
 ## What IT has to provide
 
