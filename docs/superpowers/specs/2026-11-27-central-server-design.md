@@ -18,8 +18,8 @@ The central server fixes both. Indexes and text stay on the VM dmx-ws-vm01. Each
 ## Goals
 
 - One server process on the VM serves every world to every colleague at the same time.
-- Each request is answered as the person who asked. Identity is proven by their Windows login (Kerberos,
-  or NTLM as a fallback), never by a name the PC states.
+- Each request is answered as the person who asked. Identity is proven by their Windows login (NTLM: IT
+  ruled out Kerberos on 2026-11-27), never by a name the PC states.
 - Fast answers: a search on the VM about as fast as on Johan's laptop today, about 1-2 s.
 - Fits the VM: 16 GB RAM (IT target; 8 GB today) and 50 GB on Z: (J:) for the working copies.
 - The tools, their names and the skill (dmx-research) stay the same. Each world keeps its own connector
@@ -76,8 +76,13 @@ with the VM.
 - **One embedding model in memory**, shared by every world. Today each world process loads its own
   (2.2 GB each).
 - **One set of vectors and one search engine per world**, shared by all callers.
-- **Per-request identity.** The HTTP layer runs the Windows Negotiate handshake: SSPI through pywin32,
-  already a dependency. From the security context it gets the caller's token. A `Caller` is built from
+- **Per-request identity.** The HTTP layer runs the Windows NTLM handshake.
+  - Server side: SSPI through pywin32, which is already a dependency.
+  - The server offers only `WWW-Authenticate: NTLM`, so the client never tries Kerberos. Without an SPN,
+    a Kerberos attempt would fail.
+  - The domain controller checks the login (pass-through). The VM then gets the user's token, with
+    their AD groups.
+  - From the security context it gets the caller's token. A `Caller` is built from
   that token exactly as `Caller.from_token` builds one from the process token:
   - the token's own groups, which include nested AD groups;
   - `usable_sids`;
@@ -147,8 +152,8 @@ with the VM.
   - The connector names stay the same as today, so the skill still works.
 - **The relay** is a PowerShell 5.1 script started by Claude Desktop, with no Python.
   - It reads MCP messages from Claude Desktop on its input.
-  - It posts each one to `http(s)://dmx-ws-vm01:<port>/<world>/mcp` with the Windows login
-    (`-UseDefaultCredentials`: Kerberos, NTLM as fallback).
+  - It posts each one to `http(s)://dmx-ws-vm01:<port>/<world>/mcp` with the Windows login, forced to
+    NTLM: a credential cache entry of type "NTLM" with the default network credentials.
   - It writes the reply back. It keeps the session id the server returns.
 - **Failures** come back as an MCP error with a short plain message, never as silence:
   - VM unreachable;
@@ -170,32 +175,33 @@ with the VM.
 - Measured on 2026-11-27: compact vectors expanded block by block in numpy take 2.6-4 s per search,
   against 0.26 s for float32. Compact vectors therefore need a library that compares them directly:
   faiss-cpu (download pending Johan's OK), to be measured first.
-- If that fails, float32 needs about 24 GB of RAM.
-- Until the RAM arrives (8 GB today), the server opens only the worlds that fit, in the config's order,
-  and names the ones it left out in its log and in `index_status`. My call.
+- If that fails, float32 needs about 15.4 GB of the 16 GB, which leaves too little for Windows to keep
+  index pages in memory.
+- If the vectors do not fit, the server opens only the worlds that fit, in the config's order, and names
+  the ones it left out in its log and in `index_status`. My call.
 
 ## What IT has to provide
 
-1. **16 GB of RAM** on dmx-ws-vm01.
-2. **An SPN for the service URL**: `setspn -S HTTP/dmx-ws-vm01.rotzingerag.local ROTZINGERAG\dmx.datahub`,
-   plus the short name. **This is a launch prerequisite.**
-   - Without it, a client asks for a ticket for the VM's computer account. The service, running as
-     dmx.datahub, cannot read that ticket, so sign-in fails instead of falling back to NTLM.
-   - The service must run as dmx.datahub, not as the computer, because `view_page` and `read_document`
-     open the original files on the file server.
-   - The plan includes a check command that tells "no SPN" apart from other sign-in failures.
+1. **16 GB of RAM** on dmx-ws-vm01: done (2026-11-27).
+2. **No Kerberos and no SPN**: IT ruled them out. Sign-in uses NTLM.
+   - NTLM must not be blocked on the VM (GPO "Restrict NTLM: incoming traffic"). The first build step
+     checks this with a five-minute test on the VM.
+   - The service runs as dmx.datahub, because `view_page` and `read_document` open the original files on
+     the file server.
 3. **The firewall port** of the service open on the VM to the company network.
-4. **A certificate for HTTPS**, or written acceptance of HTTP on the LAN.
+4. **A certificate for HTTPS**, or written acceptance of HTTP on the LAN. With NTLM, HTTPS matters more:
+   over plain HTTP, the answers cross the network unencrypted, and an NTLM login can be relayed by
+   someone on the network.
 5. **Deployment of the extensions**, or permission for colleagues to install them themselves.
 
 ## Left to the builder
 
 - **HTTP stack.** The MCP SDK's streamable HTTP app mounted per world in one Starlette/uvicorn app
-  (uvicorn is already a dependency), and how the Negotiate handshake is wired in as middleware.
+  (uvicorn is already a dependency), and how the NTLM handshake is wired in as middleware.
 - **Making the caller per request**: for example a context variable read by `DocTools`, or one light
   `DocTools` per caller around shared search engines.
 - **Caller cache lifetime.** Default 5 minutes.
 - **Pause and reopen protocol details**, and the matching change in `dmx.ps1 pull`.
 - **Relay details**: encoding (UTF-8 both ways in PowerShell 5.1) and timeouts.
-- **Tests.** The server half with a fake caller; the Negotiate layer against the machine's own login;
+- **Tests.** The server half with a fake caller; the NTLM layer against the machine's own login;
   the relay against a local test server, as test_dmx_ps1 does.
