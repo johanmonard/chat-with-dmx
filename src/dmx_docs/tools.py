@@ -12,6 +12,8 @@ import sys
 import threading
 import time
 import urllib.request
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 
 from . import facets, knowledge, machines, offer_tools, onenote, register, sources, store, verified, worldmap
@@ -37,6 +39,10 @@ SIM_STRONG = 0.86
 SIM_MEDIUM = 0.83
 
 LISTED_CALLERS = 256  # offers world: callers whose "To verify" list is remembered
+
+# Central server: (DocTools, Access) of the tool call being answered, set by DocTools.as_caller so that
+# a call takes its caller's Access from the pool once, not on every check it makes.
+_CALL_ACCESS: ContextVar[tuple | None] = ContextVar("dmx_docs_call_access", default=None)
 
 
 _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
@@ -372,7 +378,7 @@ class DocTools:
         else:
             store_ = AccessStore(cfg.access_path)
             self._local_access = Access(store_, caller or Caller.from_token(cfg.access_admins))
-            self._pool = AccessPool(store_)
+            self._pool = AccessPool(store_, cache_seconds=cfg.central_caller_cache_seconds)
         self.searcher = Searcher(cfg)
         # world_map's live part, cached: (time, token of the readable folders it was counted for, overview)
         self._overview: tuple[float, object, worldmap.Overview] | None = None
@@ -386,10 +392,26 @@ class DocTools:
     def access(self) -> Access | Unrestricted:
         """What the caller of this request may read: the request's caller (CURRENT_CALLER) when one
         is set, else the fixed caller of a local server."""
+        pinned = _CALL_ACCESS.get()
+        if pinned is not None and pinned[0] is self:
+            return pinned[1]
         caller = CURRENT_CALLER.get()
         if caller is None or self._pool is None:
             return self._local_access
         return self._pool.for_caller(caller)
+
+    @contextmanager
+    def as_caller(self, caller: Caller):
+        """Answer one tool call of `caller` (central server): CURRENT_CALLER is set to it and its Access
+        is taken from the pool once for the whole call. Both are reset afterwards."""
+        access = self._local_access if self._pool is None else self._pool.for_caller(caller)
+        caller_token = CURRENT_CALLER.set(caller)
+        access_token = _CALL_ACCESS.set((self, access))
+        try:
+            yield
+        finally:
+            _CALL_ACCESS.reset(access_token)
+            CURRENT_CALLER.reset(caller_token)
 
     def allows(self, key: str) -> bool:
         """Is the document (or folder) with this path key inside the world and readable by the caller?"""

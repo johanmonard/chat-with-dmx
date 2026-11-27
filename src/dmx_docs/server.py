@@ -272,15 +272,26 @@ def instructions_for(cfg: Config) -> str:
     return base + "\n" + PICTURES_NOTE
 
 
-def build_server(cfg: Config, caller: Caller | None = None) -> MCPServer:
-    tools = DocTools(cfg, caller)
-    if cfg.access == "acl":  # to stderr through logging: stdout carries the MCP protocol
+def build_server(cfg: Config, caller: Caller | None = None, central: bool = False, *,
+                 world=None) -> MCPServer:
+    """The world's MCP server. Local (stdio): every call answered as `caller` (None: the process's
+    identity). central=True (serve-all): every call answered as the caller of its HTTP request, in the
+    shared worker pool; `world` is the central.World holding this world's tools (made here when None)."""
+    if central:
+        from .central import World
+        world = world or World(cfg)
+        tools = world.tools
+    else:
+        tools = DocTools(cfg, caller)
+    if cfg.access == "acl" and not central:  # to stderr through logging: stdout carries the MCP protocol
         who = tools.access.caller
         logging.getLogger("dmx_docs.server").info(
             "World %s: access per person, caller %s, admin %s", cfg.world or "?", who.label or "?",
             "yes" if who.admin else "no")
     mcp = MCPServer(cfg.server_name, instructions=instructions_for(cfg))
     kw = {"annotations": READ_ONLY} if READ_ONLY is not None else {}
+    # Registers a tool; in central mode each tool function is wrapped once (request caller, worker pool).
+    tool = mcp.tool if not central else world.registrar(mcp)
 
     def search(query: str, folder: str | None = None, file_type: str | None = None,
                modified_after: str | None = None, limit: int = 10, mode: str = "hybrid",
@@ -396,7 +407,7 @@ def build_server(cfg: Config, caller: Caller | None = None) -> MCPServer:
                              client=client, country=country, year_from=year_from, year_to=year_to,
                              status=status, text=text, limit=limit)
 
-    @mcp.tool(**kw)
+    @tool(**kw)
     def find_files(name: str, folder: str | None = None, limit: int = 30) -> str:
         """Find indexed documents whose file name or folder path contains all the given words
         (e.g. a project number, client, machine type or document title). Prefix matching per word.
@@ -408,7 +419,7 @@ def build_server(cfg: Config, caller: Caller | None = None) -> MCPServer:
         """
         return tools.find_files(name, folder=folder, limit=limit)
 
-    @mcp.tool(**kw)
+    @tool(**kw)
     def list_folder(path: str | None = None, limit: int = 200) -> str:
         """List the subfolders and files of a folder (with size, date and whether each file is indexed).
         Without a path, lists the indexed root folders.
@@ -419,7 +430,7 @@ def build_server(cfg: Config, caller: Caller | None = None) -> MCPServer:
         """
         return tools.list_folder(path, limit=limit)
 
-    @mcp.tool(**kw)
+    @tool(**kw)
     def read_document(path: str, start_page: int = 1, end_page: int | None = None) -> str:
         """Read the full text of a document, page by page. Long documents are returned in parts;
         the answer says which start_page to use to continue. For Word files, page numbers are
@@ -432,7 +443,7 @@ def build_server(cfg: Config, caller: Caller | None = None) -> MCPServer:
         """
         return tools.read_document(path, start_page=start_page, end_page=end_page)
 
-    @mcp.tool(**kw)
+    @tool(**kw)
     def find_in_document(path: str, text: str, max_hits: int = 20) -> str:
         """Find every occurrence of a word or phrase inside one document (ignores case and accents),
         with the page number and surrounding text.
@@ -444,7 +455,7 @@ def build_server(cfg: Config, caller: Caller | None = None) -> MCPServer:
         """
         return tools.find_in_document(path, text, max_hits=max_hits)
 
-    @mcp.tool(**kw)
+    @tool(**kw)
     def view_page(path: str, page: int = 1, region: str | None = None,
                   image: int | None = None) -> list[str | Image]:
         """Look at a document as an image: a PDF page as it is printed (drawings, schematics,
@@ -466,7 +477,7 @@ def build_server(cfg: Config, caller: Caller | None = None) -> MCPServer:
         caption, data, fmt = tools.view_page(path, page=page, region=region, image=image)
         return [caption, Image(data=data, format=fmt)]
 
-    @mcp.tool(**kw)
+    @tool(**kw)
     def export_image(path: str, page: int = 1, region: str | None = None, image: int | None = None,
                      name: str | None = None) -> str:
         """Save a picture from a document as an image FILE on the user's PC, to use it elsewhere
@@ -486,7 +497,7 @@ def build_server(cfg: Config, caller: Caller | None = None) -> MCPServer:
         """
         return tools.export_image(path, page=page, region=region, image=image, name=name)
 
-    @mcp.tool(**kw)
+    @tool(**kw)
     def open_document(path: str, page: int | None = None) -> str:
         """Open a document on the user's PC in its usual application (Acrobat, Edge, Word...),
         at the given page when the PDF viewer supports it; Word files open read-only.
@@ -499,14 +510,14 @@ def build_server(cfg: Config, caller: Caller | None = None) -> MCPServer:
         """
         return tools.open_document(path, page=page)
 
-    @mcp.tool(**kw)
+    @tool(**kw)
     def world_map() -> str:
         """What this world holds and where: the kinds of documents and the folders or filters that reach
         them, what is NOT here and where to look instead (hand-written map), then live counts and the
         folder tree from the index. Call it before routing a question you are unsure about."""
         return tools.world_map()
 
-    @mcp.tool(**kw)
+    @tool(**kw)
     def index_status() -> str:
         """Show what is indexed: number of documents per status and type, embeddings coverage,
         root folders and last indexing date."""
@@ -812,26 +823,26 @@ def build_server(cfg: Config, caller: Caller | None = None) -> MCPServer:
 
     # Tools that depend on the world's profile.
     if cfg.profile == "projects":
-        mcp.tool(**kw)(search)
-        mcp.tool(**kw)(list_projects)
-        mcp.tool(**kw)(project_card)
-        mcp.tool(**kw)(catalog)
+        tool(**kw)(search)
+        tool(**kw)(list_projects)
+        tool(**kw)(project_card)
+        tool(**kw)(catalog)
     elif cfg.profile == "marketing":
-        mcp.tool(name="search", **kw)(marketing_search)
+        tool(name="search", **kw)(marketing_search)
     elif cfg.profile == "documentation":
-        mcp.tool(name="search", **kw)(documentation_search)
+        tool(name="search", **kw)(documentation_search)
     elif cfg.profile == "offers":
-        mcp.tool(name="search", **kw)(offers_search)
-        mcp.tool(**kw)(list_offers)
-        mcp.tool(**kw)(offer_card)
-        mcp.tool(**kw)(offer_lines)
-        mcp.tool(**kw)(offer_stats)
-        mcp.tool(**kw)(offer_health)
-        mcp.tool()(offer_verify)  # writes into the shared folder: not read-only
+        tool(name="search", **kw)(offers_search)
+        tool(**kw)(list_offers)
+        tool(**kw)(offer_card)
+        tool(**kw)(offer_lines)
+        tool(**kw)(offer_stats)
+        tool(**kw)(offer_health)
+        tool()(offer_verify)  # writes into the shared folder: not read-only
     elif cfg.profile == "engineering":
-        mcp.tool(name="search", **kw)(engineering_search)
+        tool(name="search", **kw)(engineering_search)
     else:
-        mcp.tool(name="search", **kw)(plain_search)
+        tool(name="search", **kw)(plain_search)
 
     return mcp
 

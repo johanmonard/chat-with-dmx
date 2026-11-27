@@ -86,6 +86,13 @@ class Config:
     access: str = "world"
     access_admins: list[str] = field(default_factory=list)   # accounts that see every document
     access_domain_sid: str | None = None                      # AD domain SID prefix (else the running account's)
+    # The central server (serve-all, central.py): one HTTP process for every world. [central] in config.toml.
+    central_port: int = 8765
+    central_workers: int = 4                  # tool calls running at once, all worlds together
+    central_busy_seconds: float = 30          # a call waiting longer for a worker gets "busy"
+    central_caller_cache_seconds: float = 300  # signed-in callers and their per-world Access kept this long
+    central_certfile: str | None = None       # HTTPS when both are set (relative: next to config.toml)
+    central_keyfile: str | None = None
 
     def __post_init__(self) -> None:
         self.extensions = [e.lower() if e.startswith(".") else "." + e.lower() for e in self.extensions]
@@ -296,4 +303,14 @@ def load_config(path: str | os.PathLike, world: str | None = None) -> Config:
         if w["access"] not in ("world", "acl"):
             raise ValueError(f"World '{name}': unknown access '{w['access']}' (use \"world\" or \"acl\")")
         kwargs["access"] = w["access"]
+    cen = raw.get("central", {})
+    for key, attr, kind in (("port", "central_port", int), ("workers", "central_workers", int),
+                            ("busy_seconds", "central_busy_seconds", float),
+                            ("caller_cache_seconds", "central_caller_cache_seconds", float)):
+        if key in cen:
+            kwargs[attr] = kind(cen[key])
+    for key in ("certfile", "keyfile"):
+        if cen.get(key):
+            cp = Path(os.path.expandvars(str(cen[key])))
+            kwargs[f"central_{key}"] = str(cp if cp.is_absolute() else path.parent / cp)
     return Config(**kwargs)

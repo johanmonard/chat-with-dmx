@@ -1,4 +1,4 @@
-"""Command line: dmx-docs web | index | ocr | describe | embed | offers | verify-seed | status | search | read | serve | acl-survey | permissions."""
+"""Command line: dmx-docs web | index | ocr | describe | embed | offers | verify-seed | status | search | read | serve | serve-all | acl-survey | permissions."""
 
 from __future__ import annotations
 
@@ -51,6 +51,35 @@ def _caller(args, cfg, parser):
         return Caller.from_groups([g.strip() for g in groups.split(",") if g.strip()])
     except ValueError as e:
         parser.error(str(e))
+
+
+def _serve_all(args, config_path: Path, parser) -> None:
+    """The central server: uvicorn, HTTPS when [central] certfile and keyfile are set."""
+    import uvicorn
+
+    from . import central
+    worlds = [w.strip() for w in args.worlds.split(",") if w.strip()] if args.worlds else None
+    try:
+        cfg = load_config(config_path, world=(worlds or central.world_names(config_path))[0])
+    except ValueError as e:
+        parser.error(str(e))
+    if bool(cfg.central_certfile) != bool(cfg.central_keyfile):
+        parser.error("[central] HTTPS needs both certfile and keyfile.")
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+                        format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    try:
+        app = central.build_app(config_path, worlds, auth=True)
+    except ValueError as e:
+        print(f"serve-all not started: {e}", file=sys.stderr)
+        sys.exit(2)
+    ssl = {}
+    if cfg.central_certfile:
+        ssl = {"ssl_certfile": cfg.central_certfile, "ssl_keyfile": cfg.central_keyfile}
+    else:
+        logging.getLogger("dmx_docs.central").warning(central.HTTP_WARNING)
+    # proxy_headers=False: the client address is the TCP peer's, never one read from X-Forwarded-For
+    # (the NTLM handshake is bound to it).
+    uvicorn.run(app, host=args.host, port=args.port or cfg.central_port, proxy_headers=False, **ssl)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -127,6 +156,11 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("serve", help="run the MCP server (stdio) for Claude Desktop / Claude Code")
     _as_groups(p)
+    p = sub.add_parser("serve-all", help="run the central server: every world over HTTP at /<world>/mcp, "
+                                         "each person signed in by NTLM and answered with their own rights")
+    p.add_argument("--host", default="0.0.0.0", help="network interface (default: all)")
+    p.add_argument("--port", type=int, default=None, help="default: [central] port, else 8765")
+    p.add_argument("--worlds", default=None, metavar="A,B", help="worlds to serve (default: every world)")
     p = sub.add_parser("acl-survey", help="read-only: which accounts and groups can read the indexed folders "
                                           "(one report per world, changes nothing)")
     p.add_argument("--out", default=None, help="report folder (default: <world folder>/acl-survey)")
@@ -144,6 +178,9 @@ def main(argv: list[str] | None = None) -> None:
     if not config_path.exists():
         parser.error(f"config file not found: {config_path.resolve()} "
                      "(copy config.example.toml to config.toml and edit it)")
+    if args.command == "serve-all":  # every world: no --world
+        _serve_all(args, config_path, parser)
+        return
     try:
         cfg = load_config(config_path, world=args.world)
     except ValueError as e:
