@@ -36,9 +36,9 @@
     },
     "allowed_hosts": {
       "type": "string",
-      "title": "Allowed file servers",
-      "description": "Optional, comma-separated names of the file servers documents may be opened from (empty = any). Set by IT.",
-      "default": "",
+      "title": "File servers documents may be opened from",
+      "description": "Comma-separated names of the file servers the relay may open documents from. Enter each server name exactly as it appears in the document paths (\\NAME\\share). A server that is not listed is refused; an empty list refuses every network path.",
+      "default": "DMX-FS01,DMX-FS01.rotzingerag.local",
       "required": false
     }
   }

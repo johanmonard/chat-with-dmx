@@ -349,14 +349,50 @@ def test_open_marker_refuses_a_program(tmp_path):
     assert r["isError"] is True and "cannot be opened" in r["content"][0]["text"]
 
 
-def test_open_marker_unc_host_allowlist(tmp_path):
-    """A UNC path of a host that is not allowed is refused before any file check; an allowed host's
-    reaches the existence check (no such server exists here)."""
+UNC_REFUSED = "the server host is not allowed"
+
+
+def test_unc_allowlist_is_exact_and_refuses_before_any_lookup(tmp_path):
     unc = "\\\\fileserver.example\\share\\A\\Offre.pdf"
-    out, rec = run_open(tmp_path, open_payload(unc, ".pdf", 1), "-AllowedHosts", "other1, other2")
-    assert "host is not allowed" in first_text(out)
-    out, rec = run_open(tmp_path, open_payload(unc, ".pdf", 1), "-AllowedHosts", "FILESERVER.example")
-    assert "host is not allowed" not in first_text(out) and not rec.exists()
+    for hosts in ("other1, other2", "fileserver", "example", "server.example"):  # no exact match
+        out, rec = run_open(tmp_path, open_payload(unc, ".pdf", 1), "-AllowedHosts", hosts)
+        assert UNC_REFUSED in first_text(out) and not rec.exists()
+
+
+@pytest.mark.parametrize("hosts", ["", "${user_config.allowed_hosts}"])
+def test_an_empty_or_unsubstituted_allowlist_refuses_every_unc_path(tmp_path, hosts):
+    out, rec = run_open(tmp_path, open_payload("\\\\DMX-FS01\\share\\a.pdf", ".pdf", 1), "-AllowedHosts", hosts)
+    assert UNC_REFUSED in first_text(out) and not rec.exists()
+
+
+def test_an_empty_allowlist_still_opens_a_drive_path(tmp_path):
+    f = make_doc(tmp_path)
+    out, rec = run_open(tmp_path, open_payload(f, ".pdf", 1), "-AllowedHosts", "")
+    assert first_text(out) == f"Opened {f} ."
+    assert rec.read_text(encoding="utf-8").splitlines() == [str(f)]
+
+
+@pytest.mark.parametrize("unc", [
+    "\\\\?\\UNC\\DMX-FS01\\share\\a.pdf",
+    "\\\\.\\C$\\a.pdf",
+    "\\\\DMX-FS01@SSL\\share\\a.pdf",
+    "\\\\DMX-FS01@8080\\share\\a.pdf",
+    "\\\\DMX_FS01\\share\\a.pdf",
+])
+def test_unusual_unc_hosts_are_refused_even_when_listed(tmp_path, unc):
+    out, rec = run_open(tmp_path, open_payload(unc, ".pdf", 1), "-AllowedHosts", "DMX-FS01,?,.,DMX-FS01@SSL,DMX_FS01")
+    text = first_text(out)
+    assert UNC_REFUSED in text or "unsafe characters" in text
+    assert "was not found" not in text and not rec.exists()
+
+
+def test_the_manifest_default_allows_the_file_server(tmp_path):
+    m = json.loads((ROOT / "relay" / "manifest.template.json").read_text(encoding="utf-8"))
+    d = m["user_config"]["allowed_hosts"]["default"]
+    assert d == "DMX-FS01,DMX-FS01.rotzingerag.local"
+    # the host passes to the existence check (the name does not resolve here: "not found", no program)
+    out, rec = run_open(tmp_path, open_payload("\\\\dmx-fs01.\\share\\a.pdf", ".pdf", 1), "-AllowedHosts", d)
+    assert UNC_REFUSED not in first_text(out) and not rec.exists()
 
 
 def test_whoami_prints_the_answer(stub):

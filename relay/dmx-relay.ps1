@@ -6,7 +6,7 @@ param(
     [string]$Url,
     [string]$ExportDir = 'C:\dmx-rag\exports',
     [string]$OpenWith = '',
-    [string]$AllowedHosts = $env:DMX_ALLOWED_HOSTS,   # UNC hosts a document may be opened from (empty = any)
+    [string]$AllowedHosts = $env:DMX_ALLOWED_HOSTS,   # UNC hosts a document may be opened from (empty = none)
     [switch]$WhoAmI
 )
 
@@ -179,9 +179,15 @@ function Assert-OpenablePath([string]$path) {
         if ($path.IndexOf(':', 2) -ge 0) { throw ($refuse + ': unsafe characters in its path.') }
     } elseif ($path -match '^\\\\([^\\/:]+)\\') {
         if ($path.IndexOf(':') -ge 0) { throw ($refuse + ': unsafe characters in its path.') }
-        $hostName = $Matches[1]
-        $allowed = @($AllowedHosts -split '[,;\s]+' | Where-Object { $_ })
-        if ($allowed.Count -gt 0 -and -not ($allowed | Where-Object { $_ -ieq $hostName })) {
+        # Fail closed: only a plain DNS-style host name that is exactly in the list; an empty list (or the
+        # manifest placeholder that was never substituted) refuses every network path. No lookup is made
+        # before this check passes.
+        $hostName = $Matches[1].TrimEnd('.')
+        $list = $AllowedHosts
+        if ($list -like '*${user_config.*') { $list = '' }
+        $allowed = @($list -split '[,;\s]+' | ForEach-Object { $_.TrimEnd('.') } | Where-Object { $_ })
+        if ($hostName -notmatch '^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$' -or
+            -not ($allowed | Where-Object { $_ -ieq $hostName })) {
             throw ($refuse + ': the server host is not allowed.')
         }
     } else {
